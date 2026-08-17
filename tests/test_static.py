@@ -399,3 +399,66 @@ def test_a_function_passed_by_name_is_reached(project):
     '''})
     assert static.inputs_for_artifact(g.iv, "processed/totals.parquet") == \
         {"raw/box/{season}.parquet": "data"}
+
+
+def test_a_steps_inputs_follow_calls_into_other_modules(project):
+    """A real pipeline reads through its own library. wvorp's stages call
+    `wvorp.data.load`, so a walk that stopped at the file boundary would report them as
+    having no inputs and every artifact would be permanently stale."""
+    from invalidator import static
+    g = make(project, {
+        "stages/lib.py": '''
+            from mypipe import iv
+
+            def load_panel():
+                return iv.reads("processed/panel.parquet", why="read via the library")
+        ''',
+        "stages/use.py": '''
+            from mypipe import iv
+            from stages.lib import load_panel
+
+            @iv.step("processed/out.parquet", why="uses the library", terminal=True)
+            def build(out):
+                load_panel()
+        ''',
+    })
+    assert static.inputs_for_artifact(g.iv, "processed/out.parquet") == \
+        {"processed/panel.parquet": "data"}
+
+
+def test_a_module_attribute_call_is_followed_too(project):
+    """`from x import y` then `y.load(...)` records the ATTRIBUTE name, so the module
+    itself has to be tried as a target as well as the bare name."""
+    from invalidator import static
+    g = make(project, {
+        "stages/lib.py": '''
+            from mypipe import iv
+
+            def load(name):
+                return iv.reads("processed/panel.parquet", why="read via the library")
+        ''',
+        "stages/use.py": '''
+            from mypipe import iv
+            from stages import lib
+
+            @iv.step("processed/out.parquet", why="uses the library", terminal=True)
+            def build(out):
+                lib.load("player_box")
+        ''',
+    })
+    assert static.inputs_for_artifact(g.iv, "processed/out.parquet") == \
+        {"processed/panel.parquet": "data"}
+
+
+def test_reads_inside_a_dependency_are_not_ours_to_declare(project):
+    """Only modules inside the scanned source dirs are followed."""
+    from invalidator import static
+    g = make(project, {"stages/use.py": '''
+        from mypipe import iv
+        import polars as pl
+
+        @iv.step("processed/out.parquet", why="reads nothing of ours", terminal=True)
+        def build(out):
+            pl.read_parquet("/somewhere/else.parquet")
+    '''})
+    assert static.inputs_for_artifact(g.iv, "processed/out.parquet") == {}

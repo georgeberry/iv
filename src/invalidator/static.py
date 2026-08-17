@@ -97,26 +97,27 @@ class Stage:
     against a real trace is what catches those.
     """
     node: str
+    module: str = ""                            # dotted name, for cross-file resolution
     sites: tuple[Site, ...] = ()
     guards: tuple[str, ...] = ()                # artifacts named in a build_if_needed(...)
-    calls: tuple[tuple[str, tuple[str, ...]], ...] = ()     # fn -> same-file fns it calls
+    calls: tuple[tuple[str, tuple[str, ...]], ...] = ()     # fn -> names it calls
+    defines: tuple[str, ...] = ()               # functions defined in this file
+    imports: tuple[tuple[str, str, str], ...] = ()          # local name -> (module, attr)
 
     def _of(self, *kinds: str) -> tuple[Site, ...]:
         return tuple(s for s in self.sites if s.kind in kinds)
 
-    def reachable(self, fn: str) -> set[str]:
-        """`fn` and every same-file function it can reach."""
-        calls, seen, stack = dict(self.calls), {fn}, [fn]
-        while stack:
-            for c in calls.get(stack.pop(), ()):
-                if c not in seen:
-                    seen.add(c)
-                    stack.append(c)
-        return seen
+    def called_by(self, fn: str) -> tuple[str, ...]:
+        return dict(self.calls).get(fn, ())
 
     def inputs_of(self, owner: str) -> tuple[Site, ...]:
-        """The inputs belonging to one step, following its helpers."""
-        scope = self.reachable(owner)
+        """Deprecated in favour of the project-wide walk; kept for one-file cases."""
+        scope, calls, stack = {owner}, dict(self.calls), [owner]
+        while stack:
+            for c in calls.get(stack.pop(), ()):
+                if c not in scope:
+                    scope.add(c)
+                    stack.append(c)
         return tuple(s for s in self.inputs() if s.owner in scope)
 
     def inputs(self) -> tuple[Site, ...]:
@@ -262,7 +263,8 @@ class _Visitor(ast.NodeVisitor):
         self._seen: set[int] = set()            # step calls already handled as decorators
         self._owner = ""                        # the function currently being walked
         self._defined: set[str] = set()         # every function defined in this file
-        self.calls: dict[str, set[str]] = {}    # caller -> same-file callees
+        self.calls: dict[str, set[str]] = {}    # caller -> callee names
+        self.imports: dict[str, tuple[str, str]] = {}   # local name -> (module, attr)
 
     # A `@iv.step(...)` decorator is handled here rather than in visit_Call, because only
     # from the FunctionDef can we see the body it guards and hash it.
@@ -302,6 +304,23 @@ class _Visitor(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
+    # Imports are recorded so a call into another module of the same project can be
+    # followed. A real pipeline reads through its own library — wvorp's stages call
+    # `wvorp.data.load` — and a scan that stopped at the file boundary would report every
+    # one of them as having no inputs at all.
+    def visit_Import(self, node: ast.Import) -> None:
+        for a in node.names:
+            #  `import wvorp.data`        -> "wvorp" is what gets used, but the module we
+            #  `import wvorp.data as d`   -> want is the full dotted name either way.
+            self.imports[a.asname or a.name.split(".")[0]] = (a.name, "")
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module and not node.level:      # absolute imports only
+            for a in node.names:
+                self.imports[a.asname or a.name] = (node.module, a.name)
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:
         if id(node) not in self._seen:
             name = _method_name(node.func)
@@ -315,6 +334,13 @@ class _Visitor(ast.NodeVisitor):
                 # A plain call to something this file might define. Resolved after the
                 # walk, since a helper may be defined below its caller.
                 self.calls.setdefault(self._owner, set()).add(node.func.id)
+            elif isinstance(node.func, ast.Attribute) and \
+                    isinstance(node.func.value, ast.Name):
+                # `lib.load(...)` — recorded dotted and split when resolving, because the
+                # module and the function are in different halves of it. Anything that is
+                # not an imported module (`df.select(...)`) simply resolves to nothing.
+                self.calls.setdefault(self._owner, set()).add(
+                    f"{node.func.value.id}.{node.func.attr}")
         # A function passed BY NAME is reached too, even though nothing here calls it
         # syntactically — `iv.for_each(SEASONS, build_one, ...)` and
         # `iv.build_if_needed(rel, build)` are exactly this, and their reads live in the
@@ -357,9 +383,28 @@ def scan_file(path: Path, root: Path) -> Stage | None:
     v.visit(tree)
     if not v.sites:
         return None
-    calls = tuple((fn, tuple(sorted(c & v._defined)))
-                  for fn, c in sorted(v.calls.items()) if c & v._defined)
-    return Stage(node=rel, sites=tuple(v.sites), guards=tuple(v.guards), calls=calls)
+    # Keep every callee name, not just the same-file ones — an imported name is resolved
+    # against the project index after every file has been scanned.
+    calls = tuple((fn, tuple(sorted(c))) for fn, c in sorted(v.calls.items()))
+    return Stage(node=rel, module=_module_name(rel), sites=tuple(v.sites),
+                 guards=tuple(v.guards), calls=calls,
+                 defines=tuple(sorted(v._defined)),
+                 imports=tuple(sorted((k, m, a) for k, (m, a) in v.imports.items())))
+
+
+def _module_name(rel: str) -> str:
+    """`src/wvorp/data.py` -> `wvorp.data`; `scripts/build_bpm.py` -> `build_bpm`.
+
+    A leading `src/` is stripped because that is the packaging convention, not part of the
+    import path. A file that is not importable as a module still gets a name; it simply
+    never matches an import.
+    """
+    parts = rel[:-3].split("/")
+    if parts and parts[0] == "src":
+        parts = parts[1:]
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
 
 
 def scan(iv, force: bool = False) -> dict[str, Stage]:
@@ -408,6 +453,54 @@ def _write_site(iv, rel: str) -> tuple[Stage, Site] | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def _reach(iv, start_node: str, start_fn: str) -> set[tuple[str, str]]:
+    """Every (file, function) reachable from one step, across modules.
+
+    A stage's inputs are the reads it makes plus the reads made by everything it calls —
+    including a helper in another module of the same project. wvorp's stages read through
+    `wvorp.data.load`, so a walk that stopped at the file boundary would report them as
+    having no inputs, and every artifact would be permanently stale.
+
+    Only modules INSIDE the scanned source dirs are followed. A read inside polars, or
+    inside a dependency, is not this pipeline's declaration to make.
+    """
+    stages = scan(iv)
+    by_module = {st.module: st for st in stages.values() if st.module}
+
+    seen: set[tuple[str, str]] = set()
+    stack = [(start_node, start_fn)]
+    while stack:
+        node, fn = stack.pop()
+        if (node, fn) in seen or node not in stages:
+            continue
+        seen.add((node, fn))
+        st = stages[node]
+        imports = {k: (m, a) for k, m, a in st.imports}
+        for name in st.called_by(fn):
+            if name in st.defines:
+                stack.append((node, name))          # a helper in this file
+                continue
+            base, _, attr_call = name.partition(".")
+            target = imports.get(base if attr_call else name)
+            if target is None:
+                continue
+            mod, attr = target
+            # Three spellings reach the same place:
+            #   from wvorp.data import load   -> ("wvorp.data", "load")
+            #   from wvorp import data        -> ("wvorp", "data"), used as data.load(...)
+            #   import wvorp.data as d        -> ("wvorp.data", ""),  used as d.load(...)
+            for cand in (f"{mod}.{attr}" if attr else mod, mod):
+                other = by_module.get(cand)
+                if other is None:
+                    continue
+                # The call site recorded the ATTRIBUTE name (`load`), which is the
+                # function to enter; `name` is right when the import named it directly.
+                stack.append((other.node, attr_call or attr or name))
+                stack.append((other.node, ""))       # module-level reads in that file
+                break
+    return seen
+
+
 def inputs_for_artifact(iv, rel: str) -> dict[str, object] | None:
     """`{input rel: fp strategy}` for whatever stage writes `rel`, from the code.
 
@@ -423,8 +516,14 @@ def inputs_for_artifact(iv, rel: str) -> dict[str, object] | None:
     if hit is None:
         return None
     stage, site = hit
-    return {s.path: s.fp for s in stage.inputs_of(site.owner)
-            if not matches(s.path, rel)}
+    stages = scan(iv)
+    scope = _reach(iv, stage.node, site.owner)
+    out: dict[str, object] = {}
+    for node, fn in scope:
+        for s in stages[node].inputs():
+            if s.owner == fn and not matches(s.path, rel):
+                out[s.path] = s.fp
+    return out
 
 
 def version_for_artifact(iv, rel: str) -> str | None:
