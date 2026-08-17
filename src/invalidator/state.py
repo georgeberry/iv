@@ -196,9 +196,26 @@ class State:
                 return ABSENT
             return _fp.compute(p, how)
 
-    def input_ids(self, inputs: dict[str, object]) -> dict[str, str]:
-        """`{rel: fp strategy}` -> `{rel: id}`. The strategy is only used for roots."""
-        return {rel: self.id_of(rel, how) for rel, how in inputs.items()}
+    def input_ids(self, inputs: dict[str, object],
+                  assume_unchanged: dict[str, dict] | None = None) -> dict[str, str]:
+        """`{rel: fp strategy}` -> `{rel: id}`. The strategy is only used for roots.
+
+        `assume_unchanged` is the cheap mode: a ROOT's id is taken from the record rather
+        than computed from the file. Fingerprinting roots is the ONLY I/O a check does —
+        6.7s for a 21-file collection over a bucket — and most of the time the question is
+        about code or a version, which costs nothing to answer.
+
+        A derived input is a record lookup either way, so nothing is given up there.
+        """
+        out = {}
+        for rel, how in inputs.items():
+            if assume_unchanged is not None and self.record_of(rel) is None:
+                stored = (assume_unchanged.get(rel) or {}).get("id")
+                if stored is not None:
+                    out[rel] = stored                # a root, taken on trust
+                    continue
+            out[rel] = self.id_of(rel, how)
+        return out
 
     def instances_of(self, template: str) -> list[str]:
         """Every concrete rel path a template covers: on disk, plus anything stamped.
@@ -299,26 +316,26 @@ class State:
     # ── the check ─────────────────────────────────────────────────────────────
 
     def why_stale(self, rel: str,
-                  declared_inputs: dict[str, object] | None = None,
                   code: str | None = None,
-                  version: str | None = None) -> str | None:
+                  version: str | None = None,
+                  fingerprint: bool = True) -> str | None:
         """None if current, else one line naming the component that moved.
 
         The recomputation uses the artifact's STORED fingerprint — the file has not been
         rewritten since it was stamped, and re-reading it on every check would cost a full
         pass over every artifact in the pipeline to learn nothing.
 
-        Two things must come from the CODE rather than from the record, because the record
-        can only describe the last build:
+        `code` and `version` come from the CODE rather than from the record, because the
+        record can only describe the last build. Both are DECLARATIONS — facts about the
+        source as written — which is why they can be trusted here, unlike a static guess at
+        which reads will execute. None means "nobody could tell me" and the stored value
+        stands, so turning a flag off stops keying on it rather than invalidating.
 
-        `declared_inputs` is what the stage reads NOW. It is the only way to notice an
-        input that was ADDED — the record has no entry for a path the last build never
-        read, so there would be nothing to compare against.
-
-        `code` is the current source hash of a `step(code=True)` function. Read back out of
-        the record instead and a code change could never be detected, which is the entire
-        point of the flag. None means "nobody could tell me", and the stored value stands —
-        so turning the flag OFF stops keying on source rather than instantly invalidating.
+        `fingerprint=False` takes ROOTS on trust, using the id in the record instead of
+        reading the file. Fingerprinting a root is the only I/O a check does, and it is the
+        expensive part — so this answers "is it stale for a reason I can see without
+        touching the data?", which is the right question when you want to know what an
+        edit broke. A live run always fingerprints.
         """
         from .paths import fields
         if fields(rel):
@@ -328,7 +345,7 @@ class State:
             if not found:
                 return "not on disk (no partition of it exists)"
             for inst in found:
-                reason = self.why_stale(inst, declared_inputs, code, version)
+                reason = self.why_stale(inst, code, version, fingerprint)
                 if reason is not None:
                     return f"{inst}: {reason}"
             return None
@@ -375,7 +392,7 @@ class State:
         # The cost is that ADDING a read does not by itself invalidate. That is what
         # `data_version`, `version=` and `step(code=True)` are for — and it is the rule
         # this pipeline already lives by.
-        ids_now = self.input_ids(wanted)
+        ids_now = self.input_ids(wanted, None if fingerprint else stored_inputs)
         stored_meta = entry.get("meta", "")
         code_now = _part_of(stored_meta, "code") if code is None else code
         version_now = _part_of(stored_meta, "version") if version is None else version
@@ -403,10 +420,9 @@ class State:
                 return f"input moved: {k}  {was} -> {ids_now[k]}"
         return f"id moved: {entry['id']} -> {id_now}"
 
-    def is_current(self, rel: str,
-                   declared_inputs: dict[str, object] | None = None,
-                   code: str | None = None, version: str | None = None) -> bool:
-        return self.why_stale(rel, declared_inputs, code, version) is None
+    def is_current(self, rel: str, code: str | None = None,
+                   version: str | None = None, fingerprint: bool = True) -> bool:
+        return self.why_stale(rel, code, version, fingerprint) is None
 
 
 def _part_of(meta: str, key: str) -> str:

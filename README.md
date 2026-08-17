@@ -75,8 +75,19 @@ inputs' ids into its own, so:
   the one thing no fingerprint of the inputs can see: a builder whose logic changed.
 
 A staleness check is **O(number of root files)**, not O(data) and not O(depth). A derived
-input's id is a dict lookup in the state file; only roots are fingerprinted. Measured cold,
-one process per stage, against a real GCS bucket:
+input's id is a dict lookup in the state file; only roots are fingerprinted — and reading
+them is the *only* I/O a check ever does, which is why it is optional:
+
+```
+invalidator status                 # roots taken on trust — code, versions, derived inputs
+invalidator status --fingerprint   # read the raw feeds too, as a live run does
+```
+
+A live run always fingerprints; there is no point guessing when you are about to do the
+work anyway. Measured on one artifact with a single root input over a bucket: **0.22s
+cheap, 1.45s with `--fingerprint`** — and a 21-file collection costs 6.7s.
+
+Measured cold, one process per stage, against a real GCS bucket:
 
 ```
 processed/possessions_with_lineups.parquet   current    0.09s   every input derived

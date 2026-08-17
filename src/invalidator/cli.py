@@ -212,8 +212,18 @@ def export(out: Path = typer.Option(None, help="write here instead of stdout")) 
 # ── the state half: reads the state file ──────────────────────────────────────
 
 @app.command()
-def status() -> None:
-    """Every declared artifact: current, stale, or missing."""
+def status(
+    fingerprint: bool = typer.Option(
+        False, "--fingerprint/--no-fingerprint",
+        help="also read the raw feeds; off by default because that is the only I/O"),
+) -> None:
+    """Every declared artifact: current, stale, or missing.
+
+    By default this answers WITHOUT touching the data: roots are taken on trust, so what
+    you see is what your code, your versions and your derived artifacts imply. That is the
+    cheap question and usually the one you meant. `--fingerprint` reads the raw feeds too,
+    which is what a live run does.
+    """
     try:
         iv, g = _graph_of()
     except DagioError as e:
@@ -221,7 +231,7 @@ def status() -> None:
     typer.secho(f"  {iv!r}\n", fg=typer.colors.BRIGHT_BLACK)
     rows, stale = [], 0
     for path in g.produced:
-        reason = iv.why_stale(path)
+        reason = iv.why_stale(path, fingerprint=fingerprint)
         stale += reason is not None
         rows.append((path, reason))
     for path, reason in sorted(rows):
@@ -231,15 +241,23 @@ def status() -> None:
             typer.secho(f"  stale    {path}\n             {reason}",
                         fg=typer.colors.YELLOW)
     typer.echo(f"\n{len(rows) - stale}/{len(rows)} current")
+    if not fingerprint:
+        typer.secho("  (raw feeds not read — pass --fingerprint for the full answer)",
+                    fg=typer.colors.BRIGHT_BLACK)
     raise typer.Exit(1 if stale else 0)
 
 
 @app.command()
-def why(artifact: str) -> None:
+def why(
+    artifact: str,
+    fingerprint: bool = typer.Option(
+        True, "--fingerprint/--no-fingerprint",
+        help="read the raw feeds; on here because you asked about ONE artifact"),
+) -> None:
     """Why one artifact would rebuild — or that it would not."""
     try:
         iv = _load_instance()
-        reason = iv.why_stale(artifact)
+        reason = iv.why_stale(artifact, fingerprint=fingerprint)
     except DagioError as e:
         _die(e)
     entry = iv.record_of(artifact)
@@ -257,7 +275,11 @@ def why(artifact: str) -> None:
 
 
 @app.command()
-def plan() -> None:
+def plan(
+    fingerprint: bool = typer.Option(
+        False, "--fingerprint/--no-fingerprint",
+        help="also read the raw feeds; off by default"),
+) -> None:
     """What a run would rebuild, and what only might.
 
     A node's fingerprint is not knowable until it rebuilds, so anything downstream of a
@@ -268,7 +290,8 @@ def plan() -> None:
         iv, g = _graph_of()
     except DagioError as e:
         _die(e)
-    definite = {p for p in g.produced if iv.why_stale(p) is not None}
+    definite = {p for p in g.produced
+                if iv.why_stale(p, fingerprint=fingerprint) is not None}
     parents = g.parent_map()
     maybe, frontier = set(), set(definite)
     while frontier:

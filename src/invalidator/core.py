@@ -429,10 +429,17 @@ class Invalidator:
 
     # ── the guard ─────────────────────────────────────────────────────────────
 
-    def why_stale(self, rel: str) -> str | None:
-        """One line saying why `rel` needs rebuilding, or None if it does not."""
-        return self.state.why_stale(rel, self.declared_inputs(rel), self.code_hash(rel),
-                                    self.declared_version(rel))
+    def why_stale(self, rel: str, fingerprint: bool = True) -> str | None:
+        """One line saying why `rel` needs rebuilding, or None if it does not.
+
+        `fingerprint=False` answers without touching the data: roots are taken on trust,
+        so only code, versions, existence and DERIVED inputs are checked. That is the
+        cheap question, and the right one when you are asking "what did my edit break?"
+        rather than "is the pipeline current?". A live run always fingerprints — there is
+        no point guessing when you are about to do the work anyway.
+        """
+        return self.state.why_stale(rel, self.code_hash(rel),
+                                    self.declared_version(rel), fingerprint)
 
     def version_value(self, name: str) -> str:
         """`"model"` -> `"model:w-v3.98"`. Empty for no extra version.
@@ -477,9 +484,9 @@ class Invalidator:
         except Exception:
             return None
 
-    def is_current(self, paths: str | Sequence[str]) -> bool:
+    def is_current(self, paths: str | Sequence[str], fingerprint: bool = True) -> bool:
         rels = [paths] if isinstance(paths, str) else list(paths)
-        return all(self.why_stale(r) is None for r in rels)
+        return all(self.why_stale(r, fingerprint) is None for r in rels)
 
     def declared_inputs(self, rel: str) -> dict[str, object] | None:
         """What the code reads NOW, from the static scan.

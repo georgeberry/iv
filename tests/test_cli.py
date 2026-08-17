@@ -91,7 +91,10 @@ def test_status_exits_one_and_names_the_mover(pipeline):
     GAMES.with_columns(GAMES["pts"] * 2).write_parquet(
         pipeline / "data" / "raw" / "games.parquet")
 
-    r = cli(pipeline, "status")
+    # A ROOT moved, so seeing it costs the one read a check can make.
+    assert "2/2 current" in cli(pipeline, "status").stdout, \
+        "the cheap answer takes roots on trust"
+    r = cli(pipeline, "status", "--fingerprint")
     assert r.returncode == 1
     assert "input moved: raw/games.parquet" in r.stdout
 
@@ -101,7 +104,7 @@ def test_plan_separates_definite_from_downstream(pipeline):
     GAMES.with_columns(GAMES["pts"] * 2).write_parquet(
         pipeline / "data" / "raw" / "games.parquet")
 
-    r = cli(pipeline, "plan")
+    r = cli(pipeline, "plan", "--fingerprint")
     assert "rebuild  processed/team_stats.parquet" in r.stdout
     assert "maybe    processed/ratings.parquet" in r.stdout
     assert "downstream of a rebuild" in r.stdout
@@ -127,3 +130,28 @@ def test_viz_writes_a_png(pipeline, tmp_path):
     r = cli(pipeline, "viz", "--out", str(out))
     assert r.returncode == 0, r.stdout + r.stderr
     assert out.exists() and out.stat().st_size > 1000
+
+
+def test_the_cheap_status_still_sees_a_code_change(pipeline):
+    """The split: the static scan says what is DECLARED — code, versions — and that costs
+    nothing. Only "did the data move" needs the filesystem."""
+    run_all(pipeline)
+    assert "2/2 current" in cli(pipeline, "status").stdout
+
+    src = pipeline / "stages" / "build_stats.py"
+    src.write_text(src.read_text().replace('pl.col("pts").sum()', 'pl.col("pts").max()'))
+
+    r = cli(pipeline, "status")            # no --fingerprint
+    assert r.returncode == 1
+    assert "code changed" in r.stdout
+    assert "raw feeds not read" in r.stdout
+
+
+def test_the_cheap_status_still_sees_a_version_bump(pipeline):
+    run_all(pipeline)
+    src = pipeline / "pipeline.py"
+    src.write_text(src.read_text().replace('data_version="v1"', 'data_version="v2-later"'))
+
+    r = cli(pipeline, "status")
+    assert r.returncode == 1
+    assert "data_version bumped" in r.stdout
