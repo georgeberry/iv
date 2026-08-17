@@ -64,6 +64,7 @@ class Invalidator:
     def __init__(self, *,
                  data_root: str | os.PathLike,
                  data_version: str,
+                 versions: dict[str, str] | None = None,
                  out_root: str | os.PathLike | None = None,
                  state_path: str | os.PathLike | None = None,
                  source_dirs: Sequence[str] = ("src", "scripts", "stages"),
@@ -89,6 +90,12 @@ class Invalidator:
         self.out_root = _paths.mkpath(out_root, self.project_root) \
             if out_root is not None else self.data_root
         self.data_version = data_version
+        # Extra versions a step can opt into by NAME. The name is the literal at the call
+        # site so the static scan can read it; the value lives here, next to data_version,
+        # where a project already keeps such things. Without this indirection
+        # `version=MODEL_VERSION` would be a name the scanner cannot resolve, and
+        # `invalidator status` could never see a bump that a run would see.
+        self.versions = dict(versions or {})
         self.source_dirs = tuple(source_dirs)
         self.stages = tuple(stages) if stages is not None else None
         self.order_from = Path(order_from) if order_from else None
@@ -202,6 +209,8 @@ class Invalidator:
                fp: str | Callable = "data",
                policy: str = "tracked",
                part: dict[str, str] | None = None,
+               version: str = "",
+               allow_missing: bool = False,
                code: str = "") -> Iterator[Path]:
         """Declare an output. Yields the concrete path; stamps it on clean exit.
 
@@ -211,6 +220,16 @@ class Invalidator:
         fp        how to fingerprint what you wrote. A coarse strategy on a DERIVED
                   artifact is a correctness hazard: if the id does not move, everything
                   downstream wrongly skips.
+        version   the NAME of one of the Invalidator's `versions`, folded into THIS
+                  artifact's id on top of data_version. For something beyond the data
+                  that governs it: a model version, a vendor API version, a hand-tuned
+                  table. Only the artifacts that name it move when it changes — which is
+                  the point, since a model bump must not rebuild a feature pipeline it
+                  cannot have affected.
+        allow_missing  the builder may legitimately produce nothing — a projection with no
+                  season to project yet, a roster that does not exist until July. Then
+                  there is nothing to stamp, and the artifact stays stale so the next run
+                  tries again. Without it, not writing is an error.
         code      an opaque string folded into the id — `step(code=True)` puts the
                   function's normalised source here.
         """
@@ -224,7 +243,19 @@ class Invalidator:
         # Only reached on a clean exit. An exception propagates and nothing is stamped,
         # so a half-written artifact reads as stale rather than as fresh.
         self._writes.append(rel)
-        spec = Spec(why=why, fp=fp, policy=policy, terminal=terminal, code=code)
+        if allow_missing:
+            with self.bookkeeping():
+                wrote = p.exists()
+            if not wrote:
+                # NOT an error. The guard cannot tell "should have written and did not"
+                # from "correctly had nothing to write", so it refuses to stamp — a stamp
+                # means THIS code produced THIS file — and says so. The artifact stays
+                # stale and the next run tries again.
+                print(f"  {rel}: nothing produced — not stamped")
+                self._pending_fp.pop(rel, None)
+                return
+        spec = Spec(why=why, fp=fp, policy=policy, terminal=terminal, code=code,
+                    version=self.version_value(version))
         inputs = {k: v for k, v in self._reads.items() if k != rel}
         new_id = self.state.stamp(rel, spec=spec, inputs=inputs, by=self.node(),
                                   fp_value=self._pending_fp.pop(rel, None))
@@ -237,6 +268,7 @@ class Invalidator:
                 fp: str | Callable = "data",
                 policy: str = "tracked",
                 part: dict[str, str] | None = None,
+                version: str = "",
                 code: str = "") -> Iterator[Path]:
         """An artifact this stage reads AND writes — an append, a patch, a cache.
 
@@ -255,7 +287,8 @@ class Invalidator:
         yield p
 
         self._writes.append(rel)
-        spec = Spec(why=why, fp=fp, policy=policy, terminal=terminal, code=code)
+        spec = Spec(why=why, fp=fp, policy=policy, terminal=terminal, code=code,
+                    version=self.version_value(version))
         inputs = {k: v for k, v in self._reads.items() if k != rel}
         new_id = self.state.stamp(rel, spec=spec, inputs=inputs, by=self.node(),
                                   fp_value=self._pending_fp.pop(rel, None))
@@ -299,6 +332,8 @@ class Invalidator:
              fp: str | Callable = "data",
              policy: str = "tracked",
              part: dict[str, str] | None = None,
+             version: str = "",
+             allow_missing: bool = False,
              if_needed: bool = True) -> Callable:
         """Make a function into a guarded step. The normal way to write one.
 
@@ -342,7 +377,9 @@ class Invalidator:
                         with ExitStack() as stack:
                             outs = [stack.enter_context(
                                 self.writes(r, why=why, terminal=terminal, fp=fp,
-                                            policy=policy, part=part, code=code_key))
+                                            policy=policy, part=part, code=code_key,
+                                            version=version,
+                                            allow_missing=allow_missing))
                                 for r in rels]
                             return fn(*outs, *args, **kwargs)
                     finally:
@@ -359,7 +396,38 @@ class Invalidator:
 
     def why_stale(self, rel: str) -> str | None:
         """One line saying why `rel` needs rebuilding, or None if it does not."""
-        return self.state.why_stale(rel, self.declared_inputs(rel), self.code_hash(rel))
+        return self.state.why_stale(rel, self.declared_inputs(rel), self.code_hash(rel),
+                                    self.declared_version(rel))
+
+    def version_value(self, name: str) -> str:
+        """`"model"` -> `"model:w-v3.98"`. Empty for no extra version.
+
+        An unknown name is an error with no fallback: defaulting would key the artifact on
+        a constant, and an artifact keyed on a constant is permanently, silently current.
+        """
+        if not name:
+            return ""
+        if name not in self.versions:
+            raise ConfigError(
+                f"version={name!r} is not one of this Invalidator's versions "
+                f"{sorted(self.versions) or '(none)'}. Add it to versions={{...}}.")
+        return f"{name}:{self.versions[name]}"
+
+    def declared_version(self, rel: str) -> str | None:
+        """The extra version its write site names NOW, resolved through `versions`.
+
+        From the static scan, so the decorator and `invalidator status` compute it the
+        same way. Read it out of the record instead and a bumped model version could never
+        be seen, which is the whole point of the option.
+        """
+        try:
+            from .static import version_for_artifact
+            name = version_for_artifact(self, rel)
+            return None if name is None else self.version_value(name)
+        except ConfigError:
+            raise
+        except Exception:
+            return None
 
     def code_hash(self, rel: str) -> str | None:
         """The CURRENT source hash of the `step(code=True)` function that writes `rel`.

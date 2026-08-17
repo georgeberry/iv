@@ -69,7 +69,9 @@ class Site:
     terminal: bool = False
     fp: str = "data"
     policy: str = "tracked"
+    version: str = ""                           # the NAME of an extra version, if any
     code: str = ""                              # source hash, when step(code=True)
+    owner: str = ""                             # the @step function this sits inside
     guarded: bool = False                       # @step guards; a bare writes() does not
 
     @property
@@ -126,7 +128,7 @@ def _lit_bool(node: ast.AST | None, default: bool) -> bool:
 
 
 def _sites(call: ast.Call, kind: str, at: tuple, rel_file: str,
-           code: str = "", guarded: bool = False) -> list[Site]:
+           code: str = "", guarded: bool = False, owner: str = "") -> list[Site]:
     """One call -> one Site per artifact it names. `step([a, b])` names two."""
     kw = {k.arg: k.value for k in call.keywords if k.arg}
     where = f"{rel_file}:{call.lineno}"
@@ -155,12 +157,19 @@ def _sites(call: ast.Call, kind: str, at: tuple, rel_file: str,
         # No path, no fingerprint, no id — provenance only. The graph shows it; the
         # staleness rule cannot see it, which is the honest position.
         return [Site(kind=kind, path=EXTERNAL_PREFIX + paths[0], why=why,
-                     file=rel_file, line=call.lineno)]
+                     file=rel_file, line=call.lineno, owner=owner)]
 
     fp = _lit_str(kw.get("fp")) or ("<callable>" if "fp" in kw else "data")
     policy = _lit_str(kw.get("policy")) or "tracked"
     if "policy" in kw and _lit_str(kw["policy"]) is None:
         raise DeclError(f"{where}: policy= must be a string literal")
+    version = _lit_str(kw.get("version")) or ""
+    if "version" in kw and not version:
+        raise DeclError(
+            f"{where}: version= must be a string literal naming one of the "
+            f"Invalidator's versions, e.g. version=\"model\". Passing the value itself "
+            f"would be a name this scan cannot resolve, and then `invalidator status` "
+            f"could never see a bump that a run would see.")
 
     for p in paths:
         if "part" in kw:
@@ -176,7 +185,8 @@ def _sites(call: ast.Call, kind: str, at: tuple, rel_file: str,
                  optional=_lit_bool(kw.get("optional"), False),
                  prior=_lit_bool(kw.get("prior"), False),
                  terminal=_lit_bool(kw.get("terminal"), False),
-                 fp=fp, policy=policy, code=code, guarded=guarded)
+                 fp=fp, policy=policy, version=version, code=code, guarded=guarded,
+                 owner=owner)
             for p in paths]
 
 
@@ -224,10 +234,12 @@ class _Visitor(ast.NodeVisitor):
         self.sites: list[Site] = []
         self.guards: list[str] = []
         self._seen: set[int] = set()            # step calls already handled as decorators
+        self._owner = ""                        # the @step function currently being walked
 
     # A `@iv.step(...)` decorator is handled here rather than in visit_Call, because only
     # from the FunctionDef can we see the body it guards and hash it.
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        step_owner = ""
         for dec in node.decorator_list:
             if not isinstance(dec, ast.Call):
                 continue
@@ -244,8 +256,18 @@ class _Visitor(ast.NodeVisitor):
             guards = _lit_bool(
                 next((k.value for k in dec.keywords if k.arg == "if_needed"), None), True)
             self.sites.extend(_sites(dec, "write", (0, "output"), self.rel_file,
-                                     code=digest, guarded=guards))
-        self.generic_visit(node)
+                                     code=digest, guarded=guards, owner=node.name))
+            step_owner = node.name
+        # A step's reads belong to THAT step, not to the file. The decorator clears the
+        # read set on entry, so at runtime a step's inputs are exactly the reads inside
+        # it — and the scan has to say the same thing or `why_stale` reports an input the
+        # record has never seen. Reads in a separately-defined helper are NOT attributed;
+        # `invalidator drift` is what catches those.
+        outer, self._owner = self._owner, step_owner or self._owner
+        try:
+            self.generic_visit(node)
+        finally:
+            self._owner = outer
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -254,7 +276,8 @@ class _Visitor(ast.NodeVisitor):
             name = _method_name(node.func)
             if name in METHODS and _has_why(node):
                 kind, index, keyword = METHODS[name]
-                self.sites.extend(_sites(node, kind, (index, keyword), self.rel_file))
+                self.sites.extend(_sites(node, kind, (index, keyword), self.rel_file,
+                                         owner=self._owner))
             elif name == "build_if_needed":
                 self.guards.extend(_guarded_paths(node))
         self.generic_visit(node)
@@ -333,11 +356,11 @@ def matches(template: str, rel: str) -> bool:
     return template == rel or bool(path_pattern(template).match(rel))
 
 
-def _owner(iv, rel: str) -> Stage | None:
-    """The single stage that writes `rel`, or None if there is not exactly one."""
-    owners = [st for st in scan(iv).values()
-              if any(matches(s.path, rel) for s in st.outputs())]
-    return owners[0] if len(owners) == 1 else None
+def _write_site(iv, rel: str) -> tuple[Stage, Site] | None:
+    """The one stage and the one write site that produce `rel`."""
+    hits = [(st, s) for st in scan(iv).values() for s in st.outputs()
+            if matches(s.path, rel)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def inputs_for_artifact(iv, rel: str) -> dict[str, object] | None:
@@ -351,10 +374,20 @@ def inputs_for_artifact(iv, rel: str) -> dict[str, object] | None:
     `invalidator check` reports rather than one this should silently resolve. A template
     input keeps its `{placeholder}`, since the concrete partitions are runtime.
     """
-    stage = _owner(iv, rel)
-    if stage is None:
+    hit = _write_site(iv, rel)
+    if hit is None:
         return None
-    return {s.path: s.fp for s in stage.inputs() if not matches(s.path, rel)}
+    stage, site = hit
+    return {s.path: s.fp for s in stage.inputs()
+            if s.owner == site.owner and not matches(s.path, rel)}
+
+
+def version_for_artifact(iv, rel: str) -> str | None:
+    """The extra version NAME its write site declares, or None if it declares none."""
+    sites = [s for st in scan(iv).values() for s in st.outputs() if matches(s.path, rel)]
+    if len(sites) != 1:
+        return None
+    return sites[0].version or ""
 
 
 def code_hash_for_artifact(iv, rel: str) -> str | None:

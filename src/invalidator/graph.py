@@ -185,7 +185,7 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     # POLICY CONFLICT — the artifact cannot be two things at once.
     for path in g.produced:
         outs = [s for s in g.sites[path] if s.kind in ("write", "update")]
-        for attr in ("policy", "fp", "terminal", "code"):
+        for attr in ("policy", "fp", "terminal", "code", "version"):
             values = {getattr(s, attr) for s in outs}
             if len(values) > 1:
                 errors.append(

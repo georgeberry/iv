@@ -61,6 +61,7 @@ class Spec:
     policy: str = "tracked"
     terminal: bool = False
     code: str = ""                       # from step(code=True); "" when not asked for
+    version: str = ""                    # an extra version only THIS artifact answers to
 
     def __post_init__(self):
         if self.policy not in POLICIES:
@@ -88,9 +89,19 @@ class State:
 
     # ── the id ────────────────────────────────────────────────────────────────
 
-    def metadata_term(self, policy: str, code: str = "") -> str:
-        """The non-data half of the id: the global version, the policy, the code hash."""
+    def metadata_term(self, policy: str, code: str = "", version: str = "") -> str:
+        """The non-data half of the id: the global version, the policy, and the two
+        narrower things an artifact can additionally answer to.
+
+        `version` is an opaque extra string a step declares when something beyond the data
+        governs it — a model version, a vendor API version, a hand-tuned table. Only the
+        artifacts that NAME it move when it changes, which is the whole point: a model
+        bump should not rebuild a feature pipeline that took four minutes and cannot have
+        been affected.
+        """
         term = f"v={self.iv.data_version}|policy={policy}"
+        if version:
+            term += f"|version={version}"
         if code:
             term += f"|code={code}"
         if policy == "clock":
@@ -257,7 +268,7 @@ class State:
             value = fp_value if fp_value is not None else _fp.compute(p, spec.fp)
 
         ids = self.input_ids(inputs)
-        meta = self.metadata_term(spec.policy, spec.code)
+        meta = self.metadata_term(spec.policy, spec.code, spec.version)
         new_id = self.compute_id(value, meta, ids, spec.policy)
 
         data = self.load()
@@ -267,6 +278,7 @@ class State:
             "meta": meta,
             "fp_how": spec.fp if isinstance(spec.fp, str) else "<callable>",
             "policy": spec.policy,
+            "version": spec.version,
             "terminal": spec.terminal,
             "why": spec.why,
             "in": {k: {"id": ids[k],
@@ -285,7 +297,8 @@ class State:
 
     def why_stale(self, rel: str,
                   declared_inputs: dict[str, object] | None = None,
-                  code: str | None = None) -> str | None:
+                  code: str | None = None,
+                  version: str | None = None) -> str | None:
         """None if current, else one line naming the component that moved.
 
         The recomputation uses the artifact's STORED fingerprint — the file has not been
@@ -312,7 +325,7 @@ class State:
             if not found:
                 return "not on disk (no partition of it exists)"
             for inst in found:
-                reason = self.why_stale(inst, declared_inputs, code)
+                reason = self.why_stale(inst, declared_inputs, code, version)
                 if reason is not None:
                     return f"{inst}: {reason}"
             return None
@@ -347,7 +360,8 @@ class State:
         ids_now = self.input_ids(wanted)
         stored_meta = entry.get("meta", "")
         code_now = _part_of(stored_meta, "code") if code is None else code
-        meta_now = self.metadata_term(policy, code_now)
+        version_now = _part_of(stored_meta, "version") if version is None else version
+        meta_now = self.metadata_term(policy, code_now, version_now)
         id_now = self.compute_id(entry["fp"], meta_now, ids_now, policy)
         if id_now == entry["id"]:
             return None
@@ -357,6 +371,10 @@ class State:
             was_v, now_v = _part_of(stored_meta, "v"), self.iv.data_version
             if was_v != now_v:
                 return f"data_version bumped: {was_v} -> {now_v}"
+            was_v2 = _part_of(stored_meta, "version")
+            if was_v2 != version_now:
+                return (f"version bumped: {was_v2 or '(none)'} -> "
+                        f"{version_now or '(none)'}")
             was_c = _part_of(stored_meta, "code")
             if was_c != code_now:
                 return f"code changed: {was_c or '(not tracked)'} -> {code_now or '(not tracked)'}"
@@ -369,8 +387,8 @@ class State:
 
     def is_current(self, rel: str,
                    declared_inputs: dict[str, object] | None = None,
-                   code: str | None = None) -> bool:
-        return self.why_stale(rel, declared_inputs, code) is None
+                   code: str | None = None, version: str | None = None) -> bool:
+        return self.why_stale(rel, declared_inputs, code, version) is None
 
 
 def _part_of(meta: str, key: str) -> str:

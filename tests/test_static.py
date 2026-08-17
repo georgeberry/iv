@@ -330,3 +330,25 @@ def test_export_is_the_dbt_manifest_shape(project):
     assert out["data_version"] == "v1"
     assert out["nodes"]["processed/ratings.parquet"]["terminal"] is True
     assert out["stage_parent_map"]["stages/build_ratings.py"] == ["stages/build_stats.py"]
+
+
+def test_a_steps_inputs_are_its_own_not_the_files(project):
+    """The decorator clears the read set on entry, so at runtime a step's inputs are
+    exactly the reads inside it. The scan has to say the same thing — otherwise a second
+    step in the same file contributes a phantom input and every check reports
+    'input added' forever."""
+    from invalidator import static
+    g = make(project, {"stages/two.py": '''
+        from mypipe import iv
+
+        @iv.step("processed/a.parquet", why="the first")
+        def a(out):
+            iv.reads("raw/x.parquet", why="only a reads this")
+
+        @iv.step("processed/b.parquet", why="the second", terminal=True)
+        def b(out):
+            iv.reads("processed/a.parquet", why="only b reads this")
+    '''})
+    assert static.inputs_for_artifact(g.iv, "processed/a.parquet") == {"raw/x.parquet": "data"}
+    assert static.inputs_for_artifact(g.iv, "processed/b.parquet") == \
+        {"processed/a.parquet": "data"}

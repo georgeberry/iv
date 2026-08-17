@@ -128,7 +128,9 @@ over seasons, and a path that depends on a partition all work with no special sy
 the AST scan still sees every one of them because the path is a literal.
 
 The body is also a natural scope, which is what makes the input set **per artifact** rather
-than per file.
+than per file: the decorator clears the read set on entry, so a step's inputs are exactly
+the reads inside it, and the static scan says the same. Reads in a separately-defined helper
+are not attributed — `invalidator drift` against a real trace is what catches those.
 
 ## Options
 
@@ -143,7 +145,7 @@ At a read:
 | `part=` | the partition values for a `{template}` path |
 
 At a step or a write, plus `terminal=` (consumed outside the pipeline), `code=` (fold the
-function's source into the id) and `policy=`:
+function's source into the id), `version=` and `allow_missing=`, and `policy=`:
 
 | `policy=` | |
 |---|---|
@@ -157,6 +159,15 @@ Fingerprint strategies: `data` (default, order-insensitive row hash), `data_orde
 (parquet footer), `bytes`, `present`, or your own callable. **A coarse strategy on a
 derived artifact is a correctness hazard, not just imprecision** — if the id does not move,
 everything downstream wrongly skips.
+
+`version="model"` names one of the Invalidator's `versions={...}`, folded into that
+artifact's id on top of `data_version`. Only the artifacts that name it move when it
+changes — so a model bump does not rebuild a feature pipeline it cannot have affected. The
+name is a literal so the static scan can read it; the value lives on the instance.
+
+`allow_missing=True` says the builder may legitimately produce nothing — a projection with
+no season to project yet. Then there is nothing to stamp, the artifact stays stale, and the
+next run tries again. Without it, not writing is an error.
 
 `code=True` folds a hash of the step function's own source into its id, so editing the
 transform rebuilds it with no version bump. The hash is over the *parsed* tree, so
