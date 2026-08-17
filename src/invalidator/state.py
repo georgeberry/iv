@@ -213,9 +213,12 @@ class State:
         for f in fields(template):
             pattern = pattern.replace("{" + f + "}", "*")
         with self.iv.bookkeeping():
+            # Both roots, in either mode: writes land in out_root whether or not reads
+            # fall back to it, so a partition built by this run has to be visible next to
+            # the ones that were already there.
             on_disk = set()
-            for root in {str(self.iv.out_root): self.iv.out_root,
-                         str(self.iv.data_root): self.iv.data_root}.values():
+            for root in {str(self.iv.data_root): self.iv.data_root,
+                         str(self.iv.out_root): self.iv.out_root}.values():
                 on_disk |= {str(p)[len(str(root)) + 1:] for p in root.glob(pattern)}
         rx = path_pattern(template)
         stamped = {rel for rel in self.load()["artifacts"] if rx.match(rel)}

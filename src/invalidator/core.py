@@ -66,6 +66,7 @@ class Invalidator:
                  data_version: str,
                  versions: dict[str, str] | None = None,
                  out_root: str | os.PathLike | None = None,
+                 overlay: bool = True,
                  state_path: str | os.PathLike | None = None,
                  source_dirs: Sequence[str] = ("src", "scripts", "stages"),
                  stages: Sequence[str] | None = None,
@@ -89,6 +90,11 @@ class Invalidator:
         # reads. Defaults to data_root, so a project that does not want it never sees it.
         self.out_root = _paths.mkpath(out_root, self.project_root) \
             if out_root is not None else self.data_root
+        # With `overlay`, a read prefers whatever this run has already built — usually
+        # what you want when testing a chain locally. Without it, reads ALWAYS come from
+        # data_root and only writes go to out_root, which is what a project does when the
+        # shared tree is the definition of the inputs and local output is a side effect.
+        self.overlay = overlay
         self.data_version = data_version
         # Extra versions a step can opt into by NAME. The name is the literal at the call
         # site so the static scan can read it; the value lives here, next to data_version,
@@ -129,7 +135,7 @@ class Invalidator:
         falls back to prod for everything it did not touch. Without a split (the default)
         both roots are the same and this is just `data_root / rel`.
         """
-        if self.out_root is not self.data_root:
+        if self.overlay and self.out_root is not self.data_root:
             out = _paths.resolve_under(self.out_root, rel)
             with self.bookkeeping():
                 if out.exists():

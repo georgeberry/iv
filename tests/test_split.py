@@ -93,3 +93,22 @@ def test_no_split_by_default(project):
                      project_root=project)
     assert iv.out_root is iv.data_root
     assert "out_root" not in repr(iv)
+
+
+def test_overlay_off_reads_only_the_shared_tree(project):
+    """Some projects define their inputs as the shared tree and treat local output as a
+    side effect — wvorp reads DATA_BASE and writes DATA_OUT_BASE, never falling back."""
+    shared, scratch = project / "shared", project / "scratch"
+    (shared / "raw").mkdir(parents=True)
+    FRAME.write_parquet(shared / "raw" / "src.parquet")
+    local = scratch / "raw" / "src.parquet"
+    local.parent.mkdir(parents=True)
+    FRAME.with_columns(pl.col("a") * 10).write_parquet(local)
+
+    on = Invalidator(data_root=shared, out_root=scratch, data_version="v1",
+                     project_root=project)
+    off = Invalidator(data_root=shared, out_root=scratch, data_version="v1",
+                      overlay=False, project_root=project)
+    assert on.resolve("raw/src.parquet") == local
+    assert off.resolve("raw/src.parquet") == shared / "raw" / "src.parquet"
+    assert off.resolve_out("processed/x.parquet") == scratch / "processed" / "x.parquet"
