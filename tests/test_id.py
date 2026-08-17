@@ -197,3 +197,28 @@ def test_data_version_is_required():
     from invalidator import ConfigError
     with pytest.raises(ConfigError, match="data_version is required"):
         Invalidator(data_root="/tmp/x", data_version="")
+
+
+def test_bookkeeping_suppresses_the_input_too_not_just_the_trace(project, iv, pipe):
+    """`bookkeeping()` marks I/O as the pipeline inspecting ITSELF.
+
+    Suppressing only the trace while still registering the input is worse than not
+    suppressing at all: the artifact silently gains a dependency on a file it never used,
+    and the trace no longer shows where that dependency came from. That is exactly what
+    happened when a migrated stage also stamped an older manifest, whose fingerprint
+    reads a raw feed — the raw feed became an input of the stage.
+    """
+    pipe()
+    write_root(project)
+
+    @iv.step("processed/self_inspecting.parquet", why="reads under bookkeeping",
+             terminal=True)
+    def build(out):
+        pl.read_parquet(iv.reads("raw/games.parquet", why="a real input")).write_parquet(out)
+        with iv.bookkeeping():
+            iv.reads("processed/team_stats.parquet", why="inspected, not consumed")
+
+    build()
+    iv.state.reset()
+    assert list(iv.record_of("processed/self_inspecting.parquet")["in"]) == \
+        ["raw/games.parquet"]

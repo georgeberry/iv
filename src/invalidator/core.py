@@ -191,6 +191,14 @@ class Invalidator:
         rel = _paths.render(path, part)
         p = self.resolve(rel)
 
+        if self._depth:
+            # Inside `bookkeeping()`: the pipeline is inspecting ITSELF, so this is not a
+            # data edge and must not become one. Suppressing only the trace and still
+            # registering the input is worse than not suppressing at all — the artifact
+            # gains a dependency on a file it never used, and the trace no longer shows
+            # where it came from.
+            return p
+
         # Reading something NEW after this process has already written is a smell: it
         # cannot be among that artifact's inputs, so if it was meant to feed it, the code
         # is in the wrong order. Reading back what this process itself wrote is not that.

@@ -240,17 +240,18 @@ def test_drift_is_empty_when_the_code_and_the_run_agree(pipeline, monkeypatch):
 
 
 def test_a_read_the_scan_cannot_see_does_not_loop(pipeline):
-    """The regression for a permanent rebuild.
+    """A read reached through a dict dispatch is invisible to any static walk.
 
-    A read reached through a dict dispatch is invisible to any static walk, so the run
-    records an input the scan does not know about. Comparing the two sets then says
-    'input removed', the rebuild records it again, and the stage NEVER skips — correct
-    output, no error, and the entire point of the cache silently gone.
+    If the static set governed staleness, the run would record an input the scan does not
+    know about, the comparison would say 'input removed', the rebuild would record it
+    again, and the stage would NEVER skip — correct output, no error, and the entire
+    point of the cache silently gone. It mirrors, too: a read inside an untaken branch is
+    declared and never recorded.
 
-    It mirrors: a read inside an untaken branch is declared and never recorded.
-
-    So the recorded ids govern. This asserts the stage settles rather than that the two
-    descriptions agree — agreement is `drift`'s job, against a real trace.
+    This is a CONSTRUCTED case, not one observed in the wild. The mismatch that first
+    looked like this turned out to be `bookkeeping()` failing to suppress input
+    registration, which is fixed. It is kept because the hazard is real whether or not it
+    has bitten yet.
     """
     src = pipeline / "stages" / "build_stats.py"
     src.write_text(textwrap.dedent('''

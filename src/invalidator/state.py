@@ -353,13 +353,19 @@ class State:
         # THE RECORDED SET GOVERNS, NOT THE DECLARED ONE.
         #
         # It is tempting to treat the static scan as authoritative and call an artifact
-        # stale when the code reads something the record has never seen. That was the
-        # first design, and on a real codebase it produces a PERMANENT REBUILD LOOP: the
-        # scan cannot follow every call (a deep chain, a dynamic dispatch, a read inside a
-        # dependency), so the run records an input the scan does not know about, the
-        # comparison says "input removed", the rebuild records it again, and nothing ever
-        # settles. The reverse loops too — a declared-but-untaken optional branch is
-        # declared forever and never recorded.
+        # stale when the code reads something the record has never seen. The trouble is
+        # that the two sets are derived by different mechanisms — one by reading source,
+        # one by watching a process — and a rebuild cannot reconcile a disagreement about
+        # DERIVATION, only about data. So any blind spot becomes a PERMANENT REBUILD:
+        # correct output, no error, and the artifact never skips. `tests/test_integration
+        # .py::test_a_read_the_scan_cannot_see_does_not_loop` demonstrates it with a dict
+        # dispatch. It loops the other way too, on a declared-but-untaken branch.
+        #
+        # HONESTY ABOUT THE EVIDENCE: the case that prompted this was NOT an unfollowable
+        # call. It was `bookkeeping()` failing to suppress input registration, so a
+        # manifest's self-inspection read became a data edge. That is fixed. Whether real
+        # unfollowable calls are common enough to matter is still unmeasured — `drift`
+        # against a real trace is how to find out, and this can be revisited with data.
         #
         # So staleness is decided by the ids of the inputs the last build ACTUALLY read.
         # A declared-vs-recorded gap is real and worth knowing about, but it is a
