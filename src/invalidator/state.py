@@ -348,18 +348,27 @@ class State:
             return None                     # the question is coverage, not staleness
 
         stored_inputs = entry.get("in") or {}
-        wanted = declared_inputs if declared_inputs is not None else {
-            k: v.get("fp", "data") for k, v in stored_inputs.items()
-        }
+        wanted = {k: v.get("fp", "data") for k, v in stored_inputs.items()}
 
-        if declared_inputs is not None and policy != "exempt":
-            added = sorted(set(wanted) - set(stored_inputs))
-            removed = sorted(set(stored_inputs) - set(wanted))
-            if added:
-                return f"input added: {added[0]} (the code reads something it did not before)"
-            if removed:
-                return f"input removed: {removed[0]} (the code no longer reads it)"
-
+        # THE RECORDED SET GOVERNS, NOT THE DECLARED ONE.
+        #
+        # It is tempting to treat the static scan as authoritative and call an artifact
+        # stale when the code reads something the record has never seen. That was the
+        # first design, and on a real codebase it produces a PERMANENT REBUILD LOOP: the
+        # scan cannot follow every call (a deep chain, a dynamic dispatch, a read inside a
+        # dependency), so the run records an input the scan does not know about, the
+        # comparison says "input removed", the rebuild records it again, and nothing ever
+        # settles. The reverse loops too — a declared-but-untaken optional branch is
+        # declared forever and never recorded.
+        #
+        # So staleness is decided by the ids of the inputs the last build ACTUALLY read.
+        # A declared-vs-recorded gap is real and worth knowing about, but it is a
+        # reporting matter: `invalidator drift` says so against a trace, where the answer
+        # is measured rather than inferred.
+        #
+        # The cost is that ADDING a read does not by itself invalidate. That is what
+        # `data_version`, `version=` and `step(code=True)` are for — and it is the rule
+        # this pipeline already lives by.
         ids_now = self.input_ids(wanted)
         stored_meta = entry.get("meta", "")
         code_now = _part_of(stored_meta, "code") if code is None else code

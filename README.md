@@ -129,8 +129,16 @@ the AST scan still sees every one of them because the path is a literal.
 
 The body is also a natural scope, which is what makes the input set **per artifact** rather
 than per file: the decorator clears the read set on entry, so a step's inputs are exactly
-the reads inside it, and the static scan says the same. Reads in a separately-defined helper
-are not attributed — `invalidator drift` against a real trace is what catches those.
+the reads inside it. The static scan follows same-file helpers and calls into other modules
+of the project, so a pipeline that reads through its own library still resolves.
+
+**Staleness is decided by the ids of the inputs the last build actually read**, not by the
+static scan. Treating the scan as authoritative produces a permanent rebuild on a real
+codebase — it cannot follow every call, so a run records an input the scan missed, the
+comparison fires, the rebuild records it again, and nothing settles. The cost is that
+*adding* a read does not by itself invalidate; `data_version`, `version=` or `code=True`
+is how you get that, and `invalidator drift` reports the gap against a real trace where it
+is measured rather than inferred.
 
 ## Options
 

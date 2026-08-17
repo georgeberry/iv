@@ -136,9 +136,19 @@ def test_data_version_bump_rebuilds_everything(pipeline):
     assert out.count("data_version bumped: v1 -> v2-later") == 2, out
 
 
-def test_adding_a_read_to_the_source_makes_it_stale(pipeline):
-    """The case the state file alone cannot see. The stored record has no entry for a path
-    the last build never read, so only the code can say the input set changed."""
+def test_adding_a_read_does_not_by_itself_invalidate(pipeline):
+    """A deliberate limit, and the reason for it is a loop.
+
+    Treating the static scan as authoritative — stale when the code reads something the
+    record has never seen — produces a PERMANENT REBUILD on a real codebase: the scan
+    cannot follow every call, so a run records an input the scan missed, the comparison
+    fires, the rebuild records it again, and nothing settles. It loops the other way too,
+    on a declared-but-untaken optional branch.
+
+    So the recorded ids govern, and a new read is picked up by `data_version`,
+    `version=` or `step(code=True)`. `invalidator drift` reports the gap against a real
+    trace, where it is measured rather than inferred.
+    """
     run_all(pipeline)
     pl.DataFrame({"team": ["A", "B"], "pace": [98.0, 101.0]}).write_parquet(
         pipeline / "data" / "raw" / "pace.parquet")
@@ -152,7 +162,17 @@ def test_adding_a_read_to_the_source_makes_it_stale(pipeline):
     src.write_text(patched)
 
     out = run(pipeline, "stages/build_stats.py")
-    assert "input added: raw/pace.parquet" in out, out
+    assert "is current — skipping" in out, out
+
+    # ...and the ways you DO get it rebuilt.
+    src2 = pipeline / "pipeline.py"
+    src2.write_text(src2.read_text().replace('data_version="v1"', 'data_version="v2-x"'))
+    out = run(pipeline, "stages/build_stats.py")
+    assert "data_version bumped" in out, out
+    # Now that it has rebuilt, the new input is in the record and moves it on its own.
+    pl.DataFrame({"team": ["A", "B"], "pace": [1.0, 2.0]}).write_parquet(
+        pipeline / "data" / "raw" / "pace.parquet")
+    assert "input moved: raw/pace.parquet" in run(pipeline, "stages/build_stats.py")
 
 
 def test_a_failing_stage_stamps_nothing_and_stays_stale(pipeline):
