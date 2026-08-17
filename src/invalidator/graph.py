@@ -2,7 +2,7 @@
 
 Nodes are of two kinds and both matter. A STAGE is a file. An ARTIFACT is a path. An edge
 runs producer -> artifact -> consumer, so the artifact is on the edge rather than hidden
-inside it, and `dagio graph --artifacts` can name it.
+inside it, and `invalidator graph --artifacts` can name it.
 
 The checks are the point. Each one is a mistake that is invisible while you are making it
 and expensive once made:
@@ -35,7 +35,7 @@ def _same(a: str, b: str) -> bool:
 
 @dataclass
 class Graph:
-    scope: str | None = None
+    iv: object = None
     stages: dict[str, Stage] = field(default_factory=dict)
     order: dict[str, int] = field(default_factory=dict)
     writers: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
@@ -67,7 +67,7 @@ class Graph:
         parents: dict[str, list[str]] = {n: [] for n in self.stages}
         for node, stage in self.stages.items():
             seen = set()
-            for s in stage.inputs(self.scope):
+            for s in stage.inputs():
                 if s.prior:
                     continue            # deliberately the previous run's copy
                 for p in self.producers_of(s.path):
@@ -80,7 +80,7 @@ class Graph:
         """The bipartite map: artifacts are nodes too. dbt's `parent_map` shape."""
         parents: dict[str, list[str]] = {}
         for node, stage in self.stages.items():
-            parents[node] = sorted({s.path for s in stage.inputs(self.scope)
+            parents[node] = sorted({s.path for s in stage.inputs()
                                     if not s.prior})
         for path in self.artifacts:
             parents.setdefault(path, [])
@@ -88,15 +88,13 @@ class Graph:
         return parents
 
 
-def build(stages: dict[str, Stage] | None = None, scope: str | None = None,
+def build(iv, stages: dict[str, Stage] | None = None,
           order: list[str] | None = None) -> Graph:
-    from .config import get
-    stages = _static.scan() if stages is None else stages
-    scope = get().scope if scope is None else scope
+    stages = _static.scan(iv) if stages is None else stages
     if order is None:
-        order = _static.declared_order()
+        order = iv.declared_order()
 
-    g = Graph(scope=scope, stages=dict(stages))
+    g = Graph(iv=iv, stages=dict(stages))
     ranks = {n: i for i, n in enumerate(order)} if order else {}
     # A stage the order does not mention sorts after everything it does, rather than
     # silently at the front where it would look like a legal producer for everyone.
@@ -104,8 +102,6 @@ def build(stages: dict[str, Stage] | None = None, scope: str | None = None,
 
     for node, stage in stages.items():
         for s in stage.sites:
-            if not s.applies_to(scope):
-                continue
             g.sites[s.path].append(s)
             if s.kind == "external":
                 continue                # provenance, not a dependency — carries no id
@@ -151,8 +147,7 @@ def toposort(parents: dict[str, list[str]]) -> list[list[str]]:
 
 def check(g: Graph) -> tuple[list[str], list[str]]:
     """Every structural check. Returns (errors, warnings)."""
-    from .config import get
-    roots = tuple(_root_prefixes())
+    roots = tuple(g.iv.roots)
     errors: list[str] = []
     warns: list[str] = []
 
@@ -166,7 +161,7 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
         msg = (f"READ WITH NO PRODUCER  {path}\n"
                f"    read at {site.location} but nothing writes it. Either a stage is "
                f"missing, or it is a root — put it under one of {list(roots)} or add "
-               f"that prefix to [tool.dagio] roots.")
+               f"that prefix to the Invalidator's roots=.")
         (warns if site.optional else errors).append(msg)
 
     # WRITE WITH NO CONSUMER — legal only if something outside the pipeline reads it.
@@ -190,7 +185,7 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     # POLICY CONFLICT — the artifact cannot be two things at once.
     for path in g.produced:
         outs = [s for s in g.sites[path] if s.kind in ("write", "update")]
-        for attr in ("policy", "versions", "fp", "terminal"):
+        for attr in ("policy", "fp", "terminal", "code"):
             values = {getattr(s, attr) for s in outs}
             if len(values) > 1:
                 errors.append(
@@ -199,9 +194,9 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                     f"    at {', '.join(s.location for s in outs)}")
 
     # ORDER — per ARTIFACT: satisfied if SOME producer runs earlier.
-    if _static.declared_order():
+    if g.iv.declared_order():
         for node, stage in g.stages.items():
-            for s in stage.inputs(g.scope):
+            for s in stage.inputs():
                 if s.prior:
                     continue
                 producers = [p for p in g.producers_of(s.path) if p != node]
@@ -215,15 +210,15 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                         f"prior=True if reading the previous run's copy is the intent.")
     else:
         warns.append(
-            "ORDER  not checked: the project declares no run order. Add "
-            "[tool.dagio] stages = [...] or order_from = \"refresh.sh\".")
+            "ORDER  not checked: the pipeline declares no run order. Pass "
+            "stages=[...] or order_from=\"refresh.sh\" to Invalidator().")
 
     # CYCLE — over WRITE edges only, so an updates() self-edge is excluded by construction.
     write_parents = {}
     for node, stage in g.stages.items():
         updated = {s.path for s in stage.sites if s.kind == "update"}
         deps = set()
-        for s in stage.inputs(g.scope):
+        for s in stage.inputs():
             if s.prior or any(_same(s.path, u) for u in updated):
                 continue
             deps |= {p for p in g.producers_of(s.path) if p != node}
@@ -249,12 +244,12 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
         if site.policy in ("settled", "manual", "clock"):
             continue
         stage = g.stages[g.producers_of(path)[0]]
-        if any(not _same(s.path, path) for s in stage.inputs(g.scope)):
+        if any(not _same(s.path, path) for s in stage.inputs()):
             continue                    # it has real inputs; they move it
-        if not any(_same(p, path) for p in stage.guards):
+        if not (site.guarded or any(_same(p, path) for p in stage.guards)):
             # Unguarded, so it runs every time. Correct for a fetcher — but say where it
             # comes from, or the graph shows an artifact that appeared out of nothing.
-            if not stage.externals(g.scope):
+            if not stage.externals():
                 warns.append(
                     f"NO PROVENANCE  {path}\n"
                     f"    written at {site.location} from nothing this pipeline declares. "
@@ -262,7 +257,8 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
             continue
         errors.append(
             f"GUARDED FETCH  {path}\n"
-            f"    {stage.node} guards on {path}, which is built from no declared input. "
+            f"    {stage.node} guards on {path}, which is built from no declared "
+            f"input. "
             f"Nothing in its id can move, so after the first run this stage never runs "
             f"again.\n"
             f"    Drop the guard if it fetches; or say the staleness question does not "
@@ -270,13 +266,6 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
             f"(rebuilt by hand), or policy=\"clock\" (once a day).")
 
     return errors, warns
-
-
-def _root_prefixes() -> tuple[str, ...]:
-    """Where feeds that arrive out of band live. Reading one that nothing writes is
-    normal; reading anything else that nothing writes means a stage is missing."""
-    raw = _static._raw_config()
-    return tuple(raw.get("roots") or ("raw/",))
 
 
 # ── declared vs recorded ──────────────────────────────────────────────────────
@@ -294,15 +283,15 @@ def drift(g: Graph, events: list[dict]) -> tuple[list[str], list[str]]:
     rec_by_node: dict[str, dict[str, set[str]]] = defaultdict(
         lambda: {"read": set(), "write": set()})
     for ev in events:
-        if ev.get("kind") != "io":
-            continue
+        if ev.get("kind") != "io" or ev.get("op") == "external":
+            continue                    # an external carries no id and no path to diff
         op = "write" if ev.get("op") == "write" else "read"
         rec_by_node[ev["node"]][op].add(ev["rel"])
 
     for node in sorted(set(rec_by_node) | set(g.stages)):
         stage = g.stages.get(node)
-        declared_r = {s.path for s in stage.inputs(g.scope)} if stage else set()
-        declared_w = {s.path for s in stage.outputs(g.scope)} if stage else set()
+        declared_r = {s.path for s in stage.inputs()} if stage else set()
+        declared_w = {s.path for s in stage.outputs()} if stage else set()
         rec = rec_by_node.get(node, {"read": set(), "write": set()})
 
         for op, declared in (("read", declared_r), ("write", declared_w)):
@@ -326,8 +315,8 @@ def export(g: Graph) -> dict:
     nodes: dict[str, dict] = {}
     for node, stage in g.stages.items():
         nodes[node] = {"kind": "stage", "order": g.order.get(node),
-                       "reads": len(stage.inputs(g.scope)),
-                       "writes": len(stage.outputs(g.scope))}
+                       "reads": len(stage.inputs()),
+                       "writes": len(stage.outputs())}
     for path in g.artifacts:
         outs = [s for s in g.sites[path] if s.kind in ("write", "update")]
         nodes[path] = {
@@ -336,7 +325,9 @@ def export(g: Graph) -> dict:
             "producers": g.producers_of(path),
             "why": outs[0].why if outs else g.sites[path][0].why,
             "policy": outs[0].policy if outs else None,
+            "code": bool(outs and outs[0].code),
         }
-    return {"schema": 1, "generated_by": "dagio", "scope": g.scope,
+    return {"schema": 1, "generated_by": "invalidator",
+            "data_version": g.iv.data_version,
             "nodes": nodes, "parent_map": g.parent_map(),
             "stage_parent_map": g.stage_parents()}

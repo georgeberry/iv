@@ -1,4 +1,4 @@
-"""Every way dagio refuses.
+"""Every way invalidator refuses.
 
 One class per kind of mistake, because the recovery differs. A `ConfigError` means the
 project is not set up; a `DeclError` means a call site is wrong and names file:line; a
@@ -12,7 +12,10 @@ from __future__ import annotations
 
 
 class DagioError(Exception):
-    """Base for everything dagio raises."""
+    """Base for everything invalidator raises."""
+
+
+InvalidatorError = DagioError
 
 
 class ConfigError(DagioError):

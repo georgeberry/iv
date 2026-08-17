@@ -24,8 +24,8 @@ def to_networkx(g) -> nx.DiGraph:
         d.add_node(path, kind="root" if not g.producers_of(path)
                    else "terminal" if g.is_terminal(path) else "derived")
     for node, stage in g.stages.items():
-        for out in stage.outputs(g.scope):
-            for inp in stage.inputs(g.scope):
+        for out in stage.outputs():
+            for inp in stage.inputs():
                 if inp.path != out.path:    # an updates() self-edge is not a dependency
                     d.add_edge(inp.path, out.path, stage=node)
     return d

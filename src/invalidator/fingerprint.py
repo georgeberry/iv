@@ -79,6 +79,17 @@ def _data(path) -> str:
     return _short(f"{df.height}|{len(df.columns)}|{total}")
 
 
+def frame_digest(frame) -> str:
+    """The same digest as `_data`, from a frame already in memory.
+
+    `stamp_content()` uses this to skip re-reading a file it just wrote. It MUST stay
+    identical to `_data` or the two paths would give one artifact two fingerprints.
+    """
+    if frame.height == 0:
+        return _short("empty|" + ",".join(f"{c}:{t}" for c, t in frame.schema.items()))
+    return _short(f"{frame.height}|{len(frame.columns)}|{frame.hash_rows(seed=0).sum()}")
+
+
 def _data_order(path) -> str:
     """Order-SENSITIVE. For an artifact whose row order is itself an input downstream."""
     df = _frame(path)

@@ -31,10 +31,10 @@ from __future__ import annotations
 
 import hashlib
 
-from . import state as _state
 from . import static as _static
 from .errors import DagioError
 from .fingerprint import DIGEST_LEN
+from .state import Spec
 from .paths import fields as _template_fields
 from .paths import render as _render_template
 
@@ -44,17 +44,17 @@ _MISSING = object()
 class PartitionCache:
     """Per-partition reuse for an artifact with a partition column."""
 
-    def __init__(self, artifact: str, key: str, *, why: str,
-                 fp: str = "data", versions: tuple[str, ...] = ("data",),
-                 policy: str = "tracked", extra: str = "") -> None:
-        self.artifact = artifact
+    def __init__(self, iv, output: str, key: str, *, why: str,
+                 fp: str = "data", policy: str = "tracked", extra: str = "") -> None:
+        self.iv = iv
+        self.artifact = output
         self.key = key
-        self.spec = _state.Spec(why=why, fp=fp, versions=tuple(versions), policy=policy)
+        self.spec = Spec(why=why, fp=fp, policy=policy)
         self.extra = extra
-        self._inputs = _static.inputs_for_artifact(artifact)
+        self._inputs = _static.inputs_for_artifact(iv, output)
         if self._inputs is None:
             raise DagioError(
-                f"{artifact} has no single declared producer, so its per-partition inputs "
+                f"{output} has no single declared producer, so its per-partition inputs "
                 f"cannot be read off the code. Run `dagio check`.")
         self._per = {t: h for t, h in self._inputs.items()
                      if key in _template_fields(t)}
@@ -74,12 +74,12 @@ class PartitionCache:
         would turn over every night and refit every cohort for nothing.
         """
         source = self._fp_of.get(partition, partition)
-        ids = dict(_state.input_ids(self._global))
+        ids = dict(self.iv.state.input_ids(self._global))
         for template, how in self._per.items():
             rel = _render_template(template, {self.key: source})
-            ids[rel] = _state.id_of(rel, how)
+            ids[rel] = self.iv.state.id_of(rel, how)
         body = "|".join([
-            f"meta={_state.metadata_term(self.spec.versions, self.spec.policy)}",
+            f"meta={self.iv.state.metadata_term(self.spec.policy)}",
             f"extra={self.extra}",
             # A per-partition choice the ids cannot see — which source feed built it, say.
             f"local={self._plan_extra.get(partition, '')}",
@@ -88,7 +88,7 @@ class PartitionCache:
         return hashlib.sha256(body.encode()).hexdigest()[:DIGEST_LEN]
 
     def _stamps(self) -> dict[str, str]:
-        return (_state.record_of(self.artifact) or {}).get("parts") or {}
+        return (self.iv.record_of(self.artifact) or {}).get("parts") or {}
 
     # ── planning ──────────────────────────────────────────────────────────────
 
@@ -101,10 +101,8 @@ class PartitionCache:
         """
         if self._existing is _MISSING:
             import polars as pl
-            from . import record as _rec
-            from .paths import resolve
-            p = resolve(self.artifact)
-            with _rec.bookkeeping():
+            p = self.iv.resolve(self.artifact)
+            with self.iv.bookkeeping():
                 self._existing = pl.read_parquet(p) if p.exists() else None
         return self._existing
 
@@ -146,22 +144,15 @@ class PartitionCache:
         A partition in neither list is dropped from `parts` rather than left behind, so a
         stamp can never outlive the rows it describes.
         """
-        from .paths import resolve
-        from . import record as _rec
-        p = resolve(self.artifact)
+        p = self.iv.resolve(self.artifact)
         p.parent.mkdir(parents=True, exist_ok=True)
         out.write_parquet(p)
-        _rec.record("io", op="write", rel=self.artifact, why=self.spec.why,
-                    partitioned_by=self.key,
-                    built=sorted(built), reused=sorted(reuse))
-
-        new_id = _state.stamp(self.artifact, spec=self.spec, inputs=self._inputs,
-                              by=_rec._node())
-        data = _state.load()
-        data["artifacts"][self.artifact]["parts"] = {
-            part: self._key(part) for part in sorted(set(built) | set(reuse))
-        }
-        _state.save(data)
+        parts = {part: self._key(part) for part in sorted(set(built) | set(reuse))}
+        new_id = self.iv.state.stamp(self.artifact, spec=self.spec, inputs=self._inputs,
+                                     by=self.iv.node(), parts=parts)
+        self.iv.record("io", op="write", rel=self.artifact, why=self.spec.why,
+                       partitioned_by=self.key, id=new_id,
+                       built=sorted(built), reused=sorted(reuse))
         return new_id
 
     def report(self, reuse: list[str], rebuild: list[str]) -> None:
@@ -179,9 +170,9 @@ def _span(parts: list[str]) -> str:
 
 # ── the fan-out helper ────────────────────────────────────────────────────────
 
-def for_each(over, build_one, *, artifact: str, key: str, why: str,
-             fp: str = "data", versions: tuple[str, ...] = ("data",),
-             policy: str = "tracked", extra: dict[str, str] | None = None,
+def for_each(iv, over, build_one, *, output: str, key: str, why: str,
+             fp: str = "data", policy: str = "tracked",
+             extra: dict[str, str] | None = None,
              fp_of: dict[str, str] | None = None, extra_key: str = "",
              force: bool | None = None, quiet: bool = False):
     """Run `build_one(partition)` only for the partitions that moved.
@@ -196,10 +187,9 @@ def for_each(over, build_one, *, artifact: str, key: str, why: str,
     """
     import polars as pl
 
-    from .guard import forced
-    force = forced() if force is None else force
+    force = iv.force if force is None else force
 
-    cache = PartitionCache(artifact, key, why=why, fp=fp, versions=versions,
+    cache = PartitionCache(iv, output, key, why=why, fp=fp,
                            policy=policy, extra=extra_key)
     want = [str(p) for p in over]
     reuse, rebuild = ([], want) if force else cache.plan(want, extra=extra, fp_of=fp_of)
@@ -211,7 +201,7 @@ def for_each(over, build_one, *, artifact: str, key: str, why: str,
         frame = build_one(part)
         if frame is None or frame.height == 0:
             raise DagioError(
-                f"{artifact}: build_one({part!r}) produced no rows. A partition that is "
+                f"{output}: build_one({part!r}) produced no rows. A partition that is "
                 f"genuinely empty has to say so explicitly — writing a partial artifact "
                 f"reads as real downstream.")
         built[part] = frame
@@ -225,7 +215,7 @@ def for_each(over, build_one, *, artifact: str, key: str, why: str,
     covered = {str(v) for v in out[key].unique().to_list()}
     if covered != set(want):
         raise DagioError(
-            f"{artifact}: expected partitions {sorted(want)} but built {sorted(covered)}. "
+            f"{output}: expected partitions {sorted(want)} but built {sorted(covered)}. "
             f"Refusing to write a partial artifact.")
     cache.commit(out, rebuild, reuse)
     return out

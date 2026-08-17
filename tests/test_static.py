@@ -1,64 +1,67 @@
 """The graph read out of the source, and every check it can fail."""
 from __future__ import annotations
 
-import textwrap
-
 import pytest
 
-from dagio import graph as G
-from dagio import static
-from dagio.errors import DeclError
+from conftest import write_stage
+from invalidator import Invalidator
+from invalidator import graph as G
+from invalidator.errors import DeclError
 
 GOOD = {
     "stages/build_stats.py": '''
-        import dagio as dg
         import polars as pl
+        from mypipe import iv
 
-        def build():
-            games = pl.read_parquet(dg.reads(
+        @iv.step("processed/team_stats.parquet", why="season points by team")
+        def build(out):
+            games = pl.read_parquet(iv.reads(
                 "raw/games.parquet", why="one row per team per game", fp="rows"))
-            with dg.writes("processed/team_stats.parquet",
-                           why="season points by team") as p:
-                games.write_parquet(p)
+            games.write_parquet(out)
     ''',
     "stages/build_ratings.py": '''
-        from dagio import reads, writes
         import polars as pl
+        from mypipe import iv
 
-        def build():
-            stats = pl.read_parquet(reads("processed/team_stats.parquet",
-                                          why="season points by team"))
-            with writes("processed/ratings.parquet",
-                        why="what the app renders", terminal=True) as p:
-                stats.write_parquet(p)
+        @iv.step("processed/ratings.parquet",
+                 why="what the app renders", terminal=True)
+        def build(out):
+            stats = pl.read_parquet(iv.reads(
+                "processed/team_stats.parquet", why="season points by team"))
+            stats.write_parquet(out)
     ''',
 }
 
 
-def make(project, files: dict[str, str], order: list[str] | None = None):
+def make(project, files: dict[str, str], stages=None, **kw):
     for rel, body in files.items():
-        p = project / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(textwrap.dedent(body).lstrip())
-    if order is not None:
-        pyproject = (project / "pyproject.toml").read_text()
-        stages = ", ".join(f'"{s}"' for s in order)
-        (project / "pyproject.toml").write_text(
-            pyproject.replace('data_root = "data"',
-                              f'data_root = "data"\nstages = [{stages}]'))
-    from dagio import config
-    config.reset()
-    static.reset()
-    return G.build()
+        write_stage(project, rel, body)
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project,
+                     stages=stages, **kw)
+    return G.build(iv)
 
 
 # ── the scan ──────────────────────────────────────────────────────────────────
 
-def test_it_finds_calls_through_both_import_styles(project):
+def test_it_finds_calls_on_an_instance_whatever_it_is_named(project):
+    """The receiver is an arbitrary name imported from elsewhere, so matching is on the
+    method name plus the required `why=` literal."""
     g = make(project, GOOD)
     assert set(g.stages) == set(GOOD)
     assert g.producers_of("processed/team_stats.parquet") == ["stages/build_stats.py"]
     assert g.consumers_of("processed/team_stats.parquet") == ["stages/build_ratings.py"]
+
+
+def test_a_differently_named_instance_still_matches(project):
+    g = make(project, {"stages/a.py": '''
+        from somewhere.else_ import PIPELINE as whatever
+        @whatever.step("processed/x.parquet", why="an oddly named instance",
+                       terminal=True)
+        def build(out):
+            whatever.reads("raw/y.parquet", why="the source")
+    '''})
+    assert g.producers_of("processed/x.parquet") == ["stages/a.py"]
 
 
 def test_metadata_survives_the_scan(project):
@@ -70,7 +73,7 @@ def test_metadata_survives_the_scan(project):
 
 
 def test_a_clean_pipeline_has_no_findings(project):
-    g = make(project, GOOD, order=list(GOOD))
+    g = make(project, GOOD, stages=list(GOOD))
     errors, warns = G.check(g)
     assert errors == []
     assert warns == []
@@ -81,37 +84,44 @@ def test_a_clean_pipeline_has_no_findings(project):
 def test_a_computed_path_is_an_error_that_names_the_line(project):
     with pytest.raises(DeclError, match=r"stages/bad\.py:4.*string LITERAL"):
         make(project, {"stages/bad.py": '''
-            import dagio as dg
+            from mypipe import iv
             NAME = "xpm"
             def build():
-                dg.reads(f"processed/{NAME}.parquet", why="computed on purpose")
+                iv.reads(f"processed/{NAME}.parquet", why="computed on purpose")
         '''})
 
 
-def test_a_missing_why_is_an_error(project):
-    with pytest.raises(DeclError, match="why= is required"):
-        make(project, {"stages/bad.py": '''
-            import dagio as dg
-            def build():
-                dg.reads("raw/games.parquet")
-        '''})
+def test_a_call_without_why_is_simply_not_ours(project):
+    """`why=` is what identifies a call as ours. Something else's `.reads(...)` is not a
+    declaration and must not be mistaken for one."""
+    g = make(project, {"stages/a.py": '''
+        from mypipe import iv
+        import zipfile
+
+        @iv.step("processed/x.parquet", why="the real one", terminal=True)
+        def build(out):
+            iv.reads("raw/y.parquet", why="the source")
+            zipfile.ZipFile("z.zip").reads("not-a-declaration")
+    '''})
+    assert sorted(s.path for s in g.stages["stages/a.py"].sites) == [
+        "processed/x.parquet", "raw/y.parquet"]
 
 
 def test_a_template_without_part_is_an_error(project):
     with pytest.raises(DeclError, match=r"placeholder\(s\) \['season'\] but no part="):
         make(project, {"stages/bad.py": '''
-            import dagio as dg
+            from mypipe import iv
             def build():
-                dg.reads("raw/box/{season}.parquet", why="per season")
+                iv.reads("raw/box/{season}.parquet", why="per season")
         '''})
 
 
 def test_part_keys_must_match_the_template(project):
     with pytest.raises(DeclError, match="part= supplies"):
         make(project, {"stages/bad.py": '''
-            import dagio as dg
+            from mypipe import iv
             def build(year):
-                dg.reads("raw/box/{season}.parquet", why="per season",
+                iv.reads("raw/box/{season}.parquet", why="per season",
                          part={"year": year})
         '''})
 
@@ -120,11 +130,10 @@ def test_part_keys_must_match_the_template(project):
 
 def test_write_with_no_consumer(project):
     g = make(project, {"stages/a.py": '''
-        import dagio as dg
-        def build():
-            dg.reads("raw/games.parquet", why="the source")
-            with dg.writes("processed/dead.parquet", why="nobody reads this") as p:
-                pass
+        from mypipe import iv
+        @iv.step("processed/dead.parquet", why="nobody reads this")
+        def build(out):
+            iv.reads("raw/games.parquet", why="the source")
     '''})
     errors, _ = G.check(g)
     assert any("WRITE WITH NO CONSUMER  processed/dead.parquet" in e for e in errors)
@@ -132,12 +141,10 @@ def test_write_with_no_consumer(project):
 
 def test_terminal_makes_no_consumer_correct(project):
     g = make(project, {"stages/a.py": '''
-        import dagio as dg
-        def build():
-            dg.reads("raw/games.parquet", why="the source")
-            with dg.writes("dump/site.json", why="the app renders it",
-                           terminal=True, fp="bytes") as p:
-                pass
+        from mypipe import iv
+        @iv.step("dump/site.json", why="the app renders it", terminal=True, fp="bytes")
+        def build(out):
+            iv.reads("raw/games.parquet", why="the source")
     '''})
     errors, _ = G.check(g)
     assert not any("NO CONSUMER" in e for e in errors)
@@ -145,11 +152,10 @@ def test_terminal_makes_no_consumer_correct(project):
 
 def test_read_with_no_producer(project):
     g = make(project, {"stages/a.py": '''
-        import dagio as dg
-        def build():
-            dg.reads("processed/nobody_makes_this.parquet", why="a missing stage")
-            with dg.writes("dump/out.json", why="terminal", terminal=True) as p:
-                pass
+        from mypipe import iv
+        @iv.step("dump/out.json", why="terminal", terminal=True)
+        def build(out):
+            iv.reads("processed/nobody_makes_this.parquet", why="a missing stage")
     '''})
     errors, _ = G.check(g)
     assert any("READ WITH NO PRODUCER" in e for e in errors)
@@ -157,12 +163,10 @@ def test_read_with_no_producer(project):
 
 def test_two_writers(project):
     body = '''
-        import dagio as dg
-        def build():
-            dg.reads("raw/games.parquet", why="the source")
-            with dg.writes("processed/x.parquet", why="the same artifact",
-                           terminal=True) as p:
-                pass
+        from mypipe import iv
+        @iv.step("processed/x.parquet", why="the same artifact", terminal=True)
+        def build(out):
+            iv.reads("raw/games.parquet", why="the source")
     '''
     g = make(project, {"stages/a.py": body, "stages/b.py": body})
     errors, _ = G.check(g)
@@ -172,18 +176,18 @@ def test_two_writers(project):
 def test_policy_conflict(project):
     g = make(project, {
         "stages/a.py": '''
-            import dagio as dg
+            from mypipe import iv
             def build():
-                dg.reads("raw/games.parquet", why="the source")
-                with dg.updates("processed/x.parquet", why="first pass",
+                iv.reads("raw/games.parquet", why="the source")
+                with iv.updates("processed/x.parquet", why="first pass",
                                 policy="manual", terminal=True) as p:
                     pass
         ''',
         "stages/b.py": '''
-            import dagio as dg
+            from mypipe import iv
             def build():
-                dg.reads("raw/games.parquet", why="the source")
-                with dg.updates("processed/x.parquet", why="second pass",
+                iv.reads("raw/games.parquet", why="the source")
+                with iv.updates("processed/x.parquet", why="second pass",
                                 policy="tracked", terminal=True) as p:
                     pass
         ''',
@@ -195,18 +199,16 @@ def test_policy_conflict(project):
 def test_a_cycle(project):
     g = make(project, {
         "stages/a.py": '''
-            import dagio as dg
-            def build():
-                dg.reads("processed/b.parquet", why="from b")
-                with dg.writes("processed/a.parquet", why="to a") as p:
-                    pass
+            from mypipe import iv
+            @iv.step("processed/a.parquet", why="to a")
+            def build(out):
+                iv.reads("processed/b.parquet", why="from b")
         ''',
         "stages/b.py": '''
-            import dagio as dg
-            def build():
-                dg.reads("processed/a.parquet", why="from a")
-                with dg.writes("processed/b.parquet", why="to b") as p:
-                    pass
+            from mypipe import iv
+            @iv.step("processed/b.parquet", why="to b")
+            def build(out):
+                iv.reads("processed/a.parquet", why="from a")
         ''',
     })
     errors, _ = G.check(g)
@@ -217,10 +219,10 @@ def test_updates_is_not_a_cycle(project):
     """A stage that reads its own output to decide what to skip is an incremental cache,
     not a cycle. Without updates() the only ways out are a false alarm or an allowlist."""
     g = make(project, {"stages/a.py": '''
-        import dagio as dg
+        from mypipe import iv
         def build():
-            dg.reads("raw/games.parquet", why="the source")
-            with dg.updates("processed/cache.parquet",
+            iv.reads("raw/games.parquet", why="the source")
+            with iv.updates("processed/cache.parquet",
                             why="reads its own output to decide what to skip",
                             terminal=True) as p:
                 pass
@@ -230,7 +232,8 @@ def test_updates_is_not_a_cycle(project):
 
 
 def test_order_violation_is_found(project):
-    g = make(project, GOOD, order=["stages/build_ratings.py", "stages/build_stats.py"])
+    g = make(project, GOOD,
+             stages=["stages/build_ratings.py", "stages/build_stats.py"])
     errors, _ = G.check(g)
     assert any(e.startswith("ORDER") for e in errors)
 
@@ -240,7 +243,8 @@ def test_prior_makes_a_late_producer_legal(project):
     files["stages/build_ratings.py"] = files["stages/build_ratings.py"].replace(
         'why="season points by team"))',
         'why="season points by team", prior=True))')
-    g = make(project, files, order=["stages/build_ratings.py", "stages/build_stats.py"])
+    g = make(project, files,
+             stages=["stages/build_ratings.py", "stages/build_stats.py"])
     errors, _ = G.check(g)
     assert not any(e.startswith("ORDER") for e in errors), errors
 
@@ -253,12 +257,10 @@ def test_guarding_a_fetch_is_an_error(project):
     working perfectly.
     """
     g = make(project, {"stages/a.py": '''
-        import dagio as dg
-        def build():
-            dg.external("vendor/feed", why="the upstream drop")
-            with dg.writes("raw/games.parquet", why="as fetched", terminal=True) as p:
-                pass
-        dg.build_if_needed("raw/games.parquet", build, if_needed=True)
+        from mypipe import iv
+        @iv.step("raw/games.parquet", why="as fetched", terminal=True)
+        def build(out):
+            iv.external("vendor/feed", why="the upstream drop")
     '''})
     errors, _ = G.check(g)
     assert any("GUARDED FETCH  raw/games.parquet" in e for e in errors), errors
@@ -266,9 +268,9 @@ def test_guarding_a_fetch_is_an_error(project):
 
 def test_an_unguarded_fetch_is_fine(project):
     g = make(project, {"stages/a.py": '''
-        import dagio as dg
-        dg.external("vendor/feed", why="the upstream drop")
-        with dg.writes("raw/games.parquet", why="as fetched", terminal=True) as p:
+        from mypipe import iv
+        iv.external("vendor/feed", why="the upstream drop")
+        with iv.writes("raw/games.parquet", why="as fetched", terminal=True) as p:
             pass
     '''})
     errors, warns = G.check(g)
@@ -278,13 +280,11 @@ def test_an_unguarded_fetch_is_fine(project):
 
 def test_settled_says_the_staleness_question_does_not_apply(project):
     g = make(project, {"stages/a.py": '''
-        import dagio as dg
-        def build():
-            dg.external("vendor/archive", why="a season that will never change")
-            with dg.writes("raw/history.parquet", why="fetch-once history",
-                           policy="settled", terminal=True) as p:
-                pass
-        dg.build_if_needed("raw/history.parquet", build, if_needed=True)
+        from mypipe import iv
+        @iv.step("raw/history.parquet", why="fetch-once history",
+                 policy="settled", terminal=True)
+        def build(out):
+            iv.external("vendor/archive", why="a season that will never change")
     '''})
     errors, _ = G.check(g)
     assert not any("GUARDED FETCH" in e for e in errors), errors
@@ -292,8 +292,8 @@ def test_settled_says_the_staleness_question_does_not_apply(project):
 
 def test_an_artifact_from_nothing_warns_about_provenance(project):
     g = make(project, {"stages/a.py": '''
-        import dagio as dg
-        with dg.writes("processed/from_nowhere.parquet",
+        from mypipe import iv
+        with iv.writes("processed/from_nowhere.parquet",
                        why="conjured out of nothing", terminal=True) as p:
             pass
     '''})
@@ -302,11 +302,11 @@ def test_an_artifact_from_nothing_warns_about_provenance(project):
 
 
 def test_external_shows_up_in_the_stage_card(project):
-    from dagio import render
+    from invalidator import render
     g = make(project, {"stages/a.py": '''
-        import dagio as dg
-        dg.external("espn/scoreboard", why="pulled every morning")
-        with dg.writes("raw/games.parquet", why="as fetched", terminal=True) as p:
+        from mypipe import iv
+        iv.external("espn/scoreboard", why="pulled every morning")
+        with iv.writes("raw/games.parquet", why="as fetched", terminal=True) as p:
             pass
     '''})
     card = render.stage_card("stages/a.py", g, color=False)
@@ -324,8 +324,9 @@ def test_no_declared_order_warns_rather_than_passing_quietly(project):
 # ── export ────────────────────────────────────────────────────────────────────
 
 def test_export_is_the_dbt_manifest_shape(project):
-    g = make(project, GOOD, order=list(GOOD))
+    g = make(project, GOOD, stages=list(GOOD))
     out = G.export(g)
     assert set(out) >= {"nodes", "parent_map", "stage_parent_map"}
+    assert out["data_version"] == "v1"
     assert out["nodes"]["processed/ratings.parquet"]["terminal"] is True
     assert out["stage_parent_map"]["stages/build_ratings.py"] == ["stages/build_stats.py"]

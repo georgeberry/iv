@@ -4,8 +4,8 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from dagio import fingerprint as fp
-from dagio.errors import FingerprintError
+from invalidator import fingerprint as fp
+from invalidator.errors import FingerprintError
 
 FRAME = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
 

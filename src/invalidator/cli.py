@@ -5,13 +5,22 @@ SOURCE — they work on a fresh checkout with no data and nothing ever run. `sta
 and `plan` read the STATE FILE — they need a run to have happened but not the code.
 `drift` is the one command that needs both, which is the point of it.
 
-Nothing here reimplements anything: every command is a thin call into the module that
-already does the work, so the CLI and the library cannot drift.
+The CLI has to find your `Invalidator`, since that is where the configuration lives. One
+line in pyproject.toml says where:
+
+    [tool.invalidator]
+    instance = "mypkg.pipeline:iv"
+
+or pass it per-invocation with `-i mypkg.pipeline:iv`. Nothing else is read from TOML —
+the instance itself is the configuration.
 """
 from __future__ import annotations
 
+import importlib
 import json
+import os
 import sys
+import tomllib
 from pathlib import Path
 
 import typer
@@ -19,13 +28,21 @@ import typer
 from . import graph as _graph
 from . import record as _rec
 from . import render as _render
-from . import state as _state
 from . import static as _static
-from .config import get as _cfg
-from .errors import DagioError
+from .errors import ConfigError, DagioError
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
-                  help="Data lineage and cache invalidation declared at the call sites.")
+                  help="Cache invalidation and lineage declared at the call sites.")
+
+_INSTANCE: str | None = None
+
+
+@app.callback()
+def main(instance: str = typer.Option(
+        None, "--instance", "-i",
+        help="module:attr naming your Invalidator; overrides pyproject.toml")) -> None:
+    global _INSTANCE
+    _INSTANCE = instance
 
 
 def _die(e: Exception) -> None:
@@ -33,8 +50,45 @@ def _die(e: Exception) -> None:
     raise typer.Exit(1)
 
 
-def _build():
-    return _graph.build()
+def _find_root(start: Path) -> Path | None:
+    for d in (start, *start.parents):
+        if (d / "pyproject.toml").exists():
+            return d
+    return None
+
+
+def _load_instance():
+    """Import the project's Invalidator. The one piece of discovery in the package."""
+    target = _INSTANCE or os.environ.get("INVALIDATOR_INSTANCE")
+    root = _find_root(Path.cwd().resolve())
+    if not target and root:
+        raw = tomllib.loads((root / "pyproject.toml").read_text())
+        target = raw.get("tool", {}).get("invalidator", {}).get("instance")
+    if not target:
+        raise ConfigError(
+            "no Invalidator to load. Add\n\n"
+            "    [tool.invalidator]\n"
+            '    instance = "mypkg.pipeline:iv"\n\n'
+            "to pyproject.toml, or pass -i mypkg.pipeline:iv")
+    if ":" not in target:
+        raise ConfigError(f"instance must be 'module:attribute', got {target!r}")
+
+    if root and str(root) not in sys.path:
+        sys.path.insert(0, str(root))       # so `mypkg` imports from a plain checkout
+    modname, attr = target.split(":", 1)
+    try:
+        mod = importlib.import_module(modname)
+    except ImportError as e:
+        raise ConfigError(f"cannot import {modname} (from instance = {target!r}): {e}") from e
+    try:
+        return getattr(mod, attr)
+    except AttributeError as e:
+        raise ConfigError(f"{modname} has no attribute {attr!r}") from e
+
+
+def _graph_of():
+    iv = _load_instance()
+    return iv, _graph.build(iv)
 
 
 # ── the graph half: reads your source ─────────────────────────────────────────
@@ -52,7 +106,7 @@ def graph(
     An edge going UP is a stage reading something written later.
     """
     try:
-        g = _build()
+        _, g = _graph_of()
         parents = g.stage_parents() if stages_only else g.parent_map()
         order = sorted(parents, key=lambda n: (g.order.get(n, 10 ** 9), n))
         if focus:
@@ -64,7 +118,7 @@ def graph(
         if artifacts and stages_only:
             edge_art = {}
             for node, stage in g.stages.items():
-                for s in stage.inputs(g.scope):
+                for s in stage.inputs():
                     for p in g.producers_of(s.path):
                         edge_art.setdefault(f"{p}->{node}", []).append(s.path)
         typer.echo(_render.render(order, parents, edge_art))
@@ -76,7 +130,7 @@ def graph(
 def stage(name: str) -> None:
     """One stage: what it reads, what it writes, and who is on each end."""
     try:
-        g = _build()
+        _, g = _graph_of()
         hits = [n for n in sorted(g.stages) if name in n]
         if not hits:
             _die(DagioError(f"no stage matching {name!r}. Known: {sorted(g.stages)}"))
@@ -92,10 +146,11 @@ def check(
 ) -> None:
     """Every structural check. Exit 1 on any error."""
     try:
-        g = _build()
+        iv, g = _graph_of()
         errors, warns = _graph.check(g)
-        if trace:
-            de, dw = _graph.drift(g, _rec.load(trace))
+        path = trace or iv.trace_path
+        if trace or (path and path.exists()):
+            de, dw = _graph.drift(g, _rec.load(path))
             errors += de
             warns += dw
     except DagioError as e:
@@ -118,15 +173,16 @@ def drift(
     """What the code declares, against what a run actually did.
 
     recorded but not declared is an ERROR — the process really did open that file.
-    declared but not recorded is a WARN — an absent optional input, or a branch not taken.
+    declared but not recorded is a WARN — an absent optional input, a branch not taken.
     """
-    path = trace or _cfg().trace_path
-    if path is None:
-        _die(DagioError(
-            "no trace. Run your pipeline with DAGIO_TRACE=.dagio/trace.ndjson, "
-            "or pass --trace."))
     try:
-        errors, warns = _graph.drift(_build(), _rec.load(path))
+        iv, g = _graph_of()
+        path = trace or iv.trace_path
+        if path is None:
+            _die(DagioError(
+                "no trace. Construct your Invalidator with trace=..., set "
+                "$INVALIDATOR_TRACE, or pass --trace."))
+        errors, warns = _graph.drift(g, _rec.load(path))
     except DagioError as e:
         _die(e)
     for w in warns:
@@ -142,7 +198,8 @@ def drift(
 def export(out: Path = typer.Option(None, help="write here instead of stdout")) -> None:
     """`{nodes, parent_map}` JSON — dbt's manifest shape."""
     try:
-        body = json.dumps(_graph.export(_build()), indent=2, sort_keys=True)
+        _, g = _graph_of()
+        body = json.dumps(_graph.export(g), indent=2, sort_keys=True)
     except DagioError as e:
         _die(e)
     if out:
@@ -158,12 +215,13 @@ def export(out: Path = typer.Option(None, help="write here instead of stdout")) 
 def status() -> None:
     """Every declared artifact: current, stale, or missing."""
     try:
-        g = _build()
+        iv, g = _graph_of()
     except DagioError as e:
         _die(e)
+    typer.secho(f"  {iv!r}\n", fg=typer.colors.BRIGHT_BLACK)
     rows, stale = [], 0
     for path in g.produced:
-        reason = _state.why_stale(path, _static.inputs_for_artifact(path))
+        reason = iv.why_stale(path)
         stale += reason is not None
         rows.append((path, reason))
     for path, reason in sorted(rows):
@@ -180,10 +238,11 @@ def status() -> None:
 def why(artifact: str) -> None:
     """Why one artifact would rebuild — or that it would not."""
     try:
-        reason = _state.why_stale(artifact, _static.inputs_for_artifact(artifact))
+        iv = _load_instance()
+        reason = iv.why_stale(artifact)
     except DagioError as e:
         _die(e)
-    entry = _state.record_of(artifact)
+    entry = iv.record_of(artifact)
     if entry:
         typer.echo(f"  id   {entry['id']}")
         typer.echo(f"  fp   {entry['fp']}   ({entry.get('fp_how')})")
@@ -206,14 +265,12 @@ def plan() -> None:
     papered over.
     """
     try:
-        g = _build()
+        iv, g = _graph_of()
     except DagioError as e:
         _die(e)
-    definite = {p for p in g.produced
-                if _state.why_stale(p, _static.inputs_for_artifact(p)) is not None}
+    definite = {p for p in g.produced if iv.why_stale(p) is not None}
     parents = g.parent_map()
-    maybe = set()
-    frontier = set(definite)
+    maybe, frontier = set(), set(definite)
     while frontier:
         nxt = set()
         for path in g.produced:
@@ -237,21 +294,14 @@ def viz(out: Path = typer.Option(Path("dag.png"), help="where to write the image
     try:
         from .viz import draw
     except ImportError:
-        _die(DagioError("viz needs networkx and matplotlib: pip install 'dagio[viz]'"))
+        _die(DagioError("viz needs networkx and matplotlib: pip install 'invalidator[viz]'"))
     try:
-        draw(_build(), out)
+        _, g = _graph_of()
+        draw(g, out)
     except DagioError as e:
         _die(e)
     typer.echo(f"wrote {out}")
 
 
-def main() -> None:
-    try:
-        app()
-    except DagioError as e:
-        typer.secho(str(e), fg=typer.colors.RED, err=True)
-        sys.exit(1)
-
-
 if __name__ == "__main__":
-    main()
+    app()

@@ -1,59 +1,50 @@
 from __future__ import annotations
 
+import textwrap
+
 import pytest
 
-import dagio
-from dagio import config as _config
-from dagio import io as _io
-from dagio import record as _rec
-from dagio import state as _state
+from invalidator import Invalidator
+from invalidator import static as _static
+
+
+@pytest.fixture(autouse=True)
+def _clear_scan_cache():
+    """The static scan is memoised per (project_root, source_dirs), and every test builds
+    a fresh temp project — so a stale entry from a previous test would be invisible."""
+    _static.reset()
+    yield
+    _static.reset()
 
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    """A throwaway project: a source tree, a data root, and one version axis."""
+    """A throwaway project directory with a source tree and a data root."""
     root = tmp_path / "proj"
     (root / "stages").mkdir(parents=True)
-    (root / "pyproject.toml").write_text(
-        '[tool.dagio]\n'
-        'data_root = "data"\n'
-        'source_dirs = ["stages"]\n'
-        '\n[tool.dagio.versions]\n'
-        'data = "0.1.0"\n'
-        'model = "0.1.0"\n'
-    )
-    (root / "data").mkdir()
-
-    for var in ("DAGIO_TRACE", "DAGIO_SCOPE", "DAGIO_STATE", "DAGIO_DATA_ROOT",
-                "DAGIO_STAGE"):
+    (root / "data").mkdir(parents=True)
+    (root / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "0"\n')
+    for var in ("INVALIDATOR_TRACE", "INVALIDATOR_FORCE", "INVALIDATOR_STAGE",
+                "INVALIDATOR_INSTANCE"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("DAGIO_PROJECT", str(root))
     monkeypatch.chdir(root)
-
-    _config.reset()
-    _state.reset()
-    _io.reset()
-    _rec.reset()
-    yield root
-    _config.reset()
-    _state.reset()
-    _io.reset()
-    _rec.reset()
+    return root
 
 
 @pytest.fixture
-def bump(project):
-    """Change a version axis, the way editing pyproject.toml would."""
-    def _bump(axis: str, value: str):
-        cfg = dagio.get_config()
-        versions = dict(cfg.versions)
-        versions[axis] = value
-        _config.configure(versions=versions)
-        _state.reset()
-    return _bump
+def iv(project):
+    """An Invalidator over that project. Constructor-only config, so this is all of it."""
+    return Invalidator(
+        data_root=project / "data",
+        data_version="v1",
+        source_dirs=["stages"],
+        project_root=project,
+    )
 
 
-def fresh_process():
-    """Simulate the next stage starting: a new process reads nothing yet."""
-    _io.reset()
-    _state.reset()
+def write_stage(project, rel: str, body: str) -> None:
+    """Drop a stage file into the project, dedented."""
+    p = project / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(textwrap.dedent(body).lstrip())
+    _static.reset()

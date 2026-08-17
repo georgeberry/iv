@@ -170,11 +170,11 @@ def stage_card(node: str, g, color: bool | None = None) -> str:
     if stage is None:
         raise KeyError(node)
     lines = [_c("1", node, on)]
-    for s in stage.externals(g.scope):
+    for s in stage.externals():
         lines.append(f"  {_c('1', 'from', on)}  {s.path}")
         lines.append(f"      {_c('90', s.why, on)}")
-    for kind, sites in (("reads", stage.inputs(g.scope)),
-                        ("writes", stage.outputs(g.scope))):
+    for kind, sites in (("reads", stage.inputs()),
+                        ("writes", stage.outputs())):
         if not sites:
             continue
         lines.append(f"  {_c('1', kind, on)}")

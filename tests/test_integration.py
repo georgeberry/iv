@@ -1,9 +1,8 @@
-"""The real thing: stage files on disk, run as separate processes, guarded on their own
-outputs — which is how a pipeline actually works, one process per stage.
+"""The real thing: stage files on disk, run as separate processes.
 
-The in-process tests can only exercise the state file. These exercise the whole loop: the
-static scan reads the source, the guard asks it what the stage reads now, the run stamps,
-and the next run answers from the state file.
+That is how a pipeline actually works — one process per stage — and it is the only way to
+exercise the whole loop: the static scan reads the source, the guard asks it what the
+stage reads now, the run stamps, and the next run answers from the state file.
 """
 from __future__ import annotations
 
@@ -16,50 +15,49 @@ import textwrap
 import polars as pl
 import pytest
 
-from dagio import config as _config
-from dagio import static as _static
-
 VENV_PY = sys.executable
+
+PIPELINE = '''
+    from invalidator import Invalidator
+
+    iv = Invalidator(
+        data_root="data",
+        data_version="v1",
+        source_dirs=["stages"],
+        stages=["stages/build_stats.py", "stages/build_ratings.py"],
+    )
+'''
 
 STATS = '''
     """Season points by team."""
-    import argparse
     import polars as pl
-    import dagio as dg
+    from pipeline import iv
 
-    def build():
-        games = pl.read_parquet(dg.reads(
-            "raw/games.parquet", why="one row per team per game; the only source of points"))
-        out = games.group_by("team", maintain_order=True).agg(pl.col("pts").sum())
-        with dg.writes("processed/team_stats.parquet",
-                       why="season points by team; the rating denominator") as p:
-            out.write_parquet(p)
+    @iv.step("processed/team_stats.parquet",
+             why="season points by team; the rating denominator")
+    def build(out):
+        games = pl.read_parquet(iv.reads(
+            "raw/games.parquet",
+            why="one row per team per game; the only source of points"))
+        games.group_by("team", maintain_order=True).agg(
+            pl.col("pts").sum()).write_parquet(out)
 
-    ap = argparse.ArgumentParser()
-    dg.add_guard_args(ap)
-    a = ap.parse_args()
-    dg.build_if_needed("processed/team_stats.parquet", build,
-                       if_needed=a.if_needed, force=a.force)
+    build()
 '''
 
 RATINGS = '''
     """Team ratings."""
-    import argparse
     import polars as pl
-    import dagio as dg
+    from pipeline import iv
 
-    def build():
-        stats = pl.read_parquet(dg.reads(
+    @iv.step("processed/ratings.parquet",
+             why="team ratings the app renders", terminal=True)
+    def build(out):
+        stats = pl.read_parquet(iv.reads(
             "processed/team_stats.parquet", why="season points by team"))
-        with dg.writes("processed/ratings.parquet",
-                       why="team ratings the app renders", terminal=True) as p:
-            stats.with_columns((pl.col("pts") / 100).alias("rating")).write_parquet(p)
+        stats.with_columns((pl.col("pts") / 100).alias("rating")).write_parquet(out)
 
-    ap = argparse.ArgumentParser()
-    dg.add_guard_args(ap)
-    a = ap.parse_args()
-    dg.build_if_needed("processed/ratings.parquet", build,
-                       if_needed=a.if_needed, force=a.force)
+    build()
 '''
 
 GAMES = pl.DataFrame({"game_id": [1, 2, 3], "team": ["A", "B", "A"], "pts": [90, 85, 100]})
@@ -67,30 +65,31 @@ GAMES = pl.DataFrame({"game_id": [1, 2, 3], "team": ["A", "B", "A"], "pts": [90,
 
 @pytest.fixture
 def pipeline(project):
+    (project / "pipeline.py").write_text(textwrap.dedent(PIPELINE).lstrip())
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0"\n\n'
+        '[tool.invalidator]\ninstance = "pipeline:iv"\n')
     for rel, body in (("stages/build_stats.py", STATS),
                       ("stages/build_ratings.py", RATINGS)):
         (project / rel).write_text(textwrap.dedent(body).lstrip())
-    (project / "pyproject.toml").write_text(
-        (project / "pyproject.toml").read_text().replace(
-            'data_root = "data"',
-            'data_root = "data"\n'
-            'stages = ["stages/build_stats.py", "stages/build_ratings.py"]'))
-    _config.reset()
-    _static.reset()
-    root = project / "data" / "raw"
-    root.mkdir(parents=True, exist_ok=True)
-    GAMES.write_parquet(root / "games.parquet")
+    raw = project / "data" / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    GAMES.write_parquet(raw / "games.parquet")
     return project
 
 
-def run(project, stage: str, *args) -> str:
-    env = {**os.environ, "DAGIO_PROJECT": str(project),
-           "PYTHONPATH": str(project)}
+def run(project, stage: str, *args, check: bool = True) -> str:
+    env = {**os.environ, "PYTHONPATH": str(project), "NO_COLOR": "1",
+           "PYTHONDONTWRITEBYTECODE": "1"}
     env.pop("VIRTUAL_ENV", None)
+    for var in ("INVALIDATOR_TRACE", "INVALIDATOR_FORCE"):
+        if var not in os.environ:
+            env.pop(var, None)
     r = subprocess.run([VENV_PY, stage, *args], cwd=project, env=env,
                        capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout + r.stderr
-    return r.stdout
+    if check:
+        assert r.returncode == 0, r.stdout + r.stderr
+    return r.stdout + r.stderr
 
 
 def run_all(project, *args) -> str:
@@ -99,114 +98,122 @@ def run_all(project, *args) -> str:
 
 
 def state(project) -> dict:
-    p = project / "data" / ".dagio" / "state.json"
+    p = project / "data" / ".invalidator" / "state.json"
     return json.loads(p.read_text())["artifacts"] if p.exists() else {}
 
 
 def test_cold_build_then_a_no_op_run(pipeline):
-    run_all(pipeline, "--if-needed")
+    run_all(pipeline)
     assert (pipeline / "data" / "processed" / "ratings.parquet").exists()
     st = state(pipeline)
     assert set(st) == {"processed/team_stats.parquet", "processed/ratings.parquet"}
     assert st["processed/ratings.parquet"]["in"]["processed/team_stats.parquet"]["id"] \
-        == st["processed/team_stats.parquet"]["id"], "the id is folded in, not the fingerprint"
+        == st["processed/team_stats.parquet"]["id"], \
+        "the id is folded in, not the fingerprint"
 
-    out = run_all(pipeline, "--if-needed")
+    out = run_all(pipeline)
     assert out.count("is current — skipping") == 2
 
 
 def test_a_new_row_at_the_root_rebuilds_the_chain(pipeline):
-    run_all(pipeline, "--if-needed")
+    run_all(pipeline)
     GAMES.vstack(pl.DataFrame({"game_id": [4], "team": ["B"], "pts": [77]})) \
          .write_parquet(pipeline / "data" / "raw" / "games.parquet")
 
-    out = run_all(pipeline, "--if-needed")
+    out = run_all(pipeline)
     assert "input moved: raw/games.parquet" in out
     assert "input moved: processed/team_stats.parquet" in out
     assert "skipping" not in out
 
 
-def test_why_names_the_component_that_moved(pipeline):
-    run_all(pipeline, "--if-needed")
-    from dagio import state as _state
-    _state.reset()
-    _config.reset()
-    os.environ["DAGIO_PROJECT"] = str(pipeline)
-    GAMES.with_columns(pl.col("pts") * 2).write_parquet(
-        pipeline / "data" / "raw" / "games.parquet")
-    import dagio as dg
-    assert dg.why_stale("processed/team_stats.parquet").startswith(
-        "input moved: raw/games.parquet")
+def test_data_version_bump_rebuilds_everything(pipeline):
+    run_all(pipeline)
+    src = pipeline / "pipeline.py"
+    src.write_text(src.read_text().replace('data_version="v1"',
+                                           'data_version="v2-later"'))
+
+    out = run_all(pipeline)
+    assert out.count("data_version bumped: v1 -> v2-later") == 2, out
 
 
 def test_adding_a_read_to_the_source_makes_it_stale(pipeline):
     """The case the state file alone cannot see. The stored record has no entry for a path
     the last build never read, so only the code can say the input set changed."""
-    run_all(pipeline, "--if-needed")
+    run_all(pipeline)
     pl.DataFrame({"team": ["A", "B"], "pace": [98.0, 101.0]}).write_parquet(
         pipeline / "data" / "raw" / "pace.parquet")
 
     src = pipeline / "stages" / "build_stats.py"
     patched = src.read_text().replace(
-        "    out = games.group_by",
-        '    pl.read_parquet(dg.reads("raw/pace.parquet", why="team pace"))\n'
-        "    out = games.group_by")
+        "    games.group_by",
+        '    pl.read_parquet(iv.reads("raw/pace.parquet", why="team pace"))\n'
+        "    games.group_by")
     assert "raw/pace.parquet" in patched
     src.write_text(patched)
 
-    out = run(pipeline, "stages/build_stats.py", "--if-needed")
+    out = run(pipeline, "stages/build_stats.py")
     assert "input added: raw/pace.parquet" in out, out
 
 
 def test_a_failing_stage_stamps_nothing_and_stays_stale(pipeline):
     src = pipeline / "stages" / "build_stats.py"
     patched = src.read_text().replace(
-        "        out.write_parquet(p)",
-        "        out.write_parquet(p)\n"
-        "        raise RuntimeError('the fit diverged')")
+        '        pl.col("pts").sum()).write_parquet(out)',
+        '        pl.col("pts").sum()).write_parquet(out)\n'
+        "    raise RuntimeError('the fit diverged')")
     assert "the fit diverged" in patched
     src.write_text(patched)
 
-    env = {**os.environ, "DAGIO_PROJECT": str(pipeline), "PYTHONPATH": str(pipeline)}
-    env.pop("VIRTUAL_ENV", None)
-    r = subprocess.run([VENV_PY, "stages/build_stats.py", "--if-needed"],
-                       cwd=pipeline, env=env, capture_output=True, text=True)
-    assert r.returncode != 0
+    out = run(pipeline, "stages/build_stats.py", check=False)
+    assert "the fit diverged" in out
     assert "processed/team_stats.parquet" not in state(pipeline)
     assert (pipeline / "data" / "processed" / "team_stats.parquet").exists(), \
         "the partial file is on disk — which is exactly why the stamp must not be"
 
     src.write_text(textwrap.dedent(STATS).lstrip())          # fix the stage
-    out = run(pipeline, "stages/build_stats.py", "--if-needed")
-    assert "never stamped" in out
+    assert "never stamped" in run(pipeline, "stages/build_stats.py")
 
 
-def test_the_trace_records_what_ran(pipeline):
-    env_trace = pipeline / ".dagio" / "trace.ndjson"
-    os.environ["DAGIO_TRACE"] = str(env_trace)
-    try:
-        run_all(pipeline, "--if-needed")
-    finally:
-        os.environ.pop("DAGIO_TRACE")
+def test_code_true_rebuilds_when_the_function_body_changes(project, pipeline):
+    """Opt-in source hashing. Shallow by design — it sees this function, not its helpers."""
+    src = pipeline / "stages" / "build_stats.py"
+    src.write_text(src.read_text().replace(
+        'why="season points by team; the rating denominator")',
+        'why="season points by team; the rating denominator", code=True)'))
+    run(pipeline, "stages/build_stats.py")
+    assert "is current — skipping" in run(pipeline, "stages/build_stats.py")
 
-    events = [json.loads(l) for l in env_trace.read_text().splitlines() if l.strip()]
+    # A comment and reformatting are not a change: the hash is over the parsed tree.
+    src.write_text(src.read_text().replace(
+        "    games = pl.read_parquet(iv.reads(",
+        "    # a comment, which changes nothing\n    games = pl.read_parquet(iv.reads("))
+    assert "is current — skipping" in run(pipeline, "stages/build_stats.py")
+
+    # Changing what it computes is.
+    src.write_text(src.read_text().replace('pl.col("pts").sum()',
+                                           'pl.col("pts").max()'))
+    assert "code changed" in run(pipeline, "stages/build_stats.py")
+
+
+def test_the_trace_records_what_ran(pipeline, monkeypatch):
+    trace = pipeline / ".invalidator" / "trace.ndjson"
+    monkeypatch.setenv("INVALIDATOR_TRACE", str(trace))
+    run_all(pipeline)
+
+    events = [json.loads(l) for l in trace.read_text().splitlines() if l.strip()]
     pairs = {(e["node"], e["op"], e["rel"]) for e in events if e["kind"] == "io"}
     assert ("stages/build_stats.py", "read", "raw/games.parquet") in pairs
     assert ("stages/build_ratings.py", "write", "processed/ratings.parquet") in pairs
     assert all(e.get("why") for e in events if e["kind"] == "io")
 
 
-def test_drift_is_empty_when_the_code_and_the_run_agree(pipeline):
-    trace = pipeline / ".dagio" / "trace.ndjson"
-    os.environ["DAGIO_TRACE"] = str(trace)
-    try:
-        run_all(pipeline, "--if-needed")
-    finally:
-        os.environ.pop("DAGIO_TRACE")
+def test_drift_is_empty_when_the_code_and_the_run_agree(pipeline, monkeypatch):
+    trace = pipeline / ".invalidator" / "trace.ndjson"
+    monkeypatch.setenv("INVALIDATOR_TRACE", str(trace))
+    run_all(pipeline)
 
-    _config.reset()
-    _static.reset()
-    os.environ["DAGIO_PROJECT"] = str(pipeline)
-    from dagio import graph as G, record as _rec
-    errors, _ = G.drift(G.build(), _rec.load(trace))
-    assert errors == []
+    r = subprocess.run([VENV_PY, "-m", "invalidator.cli", "drift"], cwd=pipeline,
+                       env={**os.environ, "PYTHONPATH": str(pipeline), "NO_COLOR": "1"},
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "no drift" in r.stdout

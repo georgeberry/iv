@@ -2,12 +2,12 @@
 
 Artifacts are named by their path relative to the data root — `processed/xpm.parquet`,
 never an absolute path or a bucket URI. That is what makes a trace from one tree and a
-trace from another talk about the same artifact, and what lets the id survive moving the
+trace from another talk about the same artifact, and what lets an id survive moving the
 data somewhere else.
 
 A partitioned artifact is named by a TEMPLATE:
 
-    dagio.reads("raw/player_box/{season}.parquet", why="...", part={"season": "2026"})
+    iv.reads("raw/box/{season}.parquet", why="...", part={"season": "2026"})
 
 The template is the literal, so the static scan can still read it without running
 anything; the value is runtime. `{season}` is the partition key, and it is also how the
@@ -16,10 +16,31 @@ graph knows twenty-one files are one node.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
-from .errors import DeclError
+from .errors import ConfigError, DeclError
 
 _FIELD = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def mkpath(spec, project_root: Path):
+    """A data_root spec -> Path, or a CloudPath when it names a bucket.
+
+    cloudpathlib is not a dependency. A URI without it is a clear error rather than a Path
+    that silently means something else on disk.
+    """
+    if not isinstance(spec, str):
+        return spec
+    if "://" not in spec:
+        p = Path(spec)
+        return p if p.is_absolute() else project_root / p
+    try:
+        from cloudpathlib import AnyPath
+    except ImportError as e:
+        raise ConfigError(
+            f"data_root {spec!r} is a URI, which needs cloudpathlib installed "
+            f"(pip install 'cloudpathlib[gs]')") from e
+    return AnyPath(spec)
 
 
 def fields(template: str) -> tuple[str, ...]:
@@ -48,19 +69,17 @@ def render(template: str, part: dict[str, str] | None) -> str:
     return template.format(**{k: str(v) for k, v in given.items()})
 
 
-def resolve(rel: str):
+def resolve(iv, rel: str):
     """A rendered rel path -> the concrete path under the data root."""
-    from .config import get
     if _FIELD.search(rel):
         raise DeclError(
             f"{rel!r} still has an unrendered placeholder; pass part= at the call site")
-    return get().data_root / rel
+    return iv.data_root / rel
 
 
-def to_rel(path) -> str | None:
+def to_rel(iv, path) -> str | None:
     """A concrete path -> its rel string, or None if it is outside the data tree."""
-    from .config import get
-    root = str(get().data_root).rstrip("/")
+    root = str(iv.data_root).rstrip("/")
     s = str(path)
     if s == root:
         return ""
