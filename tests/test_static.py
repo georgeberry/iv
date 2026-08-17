@@ -352,3 +352,50 @@ def test_a_steps_inputs_are_its_own_not_the_files(project):
     assert static.inputs_for_artifact(g.iv, "processed/a.parquet") == {"raw/x.parquet": "data"}
     assert static.inputs_for_artifact(g.iv, "processed/b.parquet") == \
         {"processed/a.parquet": "data"}
+
+
+def test_a_steps_inputs_follow_its_helpers(project):
+    """The first stage migrated in anger factored its one read into a helper shared by two
+    steps. Attributed lexically, neither step owned any read and both were permanently
+    stale — so a step's inputs follow same-file calls, transitively."""
+    from invalidator import static
+    g = make(project, {"stages/two.py": '''
+        from mypipe import iv
+
+        def _source():
+            return iv.reads("raw/x.parquet", why="shared by both steps")
+
+        def _extra():
+            return iv.reads("raw/only_b.parquet", why="reached only from b")
+
+        @iv.step("processed/a.parquet", why="the first")
+        def a(out):
+            _source()
+
+        @iv.step("processed/b.parquet", why="the second", terminal=True)
+        def b(out):
+            _source()
+            _extra()
+    '''})
+    assert static.inputs_for_artifact(g.iv, "processed/a.parquet") == \
+        {"raw/x.parquet": "data"}
+    assert static.inputs_for_artifact(g.iv, "processed/b.parquet") == \
+        {"raw/x.parquet": "data", "raw/only_b.parquet": "data"}
+
+
+def test_a_function_passed_by_name_is_reached(project):
+    """`for_each(seasons, build_one, ...)` never calls build_one syntactically, but its
+    reads are the artifact's inputs."""
+    from invalidator import static
+    g = make(project, {"stages/p.py": '''
+        from mypipe import iv
+
+        def build_one(season):
+            iv.reads("raw/box/{season}.parquet", why="one season",
+                     part={"season": season})
+
+        iv.for_each(["2024"], build_one, output="processed/totals.parquet",
+                    key="season", why="per-season totals")
+    '''})
+    assert static.inputs_for_artifact(g.iv, "processed/totals.parquet") == \
+        {"raw/box/{season}.parquet": "data"}

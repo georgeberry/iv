@@ -85,13 +85,39 @@ class Site:
 
 @dataclass(frozen=True)
 class Stage:
-    """One file's call sites."""
+    """One file's call sites, plus the within-file call graph that scopes them.
+
+    A step's reads are rarely all lexically inside it — the first stage migrated in anger
+    factored its one read into a `_box_features()` helper shared by two steps, which left
+    both steps owning no reads at all and therefore permanently stale. So a step's inputs
+    are the reads inside it PLUS the reads inside any same-file function it calls,
+    transitively. That is still purely static, and it is what a reader would assume.
+
+    A read in a function from ANOTHER module is still invisible; `invalidator drift`
+    against a real trace is what catches those.
+    """
     node: str
     sites: tuple[Site, ...] = ()
     guards: tuple[str, ...] = ()                # artifacts named in a build_if_needed(...)
+    calls: tuple[tuple[str, tuple[str, ...]], ...] = ()     # fn -> same-file fns it calls
 
     def _of(self, *kinds: str) -> tuple[Site, ...]:
         return tuple(s for s in self.sites if s.kind in kinds)
+
+    def reachable(self, fn: str) -> set[str]:
+        """`fn` and every same-file function it can reach."""
+        calls, seen, stack = dict(self.calls), {fn}, [fn]
+        while stack:
+            for c in calls.get(stack.pop(), ()):
+                if c not in seen:
+                    seen.add(c)
+                    stack.append(c)
+        return seen
+
+    def inputs_of(self, owner: str) -> tuple[Site, ...]:
+        """The inputs belonging to one step, following its helpers."""
+        scope = self.reachable(owner)
+        return tuple(s for s in self.inputs() if s.owner in scope)
 
     def inputs(self) -> tuple[Site, ...]:
         """Everything that must exist BEFORE this stage runs. Id-bearing only."""
@@ -234,11 +260,14 @@ class _Visitor(ast.NodeVisitor):
         self.sites: list[Site] = []
         self.guards: list[str] = []
         self._seen: set[int] = set()            # step calls already handled as decorators
-        self._owner = ""                        # the @step function currently being walked
+        self._owner = ""                        # the function currently being walked
+        self._defined: set[str] = set()         # every function defined in this file
+        self.calls: dict[str, set[str]] = {}    # caller -> same-file callees
 
     # A `@iv.step(...)` decorator is handled here rather than in visit_Call, because only
     # from the FunctionDef can we see the body it guards and hash it.
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._defined.add(node.name)
         step_owner = ""
         for dec in node.decorator_list:
             if not isinstance(dec, ast.Call):
@@ -263,7 +292,9 @@ class _Visitor(ast.NodeVisitor):
         # it — and the scan has to say the same thing or `why_stale` reports an input the
         # record has never seen. Reads in a separately-defined helper are NOT attributed;
         # `invalidator drift` is what catches those.
-        outer, self._owner = self._owner, step_owner or self._owner
+        # Every function is an owner, not just a step one: a helper's reads have to be
+        # attributed to the helper so a step that calls it can pick them up.
+        outer, self._owner = self._owner, node.name
         try:
             self.generic_visit(node)
         finally:
@@ -280,6 +311,17 @@ class _Visitor(ast.NodeVisitor):
                                          owner=self._owner))
             elif name == "build_if_needed":
                 self.guards.extend(_guarded_paths(node))
+            elif isinstance(node.func, ast.Name):
+                # A plain call to something this file might define. Resolved after the
+                # walk, since a helper may be defined below its caller.
+                self.calls.setdefault(self._owner, set()).add(node.func.id)
+        # A function passed BY NAME is reached too, even though nothing here calls it
+        # syntactically — `iv.for_each(SEASONS, build_one, ...)` and
+        # `iv.build_if_needed(rel, build)` are exactly this, and their reads live in the
+        # callee.
+        for arg in [*node.args, *(k.value for k in node.keywords)]:
+            if isinstance(arg, ast.Name):
+                self.calls.setdefault(self._owner, set()).add(arg.id)
         self.generic_visit(node)
 
 
@@ -313,8 +355,11 @@ def scan_file(path: Path, root: Path) -> Stage | None:
         return None
     v = _Visitor(rel)
     v.visit(tree)
-    return Stage(node=rel, sites=tuple(v.sites), guards=tuple(v.guards)) \
-        if v.sites else None
+    if not v.sites:
+        return None
+    calls = tuple((fn, tuple(sorted(c & v._defined)))
+                  for fn, c in sorted(v.calls.items()) if c & v._defined)
+    return Stage(node=rel, sites=tuple(v.sites), guards=tuple(v.guards), calls=calls)
 
 
 def scan(iv, force: bool = False) -> dict[str, Stage]:
@@ -378,8 +423,8 @@ def inputs_for_artifact(iv, rel: str) -> dict[str, object] | None:
     if hit is None:
         return None
     stage, site = hit
-    return {s.path: s.fp for s in stage.inputs()
-            if s.owner == site.owner and not matches(s.path, rel)}
+    return {s.path: s.fp for s in stage.inputs_of(site.owner)
+            if not matches(s.path, rel)}
 
 
 def version_for_artifact(iv, rel: str) -> str | None:

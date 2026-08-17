@@ -371,8 +371,13 @@ class Invalidator:
             @functools.wraps(fn)
             def wrapper(*args, **kwargs):
                 def run():
-                    outer = dict(self._reads)
-                    self._reads.clear()          # this step's reads are its own
+                    outer, outer_w = dict(self._reads), list(self._writes)
+                    # This step's reads AND writes are its own. Without scoping the
+                    # writes, a second step reading in the same process trips the
+                    # read-after-write warning against the FIRST step's output, which is
+                    # true and entirely irrelevant.
+                    self._reads.clear()
+                    self._writes.clear()
                     try:
                         with ExitStack() as stack:
                             outs = [stack.enter_context(
@@ -384,6 +389,7 @@ class Invalidator:
                             return fn(*outs, *args, **kwargs)
                     finally:
                         self._reads.update(outer)
+                        self._writes[:] = outer_w + self._writes
 
                 return self.build_if_needed(rels, run, if_needed=if_needed)
 
