@@ -237,3 +237,48 @@ def test_drift_is_empty_when_the_code_and_the_run_agree(pipeline, monkeypatch):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "no drift" in r.stdout
+
+
+def test_a_read_the_scan_cannot_see_does_not_loop(pipeline):
+    """The regression for a permanent rebuild.
+
+    A read reached through a dict dispatch is invisible to any static walk, so the run
+    records an input the scan does not know about. Comparing the two sets then says
+    'input removed', the rebuild records it again, and the stage NEVER skips — correct
+    output, no error, and the entire point of the cache silently gone.
+
+    It mirrors: a read inside an untaken branch is declared and never recorded.
+
+    So the recorded ids govern. This asserts the stage settles rather than that the two
+    descriptions agree — agreement is `drift`'s job, against a real trace.
+    """
+    src = pipeline / "stages" / "build_stats.py"
+    src.write_text(textwrap.dedent('''
+        """Season points by team."""
+        import polars as pl
+        from pipeline import iv
+
+        def _hidden():
+            return iv.reads("raw/extra.parquet", why="reached through a dict")
+
+        _DISPATCH = {"go": _hidden}
+
+        @iv.step("processed/team_stats.parquet", why="season points by team")
+        def build(out):
+            games = pl.read_parquet(iv.reads("raw/games.parquet", why="one row per game"))
+            pl.read_parquet(_DISPATCH["go"]())          # the scan cannot follow this
+            games.group_by("team", maintain_order=True).agg(
+                pl.col("pts").sum()).write_parquet(out)
+
+        build()
+    ''').lstrip())
+    pl.DataFrame({"x": [1]}).write_parquet(pipeline / "data" / "raw" / "extra.parquet")
+
+    assert "not on disk" in run(pipeline, "stages/build_stats.py")
+    for _ in range(3):
+        out = run(pipeline, "stages/build_stats.py")
+        assert "is current — skipping" in out, out
+
+    # ...and the input the scan never saw still invalidates, because the RUN recorded it.
+    pl.DataFrame({"x": [2]}).write_parquet(pipeline / "data" / "raw" / "extra.parquet")
+    assert "input moved: raw/extra.parquet" in run(pipeline, "stages/build_stats.py")
