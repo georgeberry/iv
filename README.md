@@ -224,12 +224,23 @@ invalidator drift
 `recorded − declared` is an **error** (the process really did open that file);
 `declared − recorded` is a **warning** (an absent optional input, a branch not taken).
 
-## Known limit
+## Known limits
 
-invalidator only knows about I/O routed through it. A bare `pl.read_parquet(path)` is
-invisible: it will not appear in the graph and will not enter any id. Patching the
-primitives as a *detector* — so an untagged read raises rather than passing quietly — is
-the next thing.
+**Parallel stages corrupt the state file.** Stamping is read-modify-write on one shared
+JSON, so concurrent stages clobber each other's records (8 artifacts written, 4 stamped,
+in a measured run) and can race on the temp file. The failure direction is safe — an
+unstamped artifact rebuilds — but parallel pipelines do not work yet. The fix is one
+record file per artifact.
+
+**Fingerprinting a per-partition collection is O(files) round trips.** Measured against a
+real GCS bucket: 21 files at `fp="rows"` (footer only) took 7.1s. Fine when one stage reads
+the collection and everything downstream reads a single merged file; not fine if every
+stage reads the raw collection.
+
+**invalidator only knows about I/O routed through it.** A bare `pl.read_parquet(path)` is
+A bare `pl.read_parquet(path)` is invisible: it will not appear in the graph and will not
+enter any id. Patching the primitives as a *detector* — so an untagged read raises rather
+than passing quietly — is the next thing.
 
 ## Install
 

@@ -78,3 +78,38 @@ def test_a_callable_returning_nothing_raises(tmp_path):
     FRAME.write_parquet(p)
     with pytest.raises(FingerprintError, match="expected a non-empty str"):
         fp.compute(p, lambda _: "")
+
+
+# ── cloud paths ───────────────────────────────────────────────────────────────
+
+class FakeCloudPath:
+    """Stands in for a cloudpathlib.CloudPath: it is NOT a filename.
+
+    polars and pyarrow reject the object itself ("Object does not have a .read()
+    method") but read the URI natively, and `open(str(self))` would look for a local
+    file literally called `gs://...`. Both mistakes were live until a probe against a
+    real bucket found them.
+    """
+
+    def __init__(self, local, uri):
+        self._local = local
+        self._uri = uri
+
+    def __str__(self):
+        return self._uri
+
+    def open(self, mode="r"):
+        return self._local.open(mode)
+
+
+def test_bytes_reads_through_the_path_object_not_the_string(tmp_path):
+    real = tmp_path / "a.parquet"
+    FRAME.write_parquet(real)
+    fake = FakeCloudPath(real, "gs://bucket/a.parquet")
+    assert fp.compute(fake, "bytes") == fp.compute(real, "bytes")
+
+
+def test_present_works_on_a_cloud_path(tmp_path):
+    real = tmp_path / "a.parquet"
+    FRAME.write_parquet(real)
+    assert fp.compute(FakeCloudPath(real, "gs://bucket/a.parquet"), "present")

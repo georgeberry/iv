@@ -42,6 +42,17 @@ def _short(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:DIGEST_LEN]
 
 
+def _uri(path) -> str:
+    """A path as something polars and pyarrow will accept.
+
+    A `cloudpathlib.CloudPath` is not a `PathLike` as far as they are concerned — polars
+    raises `Object does not have a .read() method` — but both read a `gs://` / `s3://`
+    URI natively, and reading the URI directly is also FASTER than letting cloudpathlib
+    download to its cache, which it re-fetches rather than reuses.
+    """
+    return str(path)
+
+
 def _frame(path):
     """Read a tabular file into polars, whatever its format."""
     try:
@@ -51,15 +62,16 @@ def _frame(path):
             f"fp='data' needs polars (pip install 'dagio[data]'); "
             f"use fp='bytes' for {path} to stay dependency-free"
         ) from e
-    suffix = Path(str(path)).suffix.lower()
+    src = _uri(path)
+    suffix = Path(src).suffix.lower()
     if suffix == ".parquet":
-        return pl.read_parquet(path)
+        return pl.read_parquet(src)
     if suffix == ".csv":
-        return pl.read_csv(path)
+        return pl.read_csv(src)
     if suffix in (".ndjson", ".jsonl"):
-        return pl.read_ndjson(path)
+        return pl.read_ndjson(src)
     if suffix in (".arrow", ".ipc"):
-        return pl.read_ipc(path)
+        return pl.read_ipc(src)
     raise FingerprintError(
         f"fp='data' does not know how to read {path} — it is not one of {_TABULAR}. "
         f"Use fp='bytes' for a document, or pass fp=<callable>."
@@ -108,24 +120,27 @@ def _data_order(path) -> str:
 def _rows(path) -> str:
     """Footer only. One NBA play-by-play season is 220 MiB; hashing it costs more than
     the rebuild it would avoid."""
-    try:
-        import pyarrow.parquet as pq
-        md = pq.ParquetFile(str(path)).metadata
-        return _short(f"rows|{md.num_rows}|{md.num_columns}")
-    except ImportError:
-        pass
+    src = _uri(path)
+    if "://" not in src:
+        try:
+            import pyarrow.parquet as pq
+            md = pq.ParquetFile(src).metadata
+            return _short(f"rows|{md.num_rows}|{md.num_columns}")
+        except ImportError:
+            pass
     try:
         import polars as pl
     except ImportError as e:
         raise FingerprintError(
             f"fp='rows' needs pyarrow or polars to read {path}'s footer") from e
-    n = pl.scan_parquet(path).select(pl.len()).collect().item()
+    n = pl.scan_parquet(src).select(pl.len()).collect().item()
     return _short(f"rows|{n}")
 
 
 def _bytes(path) -> str:
     h = hashlib.sha256()
-    with open(str(path), "rb") as fh:
+    # `path.open` rather than `open(str(path))`: a CloudPath URI is not a filename.
+    with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()[:DIGEST_LEN]
