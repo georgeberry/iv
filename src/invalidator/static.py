@@ -278,8 +278,11 @@ class _Visitor(ast.NodeVisitor):
             if name != "step" or not _has_why(dec):
                 continue
             self._seen.add(id(dec))
+            # Default TRUE, to match `step`'s runtime default. If the two disagree the
+            # run stamps a code hash the CLI cannot see, and the change is invisible to
+            # `status` while a run would rebuild — the worst of both.
             tracks_code = _lit_bool(
-                next((k.value for k in dec.keywords if k.arg == "code"), None), False)
+                next((k.value for k in dec.keywords if k.arg == "code"), None), True)
             digest = function_digest(node) if tracks_code else ""
             # `step` guards by default, which is the whole point of it — so a step over an
             # artifact with no inputs is the guarded-fetch bug, exactly as an explicit

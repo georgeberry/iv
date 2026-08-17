@@ -177,10 +177,29 @@ name is a literal so the static scan can read it; the value lives on the instanc
 no season to project yet. Then there is nothing to stamp, the artifact stays stale, and the
 next run tries again. Without it, not writing is an error.
 
-`code=True` folds a hash of the step function's own source into its id, so editing the
-transform rebuilds it with no version bump. The hash is over the *parsed* tree, so
-reformatting and comments are free. It is off by default because it is **shallow**: it sees
-that function, not the helpers it calls. `data_version` is the honest blunt instrument.
+`code` is **on by default**: a hash of the step function's own source goes into its id, so
+editing the transform rebuilds it with no version bump — and only that step, not its
+neighbours in the same file. The hash is over the *parsed* tree, so reformatting and
+comments are free. It is **shallow**: it sees that function, not the helpers it calls, and
+`data_version` remains the blunt instrument. `code=False` opts out; an unreadable source (a
+notebook, a REPL) degrades quietly rather than failing.
+
+## What the static scan is for
+
+**Information, not authority.** The scan answers *what is declared* — which artifacts
+exist, who produces each, and the metadata at each write site. Those are facts about the
+code as written, and `code=`, `version=` and `policy=` enter the id on that basis.
+
+It does **not** decide staleness. "Which reads will execute" is a claim about program
+execution, not a structural fact, and a scan can approximate it but never decide it.
+Treating an approximation as authoritative means comparing two sets derived by different
+mechanisms — and a rebuild cannot reconcile a disagreement about *derivation*, only about
+data, so any blind spot becomes an artifact that rebuilds forever with correct output and
+no error.
+
+So: the AST says what is declared; the filesystem and the state file say what moved. Only
+**roots** are ever fingerprinted. `invalidator check` and `invalidator drift` report the
+gaps, which is the useful thing to do with an approximation.
 
 ## For each season, do X
 

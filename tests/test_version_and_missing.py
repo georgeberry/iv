@@ -22,11 +22,11 @@ FRAME = pl.DataFrame({"a": [1, 2, 3]})
 STAGES = '''
     from mypipe import iv
 
-    @iv.step("processed/features.parquet", why="the feature pipeline")
+    @iv.step("processed/features.parquet", why="the feature pipeline", code=False)
     def features(out):
         iv.reads("raw/src.parquet", why="the source")
 
-    @iv.step("processed/fit.parquet", why="the model fit", version="model")
+    @iv.step("processed/fit.parquet", why="the model fit", version="model", code=False)
     def fit(out):
         iv.reads("processed/features.parquet", why="the features")
 '''
@@ -46,12 +46,12 @@ def two(project):
     FRAME.write_parquet(raw / "src.parquet")
 
     def build(iv):
-        @iv.step("processed/features.parquet", why="the feature pipeline")
+        @iv.step("processed/features.parquet", why="the feature pipeline", code=False)
         def features(out):
             iv.reads("raw/src.parquet", why="the source")
             FRAME.write_parquet(out)
 
-        @iv.step("processed/fit.parquet", why="the model fit", version="model")
+        @iv.step("processed/fit.parquet", why="the model fit", version="model", code=False)
         def fit(out):
             iv.reads("processed/features.parquet", why="the features")
             FRAME.write_parquet(out)
@@ -89,7 +89,7 @@ def test_an_unknown_version_name_raises_rather_than_defaulting(project, two):
     iv = Invalidator(data_root=project / "data", data_version="v1",
                      source_dirs=["stages"], project_root=project)   # no versions=
 
-    @iv.step("processed/fit.parquet", why="the model fit", version="model")
+    @iv.step("processed/fit.parquet", why="the model fit", version="model", code=False)
     def fit(out):
         FRAME.write_parquet(out)
 
@@ -106,7 +106,7 @@ def test_version_must_be_a_literal_name_not_the_value(project):
             MODEL_VERSION = "m1"
 
             @iv.step("processed/x.parquet", why="a computed version",
-                     version=MODEL_VERSION)
+                     version=MODEL_VERSION, code=False)
             def build(out):
                 iv.reads("raw/src.parquet", why="the source")
         ''')
@@ -127,7 +127,7 @@ def test_an_output_that_is_not_written_is_not_stamped_and_does_not_raise(project
         from mypipe import iv
 
         @iv.step("processed/maybe.parquet", why="a projection with nothing to project yet",
-                 allow_missing=True, terminal=True)
+                 allow_missing=True, terminal=True, code=False)
         def build(out):
             iv.reads("raw/src.parquet", why="the source")
     ''')
@@ -139,7 +139,7 @@ def test_an_output_that_is_not_written_is_not_stamped_and_does_not_raise(project
     produced = []
 
     @iv.step("processed/maybe.parquet", why="a projection with nothing to project yet",
-             allow_missing=True, terminal=True)
+             allow_missing=True, terminal=True, code=False)
     def build(out):
         iv.reads("raw/src.parquet", why="the source")
         if produced:
@@ -162,7 +162,7 @@ def test_without_allow_missing_not_writing_is_an_error(project):
     from invalidator import StateError
     iv = make(project)
 
-    @iv.step("processed/gone.parquet", why="should have written", terminal=True)
+    @iv.step("processed/gone.parquet", why="should have written", terminal=True, code=False)
     def build(out):
         pass
 

@@ -341,7 +341,7 @@ class Invalidator:
     # ── the step decorator ────────────────────────────────────────────────────
 
     def step(self, output: str | Sequence[str], *, why: str,
-             code: bool = False,
+             code: bool | None = None,
              terminal: bool = False,
              fp: str | Callable = "data",
              policy: str = "tracked",
@@ -370,17 +370,32 @@ class Invalidator:
         rather than per-file: reads inside the function belong to this step's outputs and
         to nothing else.
 
-        code=True folds a hash of the function's own source into the id, so editing the
-        transform rebuilds it with no version bump. It is off by default because the hash
-        is SHALLOW — it sees this function and not the helpers it calls, so a change can
-        still slip past. `data_version` is the honest blunt instrument.
+`code` (ON by default) folds a hash of the function's own source into the id, so
+        editing the transform rebuilds it with no version bump.
+
+        It belongs in the id because it is a DECLARATION — a fact about the code as
+        written — not a prediction about what will execute. That distinction is the whole
+        design: `ast.unparse` of this function is computed the same deterministic way at
+        run time and by the CLI, so it is a hash compared against a hash. Asking the same
+        parser to predict which reads will happen is a different kind of question, and
+        answering it wrongly is silent.
+
+        The hash is over the PARSED tree, so reformatting and comments are free. It is
+        SHALLOW — it sees this function and the decorators are stripped, but not the
+        helpers it calls — so a change can still slip past. `data_version` remains the
+        blunt instrument; `code=False` opts out.
         """
         rels = [output] if isinstance(output, str) else list(output)
         if not rels:
             raise DeclError("step() needs at least one output path")
 
         def decorate(fn: Callable) -> Callable:
-            code_key = source_digest(fn) if code else ""
+            # `code=None` is the default: hash the source if it can be read, and carry on
+            # quietly if it cannot. A default must not break code that worked — a notebook
+            # or a REPL has no readable source, and refusing to run there would be a
+            # strange price for an optimisation. `code=True` is the explicit ask, and that
+            # one raises rather than silently giving less than was asked for.
+            code_key = "" if code is False else source_digest(fn, required=bool(code))
 
             @functools.wraps(fn)
             def wrapper(*args, **kwargs):
@@ -595,7 +610,7 @@ def _check_why(why: object, path: str) -> str:
     return why
 
 
-def source_digest(fn: Callable) -> str:
+def source_digest(fn: Callable, required: bool = True) -> str:
     """A hash of what a function DOES, insensitive to how it is spelled.
 
     `ast.unparse` normalises whitespace, comments and formatting away, and the decorators
@@ -607,9 +622,11 @@ def source_digest(fn: Callable) -> str:
     try:
         src = inspect.getsource(fn)
     except (OSError, TypeError) as e:
-        raise DeclError(
-            f"code=True needs readable source for {getattr(fn, '__name__', fn)!r}, and "
-            f"there is none (a REPL, or a C function). Drop code=True.") from e
+        if required:
+            raise DeclError(
+                f"code=True needs readable source for {getattr(fn, '__name__', fn)!r}, "
+                f"and there is none (a REPL, or a C function). Drop code=True.") from e
+        return ""
     import textwrap
     tree = ast.parse(textwrap.dedent(src))
     node = tree.body[0]

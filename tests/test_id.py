@@ -24,7 +24,7 @@ STATS = '''
     from conftest_pipeline import iv
 
     @iv.step("processed/team_stats.parquet",
-             why="season points by team; the rating denominator")
+             why="season points by team; the rating denominator", code=False)
     def build(out):
         games = pl.read_parquet(iv.reads(
             "raw/games.parquet", why="one row per team per game"))
@@ -37,7 +37,7 @@ RATINGS = '''
     from conftest_pipeline import iv
 
     @iv.step("processed/ratings.parquet",
-             why="team ratings the app renders", terminal=True)
+             why="team ratings the app renders", terminal=True, code=False)
     def build(out):
         stats = pl.read_parquet(iv.reads(
             "processed/team_stats.parquet", why="season points by team"))
@@ -57,7 +57,7 @@ def pipe(project, iv):
     write_root(project)
 
     @iv.step("processed/team_stats.parquet",
-             why="season points by team; the rating denominator")
+             why="season points by team; the rating denominator", code=False)
     def stats(out):
         games = pl.read_parquet(iv.reads(
             "raw/games.parquet", why="one row per team per game"))
@@ -65,7 +65,7 @@ def pipe(project, iv):
             pl.col("pts").sum()).write_parquet(out)
 
     @iv.step("processed/ratings.parquet",
-             why="team ratings the app renders", terminal=True)
+             why="team ratings the app renders", terminal=True, code=False)
     def ratings(out):
         stats_df = pl.read_parquet(iv.reads(
             "processed/team_stats.parquet", why="season points by team"))
@@ -152,14 +152,14 @@ def test_a_raise_inside_a_step_stamps_nothing(project, iv):
         import polars as pl
         from conftest_pipeline import iv
 
-        @iv.step("processed/team_stats.parquet", why="never finished")
+        @iv.step("processed/team_stats.parquet", why="never finished", code=False)
         def build(out):
             pl.read_parquet(iv.reads("raw/games.parquet", why="the source"))
             out.write_bytes(b"partial")
             raise RuntimeError("the fit diverged")
     ''')
 
-    @iv.step("processed/team_stats.parquet", why="never finished")
+    @iv.step("processed/team_stats.parquet", why="never finished", code=False)
     def build(out):
         pl.read_parquet(iv.reads("raw/games.parquet", why="the source"))
         out.write_bytes(b"partial")
@@ -212,7 +212,7 @@ def test_bookkeeping_suppresses_the_input_too_not_just_the_trace(project, iv, pi
     write_root(project)
 
     @iv.step("processed/self_inspecting.parquet", why="reads under bookkeeping",
-             terminal=True)
+             terminal=True, code=False)
     def build(out):
         pl.read_parquet(iv.reads("raw/games.parquet", why="a real input")).write_parquet(out)
         with iv.bookkeeping():
