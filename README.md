@@ -75,7 +75,15 @@ inputs' ids into its own, so:
   the one thing no fingerprint of the inputs can see: a builder whose logic changed.
 
 A staleness check is **O(number of root files)**, not O(data) and not O(depth). A derived
-input's id is a dict lookup in the state file; only roots are fingerprinted.
+input's id is a dict lookup in the state file; only roots are fingerprinted. Measured cold,
+one process per stage, against a real GCS bucket:
+
+```
+processed/possessions_with_lineups.parquet   current    0.09s   every input derived
+processed/xpm.parquet                        current    0.09s
+processed/box_features.parquet               current    0.82s   one root parquet
+processed/panel/player_box.parquet           stale      6.72s   a 21-file root collection
+```
 
 ## Configuration is constructor arguments
 
@@ -90,8 +98,14 @@ iv = Invalidator(
     source_dirs=["scripts", "src"],   # what the static scan walks
     stages=[...],                     # or order_from="refresh.sh", for the ORDER check
     trace=".invalidator/trace.ndjson",
+    out_root="/tmp/scratch",          # optional: writes go here, reads fall back
+    state_path="/tmp/shadow.json",    # optional: stamps somewhere other than out_root
 )
 ```
+
+`out_root` is an **overlay**: writes land there and reads prefer it, falling back to
+`data_root`. So a local run can rebuild three stages, read its own outputs, and take
+everything else from the shared tree without touching it. The stamps follow the writes.
 
 The CLI needs one line to find it — the only discovery in the package:
 

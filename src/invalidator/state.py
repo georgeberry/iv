@@ -77,7 +77,14 @@ class State:
 
     @property
     def path(self):
-        return self.iv.data_root / self.iv.state_rel
+        """Where the stamps live.
+
+        Under the OUT root by default, because the state describes what THIS pipeline
+        built — a local run writing into a scratch tree must not stamp the shared one.
+        `state_path=` overrides it outright, which is what a shadow run over someone
+        else's data wants.
+        """
+        return self.iv.state_path_override or (self.iv.out_root / self.iv.state_rel)
 
     # ── the id ────────────────────────────────────────────────────────────────
 
@@ -194,9 +201,11 @@ class State:
         pattern = template
         for f in fields(template):
             pattern = pattern.replace("{" + f + "}", "*")
-        root = self.iv.data_root
         with self.iv.bookkeeping():
-            on_disk = {str(p)[len(str(root)) + 1:] for p in root.glob(pattern)}
+            on_disk = set()
+            for root in {str(self.iv.out_root): self.iv.out_root,
+                         str(self.iv.data_root): self.iv.data_root}.values():
+                on_disk |= {str(p)[len(str(root)) + 1:] for p in root.glob(pattern)}
         rx = path_pattern(template)
         stamped = {rel for rel in self.load()["artifacts"] if rx.match(rel)}
         return sorted(on_disk | stamped)
@@ -239,7 +248,7 @@ class State:
         the ids and the strategies are stored: the ids are what the next check compares
         against, the strategies are what lets it recompute a root's id at all.
         """
-        p = self.iv.resolve(rel)
+        p = self.iv.resolve_out(rel)
         with self.iv.bookkeeping():
             if not p.exists():
                 raise StateError(
@@ -308,7 +317,7 @@ class State:
                     return f"{inst}: {reason}"
             return None
 
-        p = self.iv.resolve(rel)
+        p = self.iv.resolve_out(rel)
         with self.iv.bookkeeping():
             exists = p.exists()
         if not exists:

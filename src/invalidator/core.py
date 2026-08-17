@@ -64,6 +64,8 @@ class Invalidator:
     def __init__(self, *,
                  data_root: str | os.PathLike,
                  data_version: str,
+                 out_root: str | os.PathLike | None = None,
+                 state_path: str | os.PathLike | None = None,
                  source_dirs: Sequence[str] = ("src", "scripts", "stages"),
                  stages: Sequence[str] | None = None,
                  order_from: str | os.PathLike | None = None,
@@ -80,12 +82,20 @@ class Invalidator:
         self.project_root = Path(project_root) if project_root is not None \
             else _caller_root()
         self.data_root = _paths.mkpath(data_root, self.project_root)
+        # Writes land in out_root; reads fall back to data_root. Same split wvorp's
+        # DATA_BASE/DATA_OUT_BASE exists for, and for the same reason: a local run has to
+        # be able to rebuild three stages without clobbering the tree everything else
+        # reads. Defaults to data_root, so a project that does not want it never sees it.
+        self.out_root = _paths.mkpath(out_root, self.project_root) \
+            if out_root is not None else self.data_root
         self.data_version = data_version
         self.source_dirs = tuple(source_dirs)
         self.stages = tuple(stages) if stages is not None else None
         self.order_from = Path(order_from) if order_from else None
         self.roots = tuple(roots)
         self.state_rel = state_rel
+        self.state_path_override = _paths.mkpath(state_path, self.project_root) \
+            if state_path is not None else None
         self.trace_path = Path(trace) if trace else _env_trace()
         self.force = _env_force() if force is None else force
 
@@ -97,14 +107,31 @@ class Invalidator:
         self._depth = 0                              # bookkeeping suppression
 
     def __repr__(self) -> str:
-        return (f"Invalidator(data_root={str(self.data_root)!r}, "
+        split = "" if self.out_root is self.data_root \
+            else f", out_root={str(self.out_root)!r}"
+        return (f"Invalidator(data_root={str(self.data_root)!r}{split}, "
                 f"data_version={self.data_version!r})")
 
     # ── paths ─────────────────────────────────────────────────────────────────
 
     def resolve(self, rel: str):
-        """A rendered rel path -> the concrete path under the data root."""
-        return _paths.resolve(self, rel)
+        """A rendered rel path -> the concrete path to READ.
+
+        With a read/write split this is an OVERLAY: whatever you have built locally
+        shadows the shared tree, so a partial local rebuild reads its own outputs and
+        falls back to prod for everything it did not touch. Without a split (the default)
+        both roots are the same and this is just `data_root / rel`.
+        """
+        if self.out_root is not self.data_root:
+            out = _paths.resolve_under(self.out_root, rel)
+            with self.bookkeeping():
+                if out.exists():
+                    return out
+        return _paths.resolve_under(self.data_root, rel)
+
+    def resolve_out(self, rel: str):
+        """Where a WRITE goes, and where an artifact's own existence is judged."""
+        return _paths.resolve_under(self.out_root, rel)
 
     def to_rel(self, path) -> str | None:
         return _paths.to_rel(self, path)
@@ -189,7 +216,7 @@ class Invalidator:
         """
         _check_why(why, path)
         rel = _paths.render(path, part)
-        p = self.resolve(rel)
+        p = self.resolve_out(rel)
         p.parent.mkdir(parents=True, exist_ok=True)
 
         yield p
@@ -220,7 +247,7 @@ class Invalidator:
         """
         _check_why(why, path)
         rel = _paths.render(path, part)
-        p = self.resolve(rel)
+        p = self.resolve_out(rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         self.record("io", op="read", rel=rel, why=why, optional=True, prior=False,
                     part=part or {}, update=True)

@@ -69,20 +69,20 @@ def render(template: str, part: dict[str, str] | None) -> str:
     return template.format(**{k: str(v) for k, v in given.items()})
 
 
-def resolve(iv, rel: str):
-    """A rendered rel path -> the concrete path under the data root."""
+def resolve_under(root, rel: str):
+    """A rendered rel path -> the concrete path under `root`."""
     if _FIELD.search(rel):
         raise DeclError(
             f"{rel!r} still has an unrendered placeholder; pass part= at the call site")
-    return iv.data_root / rel
+    return root / rel
 
 
 def to_rel(iv, path) -> str | None:
-    """A concrete path -> its rel string, or None if it is outside the data tree."""
-    root = str(iv.data_root).rstrip("/")
+    """A concrete path -> its rel string, or None if it is outside either data tree."""
     s = str(path)
-    if s == root:
-        return ""
-    if s.startswith(root + "/"):
-        return s[len(root) + 1:]
+    for root in (str(iv.out_root).rstrip("/"), str(iv.data_root).rstrip("/")):
+        if s == root:
+            return ""
+        if s.startswith(root + "/"):
+            return s[len(root) + 1:]
     return None
