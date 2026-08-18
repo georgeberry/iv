@@ -348,7 +348,7 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                 warns.append(
                     f"NO PROVENANCE  {path}\n"
                     f"    written at {site.location} from nothing this pipeline declares. "
-                    f"If it is fetched, say from where with dagio.external(...).")
+                    f"If it is fetched, say from where with iv.external(...).")
             continue
         errors.append(
             f"GUARDED FETCH  {path}\n"

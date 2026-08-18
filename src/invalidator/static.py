@@ -551,6 +551,8 @@ def writers_of(iv, rel: str) -> set[str]:
 def _write_site(iv, rel: str) -> tuple[Stage, Site] | None:
     """The one stage and the one write site that produce `rel`.
 
+    TWO STAGES is the ambiguous case; two sites in ONE stage is not.
+
     The scan covers every source dir, which in a repo running two pipelines out of one
     tree means two stages can declare the same artifact — wvorp's `xpm.parquet` is
     written by `scripts/build_xpm.py` on one league and `mnba/build_ui_parquets.py` on
@@ -564,6 +566,13 @@ def _write_site(iv, rel: str) -> tuple[Stage, Site] | None:
         order = iv.declared_order()
         if order:
             hits = [h for h in hits if h[0].node in set(order)] or hits
+    if len({st.node for st, _ in hits}) == 1:
+        # ONE stage declaring the artifact twice is one producer. A stage commonly guards
+        # on the artifact with `@step` and then assembles it with `partitions` — two
+        # write sites, one file, no ambiguity about who builds it. The GUARDED site is
+        # the one to walk from: its owner is the whole build, where the other is a helper
+        # inside it.
+        hits = sorted(hits, key=lambda h: not h[1].guarded)[:1]
     return hits[0] if len(hits) == 1 else None
 
 

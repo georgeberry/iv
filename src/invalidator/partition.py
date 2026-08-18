@@ -63,7 +63,7 @@ class PartitionCache:
         if self._inputs is None:
             raise DagioError(
                 f"{self.template} has no single declared producer, so its per-partition inputs "
-                f"cannot be read off the code. Run `dagio check`.")
+                f"cannot be read off the code. Run `iv check`.")
         self._per = self._applicable({t: h for t, h in self._inputs.items()
                                       if key in _template_fields(t)})
         # The same branch rule applies to the whole-artifact inputs: `load()` declares a

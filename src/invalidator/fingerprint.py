@@ -64,7 +64,7 @@ def _frame(path, **kw):
         import polars as pl
     except ImportError as e:
         raise FingerprintError(
-            f"fp='data' needs polars (pip install 'dagio[data]'); "
+            f"fp='data' needs polars (pip install 'iv[data]'); "
             f"use fp='bytes' for {path} to stay dependency-free"
         ) from e
     src = _uri(path)
