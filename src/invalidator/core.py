@@ -366,6 +366,12 @@ class Invalidator:
                 return
 
             def patched(self, *a, **kw):
+                # `open` is only a write when the MODE says so. Fingerprinting an input
+                # opens it to hash it, and blocking that blocks the check itself.
+                if name == "open":
+                    mode = kw.get("mode", a[0] if a else "r")
+                    if not any(c in str(mode) for c in "wax+"):
+                        return orig(self, *a, **kw)
                 if str(self) in iv._read_paths:
                     raise DeclError(
                         f"refusing to write {self}: that path was handed out by "

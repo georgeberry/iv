@@ -141,3 +141,21 @@ def test_writing_through_a_read_resolved_path_is_refused(project):
     with iv.writes("processed/out.parquet", why="the output", terminal=True) as p:
         FRAME.write_parquet(p)
     assert p.exists()
+
+
+def test_the_write_guard_still_allows_reading(project):
+    """`open` is only a write when the MODE says so. Blocking it outright blocked
+    fingerprinting — which opens an input to hash it — and so blocked the check itself."""
+    from invalidator import DeclError
+    shared, scratch = project / "shared", project / "scratch"
+    (shared / "raw").mkdir(parents=True)
+    FRAME.write_parquet(shared / "raw" / "src.parquet")
+    iv = Invalidator(data_root=shared, out_root=scratch, data_version="v1",
+                     overlay=False, project_root=project)
+    iv.guard_writes()
+
+    src = iv.reads("raw/src.parquet", why="an input")
+    assert len(src.open("rb").read(4)) == 4
+    assert FRAME.equals(pl.read_parquet(src))
+    with pytest.raises(DeclError):
+        src.open("w")
