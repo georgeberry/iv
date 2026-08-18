@@ -242,6 +242,10 @@ class PartitionCache:
                   for t, how in {**self._global, **self._per}.items()}
         new_id = self.iv.state.stamp(self.artifact, spec=self.spec, inputs=inputs,
                                      by=self.iv.node(), parts=parts)
+        # The artifact on disk is what we just wrote, so the memo from before the write
+        # is a lie. It only shows in a process that plans twice — which is a test, and
+        # was one: every partition read as "no artifact yet" and rebuilt.
+        self._existing = out
         self.iv.record("io", op="write", rel=self.artifact, why=self.spec.why,
                        partitioned_by=self.key, id=new_id,
                        built=sorted(built), reused=sorted(reuse))
