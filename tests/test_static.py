@@ -602,3 +602,26 @@ def test_an_undefined_name_in_a_stage_is_caught_before_it_runs(project, iv):
 
     bad = static.undefined_names(iv)
     assert any("renamed_away" in b for b in bad), bad
+
+
+def test_an_import_of_a_retired_module_is_caught(project, iv):
+    """Pyflakes cannot see this: the name IS bound, the module simply is not there, and
+    a function-local import defers the failure to whenever that line runs. One of these
+    got seven stages into a refresh."""
+    from conftest import write_stage
+    from invalidator import static
+
+    write_stage(project, "stages/keeps.py", '''
+        from pipeline import iv
+
+        @iv.step("processed/out.parquet", why="the output")
+        def build(out):
+            from stages.gone import record        # retired last week
+            record()
+    ''')
+    (project / "pipeline.py").write_text(
+        'from invalidator import Invalidator\n'
+        'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
+
+    bad = static.missing_imports(iv)
+    assert any("stages.gone" in b for b in bad), bad

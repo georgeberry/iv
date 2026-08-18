@@ -250,6 +250,8 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     # in. Moving that to the preflight is the same job as everything else here.
     for line in _static.undefined_names(g.iv):
         errors.append(f"UNDEFINED NAME  {line}")
+    for line in _static.missing_imports(g.iv):
+        errors.append(f"MISSING MODULE  {line}")
 
     # A file that declares I/O and nothing runs. Worth saying; not worth graphing, since
     # in a two-pipeline repo it is usually the other pipeline's stage.

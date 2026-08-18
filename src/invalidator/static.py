@@ -565,6 +565,36 @@ def undefined_names(iv) -> list[str]:
     return [ln for ln in out.getvalue().splitlines() if "undefined name" in ln]
 
 
+def missing_imports(iv) -> list[str]:
+    """`from x import y` inside a scanned file where `x` is a module of this project
+    that does not exist.
+
+    Pyflakes cannot see this: the name IS bound, the module simply is not there, and the
+    failure is deferred to whenever that line runs. A function-local import — the usual
+    way to break a cycle or defer a heavy dependency — therefore survives every check
+    until the stage reaches it. `wvorp.prod.production` imported a retired module inside
+    a wrapper and got seven stages into a refresh before saying so.
+
+    Only modules INSIDE the scanned source dirs are checked. Whether a third-party
+    package is installed is not this scan's business.
+    """
+    stages = scan(iv)
+    known = {st.module for st in stages.values() if st.module}
+    # A package is importable if any module lives under it: `wvorp.prod` is real when
+    # `wvorp.prod.production` is.
+    known |= {m.rsplit(".", 1)[0] for m in known if "." in m}
+    roots = {m.split(".")[0] for m in known}
+
+    out = []
+    for node in sorted(stages):
+        for name, mod, attr in stages[node].imports:
+            if mod.split(".")[0] not in roots or mod in known:
+                continue
+            out.append(f"{node}: `from {mod} import {attr or name}` — "
+                       f"no module {mod!r} in this project")
+    return sorted(set(out))
+
+
 def writers_of(iv, rel: str) -> set[str]:
     """Every stage that DECLARES a write to `rel`.
 

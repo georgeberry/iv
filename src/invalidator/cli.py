@@ -154,15 +154,15 @@ def preflight() -> None:
         _graph.require_acyclic(g)
     except DagioError as e:
         _die(e)
-    bad = _static.undefined_names(iv)
+    bad = _static.undefined_names(iv) + _static.missing_imports(iv)
     if bad:
         for line in bad:
-            typer.secho(f"  UNDEFINED NAME  {line}", fg=typer.colors.RED)
+            typer.secho(f"  {line}", fg=typer.colors.RED)
         _die(DagioError(
-            f"{len(bad)} undefined name(s) in stages that have not run yet. Each one is "
-            f"a NameError waiting for the stage that reaches it — usually a refactor "
-            f"that renamed a parameter and left a use behind."))
-    typer.secho("  ok — no cycle, no undefined names; the run order is defined",
+            f"{len(bad)} name(s) or module(s) a stage uses and cannot reach. Each is an "
+            f"error waiting for the stage that gets there — a refactor that renamed a "
+            f"parameter and left a use behind, or an import of something retired."))
+    typer.secho("  ok — no cycle, no unreachable name or module; the order is defined",
                 fg=typer.colors.GREEN)
 
 
