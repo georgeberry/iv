@@ -579,9 +579,54 @@ class State:
             return f"metadata changed: {stored_meta} -> {meta_now}"
         for k in sorted(ids_now):
             was = (stored_inputs.get(k) or {}).get("id")
-            if was != ids_now[k]:
-                return f"input moved: {k}  {was} -> {ids_now[k]}"
+            if was == ids_now[k]:
+                continue
+            if was is None:
+                return f"new input: {k}  (not read when this was last built)"
+            if self._became_known(k, was):
+                # NOT a data change. An input the pipeline writes contributes its
+                # STAMPED id; before anything had stamped it, it was read as a root and
+                # contributed its fingerprint instead. Same bytes, different term, and
+                # it happens exactly once per artifact — on the first run that declares
+                # it. Worth saying, because "input moved" reads as "your data changed"
+                # and sends someone looking for a change that never happened.
+                return (f"input became declared: {k}  {was} -> {ids_now[k]}  "
+                        f"(its producer stamped it for the first time; the data is "
+                        f"unchanged, and this cannot recur)")
+            return f"input moved: {k}  {was} -> {ids_now[k]}"
         return f"id moved: {entry['id']} -> {id_now}"
+
+    def _became_known(self, rel: str, was: str) -> bool:
+        """Did `rel`'s id change ONLY because it went from unstamped to stamped?
+
+        True when the old value is what it would have fingerprinted to as a root, and it
+        now has a record. That is a transition, not a movement: the same bytes described
+        two ways, once before the pipeline knew who wrote them.
+        """
+        from .paths import fields
+
+        try:
+            if fields(rel):
+                members = self.instances_of(rel)
+                if not members or any(self.record_of(m) is None for m in members):
+                    return False
+                body = "|".join(
+                    f"{m}={_fp.compute(self.iv.resolve(m), self._how_of(m))}"
+                    for m in members)
+                as_root = "coll:" + hashlib.sha256(
+                    body.encode()).hexdigest()[:_fp.DIGEST_LEN]
+                return as_root == was
+            if self.record_of(rel) is None:
+                return False
+            with self.iv.bookkeeping():
+                p = self.iv.resolve(rel)
+                return p.exists() and _fp.compute(p, self._how_of(rel)) == was
+        except Exception:
+            return False                    # a diagnosis must never raise
+
+    def _how_of(self, rel: str) -> str:
+        """The fp strategy an artifact was stamped with, defaulting to the usual one."""
+        return (self.record_of(rel) or {}).get("fp_how") or "data"
 
     def is_current(self, rel: str, code: str | None = None,
                    version: str | None = None, fingerprint: bool = True) -> bool:

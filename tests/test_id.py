@@ -264,3 +264,45 @@ def test_one_steps_reads_are_not_inherited_by_the_next(project, iv):
     second()
     iv.state.reset()
     assert list(iv.record_of("processed/second.parquet")["in"]) == []
+
+
+def test_an_input_that_became_declared_says_so(project, iv):
+    """An input the pipeline WRITES contributes its stamped id; before anything stamped
+    it, it was read as a root and contributed its fingerprint. Same bytes, different
+    term. Reported as `input moved` it reads as "your data changed" and sends someone
+    looking for a change that never happened — which is exactly what it did."""
+    import polars as pl
+    from conftest import write_stage
+    from tests.test_partition import run
+
+    (project / "pipeline.py").write_text(
+        'from invalidator import Invalidator\n'
+        'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
+    (project / "data" / "raw").mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "seed.parquet")
+
+    # Built while `raw/seed.parquet` is an unstamped root.
+    write_stage(project, "stages/uses.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        @iv.step("processed/out.parquet", why="the output")
+        def build(out):
+            pl.read_parquet(iv.reads("raw/seed.parquet", why="the seed")).write_parquet(out)
+        build()
+    ''')
+    run(project, "stages/uses.py")
+
+    # Now a stage claims it — same bytes, rewritten identically.
+    write_stage(project, "stages/makes.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        with iv.writes("raw/seed.parquet", why="the seed") as p:
+            pl.DataFrame({"x": [1]}).write_parquet(p)
+    ''')
+    run(project, "stages/makes.py")
+
+    why = iv.why_stale("processed/out.parquet")
+    assert why is not None and "became declared" in why, why
+    assert "unchanged" in why
