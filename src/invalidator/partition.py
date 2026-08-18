@@ -120,7 +120,13 @@ class PartitionCache:
         # An input template may carry the caller's OTHER fields too — a per-dataset,
         # per-season raw feed is `raw/{dataset}/{dataset}_{season}.parquet`, and only
         # `season` is the partition key.
-        ids = dict(self.iv.state.input_ids(
+        # `exempt` drops the WHOLE-ARTIFACT inputs, and only those. A walk-forward
+        # artifact rates period C from data restricted to C-1, so `box_features` — one
+        # file covering every season, moving every night — cannot reach a completed
+        # cohort, and folding it in refits all of them for nothing. What CAN reach the
+        # row is per-partition by construction: the `{key}` templates below, and whatever
+        # the caller states through `extra=` on `plan`.
+        ids = {} if self.spec.policy == "exempt" else dict(self.iv.state.input_ids(
             {self._fill(t): how for t, how in self._global.items()}))
         for template, how in self._per.items():
             rel = self._fill(template, {self.key: source})
@@ -171,7 +177,8 @@ class PartitionCache:
         return self._existing
 
     def plan(self, want: list[str], *, extra: dict[str, str] | None = None,
-             fp_of: dict[str, str] | None = None) -> tuple[list[str], list[str]]:
+             fp_of: dict[str, str] | None = None,
+             force: bool | None = None) -> tuple[list[str], list[str]]:
         """Split `want` into (reuse, rebuild).
 
         Reuse needs a matching stamp AND rows actually present. Both `extra` and `fp_of`
@@ -180,6 +187,11 @@ class PartitionCache:
         self._plan_extra = dict(extra or {})
         self._fp_of = dict(fp_of or {})
         want = [str(w) for w in want]
+        if self.iv.force if force is None else force:
+            # `--force` has to reach HERE, not only the guard above. Forcing an outer
+            # guard while this cache reuses every partition is a rebuild that rebuilds
+            # nothing, and it looks exactly like it worked.
+            return [], want
 
         df = self.existing()
         if df is None or self.key not in df.columns:
@@ -273,7 +285,7 @@ def for_each(iv, over, build_one, *, output: str, key: str, why: str,
     cache = PartitionCache(iv, output, key, why=why, fp=fp,
                            policy=policy, extra=extra_key, part=part)
     want = [str(p) for p in over]
-    reuse, rebuild = ([], want) if force else cache.plan(want, extra=extra, fp_of=fp_of)
+    reuse, rebuild = cache.plan(want, extra=extra, fp_of=fp_of, force=force)
     if not quiet:
         cache.report(reuse, rebuild)
 

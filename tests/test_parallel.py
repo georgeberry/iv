@@ -11,6 +11,7 @@ arrived, they enter it together, which is the case that has to be safe.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import textwrap
 import polars as pl
 import pytest
 
+from invalidator import record as _rec
 from invalidator.state import read_records
 
 VENV_PY = sys.executable
@@ -83,13 +85,15 @@ def fanout(project):
     return project
 
 
-def run_together(project) -> list[str]:
+def run_together(project, trace=None) -> list[str]:
     """Every stage at once, one process each. Returns their output."""
     env = {**os.environ, "PYTHONPATH": str(project), "NO_COLOR": "1",
            "PYTHONDONTWRITEBYTECODE": "1"}
     env.pop("VIRTUAL_ENV", None)
     for var in ("INVALIDATOR_TRACE", "INVALIDATOR_FORCE"):
         env.pop(var, None)
+    if trace is not None:
+        env["INVALIDATOR_TRACE"] = str(trace)
     procs = [subprocess.Popen([VENV_PY, f"stages/stage_{k}.py"], cwd=project, env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
              for k in range(N)]
@@ -128,3 +132,49 @@ def test_no_temp_files_are_left_behind(fanout):
     half-written file into place — and nothing survives the run."""
     run_together(fanout)
     assert [p.name for p in state_dir(fanout).iterdir() if not p.name.endswith(".json")] == []
+
+
+# ── the trace ─────────────────────────────────────────────────────────────────
+
+# Longer than the 8 KiB buffer the trace stream uses, which is the size at which two
+# stages could plausibly interleave inside one line. `why=` is user text and has to be a
+# literal, so it is the one field a caller can make arbitrarily long — the realistic shape
+# of the problem, at an unrealistic size.
+LONG_WHY = "one stage's output, explained at length: " + "detail. " * 1200
+
+
+@pytest.fixture
+def chatty(fanout):
+    """The same fan-out, but every stage emits an event too big to flush in one piece."""
+    for k in range(N):
+        p = fanout / "stages" / f"stage_{k}.py"
+        p.write_text(p.read_text().replace(
+            "why=\"one stage's output; every stage writes its own\"",
+            f'why="{LONG_WHY}"'))
+    return fanout
+
+
+def test_the_trace_survives_stages_appending_at_once(chatty):
+    """One shared file, N processes, and every line has to arrive whole.
+
+    The stamps are per-artifact files because a shared file broke under exactly this; the
+    trace stays shared, so the claim that it holds up is worth a test rather than an
+    assumption. See `invalidator.record` for what was measured.
+    """
+    trace = chatty / ".invalidator" / "trace.ndjson"
+    run_together(chatty, trace=trace)
+
+    lines = [l for l in trace.read_text().splitlines() if l.strip()]
+    for line in lines:
+        json.loads(line)                 # a torn line raises here, which is the point
+    written = [e for e in _rec.load(trace) if e.get("op") == "write"]
+    assert {e["rel"] for e in written} == {f"processed/out_{k}.parquet" for k in range(N)}
+
+
+def test_a_torn_line_costs_one_event_not_the_whole_trace(tmp_path):
+    """NFS does not honour O_APPEND, so tearing stays possible. `iv drift` reporting a
+    dropped line beats `iv drift` raising over an advisory file."""
+    trace = tmp_path / "trace.ndjson"
+    good = json.dumps({"v": _rec.RECORDER_VERSION, "kind": "io", "rel": "a.parquet"})
+    trace.write_text(good + "\n" + good[:40] + good + "\n" + good + "\n")
+    assert len(_rec.load(trace)) == 2

@@ -409,3 +409,67 @@ def test_the_sub_league_panel_does_not_key_on_the_parents_feed(branched):
     out = run(branched, "stages/totals.py")
     assert out.count("rebuild ( 1): 2025") == 1, out
     assert out.count("reuse   ( 2)") == 1, out
+
+
+# ── walk-forward ──────────────────────────────────────────────────────────────
+
+WALK = '''
+    import os
+    import polars as pl
+    from pipeline import iv
+
+    COHORTS = ["2024", "2025", "2026"]
+
+    # Cohort C is fit on data through C-1, so what can move it is stated per cohort.
+    EXTRA = {c: os.environ.get("SRC_" + c, "v0") for c in COHORTS}
+
+    cache = iv.partitions("processed/cohorts.parquet", "season",
+                          why="one row per cohort", policy="exempt")
+    reuse, rebuild = cache.plan(COHORTS, extra=EXTRA)
+    cache.report(reuse, rebuild)
+
+    fresh = pl.DataFrame({"season": rebuild, "v": [EXTRA[c] for c in rebuild]}) \\
+        if rebuild else None
+    old = cache.reused_rows(reuse) if reuse else None
+    out = pl.concat([f for f in (old, fresh) if f is not None], how="vertical_relaxed") \\
+        .sort("season")
+    cache.commit(out, rebuild, reuse)
+'''
+
+
+@pytest.fixture
+def walk(project):
+    (project / "pipeline.py").write_text(textwrap.dedent(PIPELINE).lstrip())
+    (project / "stages" / "totals.py").write_text(textwrap.dedent(WALK).lstrip())
+    raw = project / "data" / "raw" / "box"
+    raw.mkdir(parents=True, exist_ok=True)
+    for s in SEASONS:
+        box(s).write_parquet(raw / f"{s}.parquet")
+    pl.DataFrame({"pace": [98.0]}).write_parquet(
+        project / "data" / "raw" / "league_rates.parquet")
+    return project
+
+
+def test_an_exempt_partition_ignores_the_inputs_that_cannot_reach_it(walk):
+    """A walk-forward artifact's declared inputs are whole files that move nightly. If
+    they enter the key, every completed cohort refits every run — 5m24s of frozen fits
+    in the pipeline this was built for."""
+    run(walk, "stages/totals.py")
+    assert "rebuild ( 3)" in run(walk, "stages/totals.py", force=True)
+
+    # A global input moves. Nothing should turn over.
+    pl.DataFrame({"pace": [101.0]}).write_parquet(
+        walk / "data" / "raw" / "league_rates.parquet")
+    box("2026", extra=9).write_parquet(walk / "data" / "raw" / "box" / "2026.parquet")
+    out = run(walk, "stages/totals.py")
+    assert "reuse   ( 3)" in out and "rebuild ( 0)" in out, out
+
+
+def test_the_source_a_cohort_was_fit_on_is_what_rebuilds_it(walk):
+    run(walk, "stages/totals.py")
+    out = run(walk, "stages/totals.py", SRC_2025="v1")
+    assert "rebuild ( 1): 2025" in out, out
+    assert "reuse   ( 2)" in out, out
+
+    got = pl.read_parquet(walk / "data" / "processed" / "cohorts.parquet")
+    assert dict(zip(got["season"], got["v"])) == {"2024": "v0", "2025": "v1", "2026": "v0"}
