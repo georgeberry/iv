@@ -94,6 +94,13 @@ def build(iv, stages: dict[str, Stage] | None = None,
     if order is None:
         order = iv.declared_order()
 
+    # A STAGE produces something. A file that only reads — a library like `wvorp.data`,
+    # which declares the panel read once for every stage that calls it — is not a node in
+    # the pipeline; its reads belong to whoever calls it, and the cross-module walk
+    # attributes them there. Left in, it appears as a stage that consumes and produces
+    # nothing, which is noise in every view.
+    stages = {n: st for n, st in stages.items() if st.outputs()}
+
     g = Graph(iv=iv, stages=dict(stages))
     ranks = {n: i for i, n in enumerate(order)} if order else {}
     # A stage the order does not mention sorts after everything it does, rather than
