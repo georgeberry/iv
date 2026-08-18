@@ -403,3 +403,47 @@ def test_dropping_a_link_drops_its_contribution(project):
              if json.loads(p.read_text())["rel"] == "processed/table.parquet").read_text())
     assert set(rec["contrib"]) == {"stages/tail.py"}, rec["contrib"]
     assert "raw/seed.parquet" not in rec["in"], rec["in"]
+
+
+def test_a_later_writer_is_not_a_dependency(project):
+    """`build_preseason` reads an artifact `predict_games` writes before it and
+    `predict_upcoming_games` amends after. Counting the amendment as a dependency made
+    the pair a cycle the run order plainly does not have."""
+    from conftest import write_stage
+    from invalidator import graph as _graph
+    from invalidator import Invalidator
+
+    (project / "data" / "raw").mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "seed.parquet")
+    write_stage(project, "stages/first.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        @iv.step("processed/shared.parquet", why="the shared table")
+        def build(out):
+            pl.read_parquet(iv.reads("raw/seed.parquet", why="the seed")).write_parquet(out)
+        build()
+    ''')
+    write_stage(project, "stages/middle.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        @iv.step("processed/mine.parquet", why="mine")
+        def build(out):
+            pl.read_parquet(iv.reads("processed/shared.parquet",
+                                     why="the shared table")).write_parquet(out)
+        build()
+    ''')
+    write_stage(project, "stages/last.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        with iv.updates("processed/shared.parquet", why="the shared table") as p:
+            df = pl.read_parquet(p)
+        pl.read_parquet(iv.reads("processed/mine.parquet", why="mine"))
+        df.write_parquet(p)
+    ''')
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project,
+                     stages=["stages/first.py", "stages/middle.py", "stages/last.py"])
+    assert _graph.find_cycle(_graph.build(iv)) is None

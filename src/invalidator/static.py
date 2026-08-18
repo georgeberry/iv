@@ -489,10 +489,23 @@ def reset() -> None:
 # ── matching a concrete artifact to a template ────────────────────────────────
 
 def path_pattern(template: str) -> re.Pattern:
-    parts, last = [], 0
+    """A template as a regex, with a REPEATED field back-referenced.
+
+    `raw/{dataset}/{dataset}_{season}.parquet` says the directory and the filename prefix
+    are the same word — that is the whole reason the field appears twice. Compiled with
+    two independent `[^/]+` it also matched `raw/predictions/rollforward_v2.parquet`,
+    which put a phantom edge from the stage writing that file to every stage reading a
+    raw feed, and turned wvorp's graph into one 26-stage cycle.
+    """
+    parts, last, seen = [], 0, {}
     for m in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", template):
+        name = m.group(1)
         parts.append(re.escape(template[last:m.start()]))
-        parts.append(r"[^/]+")
+        if name in seen:
+            parts.append(f"(?P={seen[name]})")
+        else:
+            seen[name] = f"f{len(seen)}"
+            parts.append(f"(?P<{seen[name]}>[^/]+)")
         last = m.end()
     parts.append(re.escape(template[last:]))
     return re.compile("^" + "".join(parts) + "$")

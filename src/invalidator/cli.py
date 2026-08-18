@@ -141,6 +141,23 @@ def stage(name: str) -> None:
 
 
 @app.command()
+def preflight() -> None:
+    """The checks that make a RUN meaningless if they fail. Exit 1 to stop a pipeline.
+
+    Only a cycle, today. A cycle means the stage order is not a fact — what depends on
+    what, what breaks if this changes, what runs first all have no answer — so a run
+    built on it produces artifacts whose lineage is a guess. Everything else `iv check`
+    reports is worth fixing and does not make tonight's numbers wrong.
+    """
+    try:
+        _, g = _graph_of()
+        _graph.require_acyclic(g)
+    except DagioError as e:
+        _die(e)
+    typer.secho("  ok — no cycle; the run order is defined", fg=typer.colors.GREEN)
+
+
+@app.command()
 def check(
     trace: Path = typer.Option(None, help="also diff the code against a recorded run"),
 ) -> None:
@@ -317,9 +334,10 @@ def viz(out: Path = typer.Option(Path("dag.png"), help="where to write the image
     try:
         from .viz import draw
     except ImportError:
-        _die(DagioError("viz needs networkx and matplotlib: pip install 'invalidator[viz]'"))
+        _die(DagioError("viz needs networkx and matplotlib: pip install 'iv[viz]'"))
     try:
         _, g = _graph_of()
+        _graph.require_acyclic(g)
         draw(g, out)
     except DagioError as e:
         _die(e)

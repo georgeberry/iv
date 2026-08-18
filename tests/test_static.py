@@ -501,3 +501,16 @@ def test_every_declaring_method_is_known_to_the_scan(iv):
     assert declaring <= set(static.METHODS), declaring - set(static.METHODS)
     for name in declaring:
         assert callable(getattr(iv, name)), name
+
+
+def test_a_repeated_field_must_match_the_same_word():
+    """`raw/{dataset}/{dataset}_{season}.parquet` says the directory and the filename
+    prefix are the same word. Two independent wildcards also matched
+    `raw/predictions/rollforward_v2.parquet`, which drew an edge from that file's writer
+    to every reader of a raw feed and made wvorp's whole graph one cycle."""
+    from invalidator.static import matches
+
+    t = "raw/{dataset}/{dataset}_{season}.parquet"
+    assert matches(t, "raw/player_box/player_box_2026.parquet")
+    assert not matches(t, "raw/predictions/rollforward_v2.parquet")
+    assert not matches(t, "raw/predictions/predictions_2026.parquet") is False

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from dataclasses import replace as _replace
 
 from . import static as _static
+from .errors import DagioError
 from .static import Site, Stage, matches
 
 
@@ -175,6 +176,58 @@ def toposort(parents: dict[str, list[str]]) -> list[list[str]]:
 
 # ── the checks ────────────────────────────────────────────────────────────────
 
+def stage_parents(g) -> dict[str, list[str]]:
+    """Stage -> the stages that must run before it, over WRITE edges only.
+
+    An `updates()` self-edge is excluded by construction, and so is a `prior=True` read:
+    both are a stage naming a file it does not wait for.
+    """
+    order = g.order or {}
+    parents = {}
+    for node, stage in g.stages.items():
+        updated = {s.path for s in stage.sites if s.kind == "update"}
+        deps = set()
+        for s in stage.inputs():
+            if s.prior or any(_same(s.path, u) for u in updated):
+                continue
+            prod = {p for p in g.producers_of(s.path) if p != node}
+            # A producer that runs LATER is not what this stage read — it is a downstream
+            # amendment to the same file. `build_preseason` reads `game_predictions`,
+            # which `predict_games` writes before it and `predict_upcoming_games` amends
+            # after; counting the amendment as a dependency makes the pair a cycle that
+            # the run order plainly does not have.
+            earlier = {p for p in prod if order.get(p, -1) < order.get(node, 0)}
+            deps |= earlier or prod
+        parents[node] = sorted(deps)
+    return parents
+
+
+def find_cycle(g) -> str | None:
+    """The cycle in the stage graph, as `toposort` describes it, or None."""
+    try:
+        toposort(stage_parents(g))
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+def require_acyclic(g) -> None:
+    """Refuse to render or export a graph that has a cycle.
+
+    A cycle means the run order is not a fact — every downstream question (what does this
+    depend on, what breaks if it changes, in what order does this run) has no answer, and
+    drawing a picture anyway invites someone to trust the picture. `iv check` is where you
+    find out WHAT the cycle is; everything that produces a graph artifact stops here.
+    """
+    cycle = find_cycle(g)
+    if cycle:
+        raise DagioError(
+            f"the stage graph has a CYCLE, so its order is not defined and nothing built "
+            f"from it would be true:\n    {cycle}\n"
+            f"Run `iv check` for the full picture. A cycle is usually one read that "
+            f"should be prior=True, or two stages that should be one.")
+
+
 def check(g: Graph) -> tuple[list[str], list[str]]:
     """Every structural check. Returns (errors, warnings)."""
     roots = tuple(g.iv.roots)
@@ -255,19 +308,9 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
             "stages=[...] or order_from=\"refresh.sh\" to Invalidator().")
 
     # CYCLE — over WRITE edges only, so an updates() self-edge is excluded by construction.
-    write_parents = {}
-    for node, stage in g.stages.items():
-        updated = {s.path for s in stage.sites if s.kind == "update"}
-        deps = set()
-        for s in stage.inputs():
-            if s.prior or any(_same(s.path, u) for u in updated):
-                continue
-            deps |= {p for p in g.producers_of(s.path) if p != node}
-        write_parents[node] = sorted(deps)
-    try:
-        toposort(write_parents)
-    except ValueError as e:
-        errors.append(f"CYCLE  {e}")
+    cycle = find_cycle(g)
+    if cycle:
+        errors.append(f"CYCLE  {cycle}")
 
     # GUARDED FETCH — the guard against this package's own silent failure.
     #
