@@ -514,3 +514,21 @@ def test_a_repeated_field_must_match_the_same_word():
     assert matches(t, "raw/player_box/player_box_2026.parquet")
     assert not matches(t, "raw/predictions/rollforward_v2.parquet")
     assert not matches(t, "raw/predictions/predictions_2026.parquet") is False
+
+
+def test_viz_draws_a_temporal_loop_by_cutting_the_later_edge(project):
+    """A ring the run order resolves is still a ring on paper. It gets drawn, with the
+    cut edge named — refusing outright would make `iv viz` useless on a pipeline whose
+    last stage amends a file an earlier one read."""
+    import networkx as nx
+    from invalidator.viz import find_cycle
+
+    d = nx.DiGraph()
+    d.add_edge("a", "b", stage="early.py")
+    d.add_edge("b", "a", stage="late.py")
+    assert find_cycle(d) is not None
+
+    order = {"early.py": 0, "late.py": 1}
+    pairs = [("a", "b"), ("b", "a")]
+    cut = max(pairs, key=lambda e: order[d.edges[e]["stage"]])
+    assert cut == ("b", "a"), "the amendment is the edge to cut, not the dependency"

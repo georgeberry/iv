@@ -24,11 +24,35 @@ def to_networkx(g) -> nx.DiGraph:
         d.add_node(path, kind="root" if not g.producers_of(path)
                    else "terminal" if g.is_terminal(path) else "derived")
     for node, stage in g.stages.items():
+        updated = {s.path for s in stage.sites if s.kind == "update"}
         for out in stage.outputs():
             for inp in stage.inputs():
-                if inp.path != out.path:    # an updates() self-edge is not a dependency
-                    d.add_edge(inp.path, out.path, stage=node)
+                if inp.path == out.path:
+                    continue                # an updates() self-edge is not a dependency
+                if inp.prior:
+                    # The PREVIOUS run's copy. `fetch_athletes` reads the draft table and
+                    # writes the bios; `build_draft_nba` reads the bios and writes the
+                    # draft table — a loop on paper, and neither waits for the other.
+                    continue
+                if inp.path in updated and out.path in updated:
+                    # Two paths the SAME stage rewrites. Either alternative branches of
+                    # one declaration — the flat and the nested league spelling of a raw
+                    # feed — or simply independent. Neither is built FROM the other: both
+                    # already exist when the stage starts. Linked anyway, each pair drew
+                    # a two-node cycle, which is how `iv viz` came to crash on a graph
+                    # the stage-level check called acyclic.
+                    continue
+                d.add_edge(inp.path, out.path, stage=node)
     return d
+
+
+def find_cycle(d: nx.DiGraph) -> list | None:
+    """The artifact cycle, as a list of paths, or None."""
+    try:
+        c = nx.find_cycle(d)
+    except nx.NetworkXNoCycle:
+        return None
+    return [e[0] for e in c] + [c[-1][1]]
 
 
 def _layers(d: nx.DiGraph) -> dict[str, int]:
@@ -51,7 +75,20 @@ def draw(g, out: Path, full: bool = False) -> Path:
             reduced.add_nodes_from(d.nodes(data=True))
             d = reduced
         except nx.NetworkXError:
-            pass                            # a cycle; `dagio check` reports it properly
+            pass                            # a cycle; refused just below
+
+    # A TEMPORAL loop is legal and has to be drawn as one. `build_preseason` reads
+    # `game_predictions` as `predict_games` left it and writes `preseason_team`;
+    # `predict_upcoming_games` then reads that and amends `game_predictions`. Over a run
+    # that is fine — the amendment comes after — but as a picture it is a ring. Break it
+    # at the LATEST stage's edge, which is the amendment, and say so on the figure.
+    broken = []
+    while (cycle := find_cycle(d)):
+        pairs = [(cycle[i], cycle[i + 1]) for i in range(len(cycle) - 1)]
+        order = g.order or {}
+        a, b = max(pairs, key=lambda e: order.get(d.edges[e].get("stage"), 0))
+        broken.append((a, b, d.edges[a, b].get("stage")))
+        d.remove_edge(a, b)
 
     depth = _layers(d)
     by_layer: dict[int, list[str]] = {}
@@ -75,8 +112,14 @@ def draw(g, out: Path, full: bool = False) -> Path:
     for n, (x, y) in pos.items():
         ax.text(x + 0.055, y, short(n), fontsize=8, va="center", ha="left")
 
-    ax.set_title("left to right is dependency order — an edge pointing LEFT is a bug",
-                 fontsize=9, color="#555")
+    title = "left to right is dependency order — an edge pointing LEFT is a bug"
+    if broken:
+        # Named, not hidden. A ring the run order resolves is still a ring, and whoever
+        # reads this picture should know which edge was cut to draw it.
+        title += "\n" + "\n".join(
+            f"cut to lay out (amended later by {st}): {short(a)} -> {short(b)}"
+            for a, b, st in broken)
+    ax.set_title(title, fontsize=9, color="#555")
     ax.axis("off")
     ax.set_xlim(-0.4, max(by_layer) + 1.1)
     fig.tight_layout()
