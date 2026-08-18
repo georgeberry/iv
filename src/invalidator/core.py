@@ -345,6 +345,7 @@ class Invalidator:
                 policy: str = "tracked",
                 part: dict[str, str] | None = None,
                 version: str = "",
+                allow_missing: bool = False,
                 code: str = "") -> Iterator[Path]:
         """An artifact this stage reads AND writes — an append, a patch, a cache.
 
@@ -357,6 +358,10 @@ class Invalidator:
         their own reads to its record — see `State.stamp` — so the head of a chain stays
         in the identity after the tail has rewritten the file, without this stage having
         to name it.
+
+        `allow_missing` means the same as it does on `writes`, and an update reaches it
+        by a route a write cannot: a `--list-only` or `--dry-run` path that returns from
+        inside the block, on a first run where there is no file yet.
         """
         _check_why(why, path)
         rel = _paths.render(path, part)
@@ -368,6 +373,12 @@ class Invalidator:
         yield p
 
         self._writes.append(rel)
+        if allow_missing:
+            with self.bookkeeping():
+                if not p.exists():
+                    print(f"  {rel}: nothing produced — not stamped")
+                    self._pending_fp.pop(rel, None)
+                    return
         spec = Spec(why=why, fp=fp, policy=policy, terminal=terminal, code=code,
                     version=self.version_value(version))
         inputs = {k: v for k, v in self._reads.items() if k != rel}
