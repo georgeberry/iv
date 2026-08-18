@@ -277,3 +277,64 @@ def test_editing_a_written_artifact_behind_our_back_moves_nothing(fetched):
     box("2026", extra=99).write_parquet(fetched / "data" / "raw" / "box" / "2026.parquet")
     out = run(fetched, "stages/totals.py")
     assert "reuse   ( 3)" in out, out
+
+
+# ── one artifact per dataset, each season-partitioned ─────────────────────────
+
+MULTI = '''
+    import polars as pl
+    from pipeline import iv
+
+    DATASETS = ["player_box", "schedule"]
+    SEASONS = ["2024", "2025"]
+
+    def build_one(season, dataset):
+        box = pl.read_parquet(iv.reads(
+            "raw/{dataset}/{dataset}_{season}.parquet",
+            why="one season of one raw feed", fp="rows",
+            part={"dataset": dataset, "season": season}))
+        return box.with_columns(pl.lit(season).alias("season"))
+
+    for ds in DATASETS:
+        iv.for_each(SEASONS, lambda s, ds=ds: build_one(s, ds),
+                    output="processed/panel/{dataset}.parquet", key="season",
+                    part={"dataset": ds},
+                    why="a parsed panel — one file per dataset, every season")
+'''
+
+
+@pytest.fixture
+def multi(project):
+    (project / "pipeline.py").write_text(textwrap.dedent(PIPELINE).lstrip())
+    (project / "stages" / "panels.py").write_text(textwrap.dedent(MULTI).lstrip())
+    for ds in ("player_box", "schedule"):
+        d = project / "data" / "raw" / ds
+        d.mkdir(parents=True, exist_ok=True)
+        for s in ("2024", "2025"):
+            pl.DataFrame({"a": [int(s)]}).write_parquet(d / f"{ds}_{s}.parquet")
+    return project
+
+
+def test_a_templated_output_is_one_artifact_per_dataset(multi):
+    """The path differs by a runtime value AND the artifact is season-partitioned. The
+    template stays the literal the scan reads; the rendered path is the file on disk."""
+    out = run(multi, "stages/panels.py")
+    assert out.count("rebuild ( 2)") == 2, out
+    for ds in ("player_box", "schedule"):
+        assert (multi / "data" / "processed" / "panel" / f"{ds}.parquet").exists()
+
+    assert "reuse   ( 2)" in run(multi, "stages/panels.py")
+
+
+def test_only_the_dataset_whose_raw_moved_rebuilds(multi):
+    run(multi, "stages/panels.py")
+    # A ROW, not a value: that feed is read with fp="rows", so a same-count edit is
+    # invisible by design — the coarse-strategy hazard, demonstrated on our own test.
+    pl.DataFrame({"a": [2025, 999]}).write_parquet(
+        multi / "data" / "raw" / "player_box" / "player_box_2025.parquet")
+
+    out = run(multi, "stages/panels.py")
+    lines = [l for l in out.splitlines() if "rebuild" in l or "partitions" in l]
+    assert any("rebuild ( 1): 2025" in l for l in lines), lines
+    assert any("rebuild ( 0)" in l for l in lines), \
+        "the other dataset's panel must not move"

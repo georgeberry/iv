@@ -45,16 +45,23 @@ class PartitionCache:
     """Per-partition reuse for an artifact with a partition column."""
 
     def __init__(self, iv, output: str, key: str, *, why: str,
-                 fp: str = "data", policy: str = "tracked", extra: str = "") -> None:
+                 fp: str = "data", policy: str = "tracked", extra: str = "",
+                 part: dict[str, str] | None = None) -> None:
         self.iv = iv
-        self.artifact = output
+        # TWO names for one artifact, and both are needed. The TEMPLATE is the literal in
+        # the source, so it is what the static scan knows it by. The RENDERED path is the
+        # file on disk. A pipeline that produces one artifact per dataset — a panel per
+        # feed, each season-partitioned — has no other way to stay statically readable.
+        self.template = output
+        self.part = dict(part or {})
+        self.artifact = _render_template(output, part) if part else output
         self.key = key
         self.spec = Spec(why=why, fp=fp, policy=policy)
         self.extra = extra
-        self._inputs = _static.inputs_for_artifact(iv, output)
+        self._inputs = _static.inputs_for_artifact(iv, self.template)
         if self._inputs is None:
             raise DagioError(
-                f"{output} has no single declared producer, so its per-partition inputs "
+                f"{self.template} has no single declared producer, so its per-partition inputs "
                 f"cannot be read off the code. Run `dagio check`.")
         self._per = {t: h for t, h in self._inputs.items()
                      if key in _template_fields(t)}
@@ -74,9 +81,13 @@ class PartitionCache:
         would turn over every night and refit every cohort for nothing.
         """
         source = self._fp_of.get(partition, partition)
-        ids = dict(self.iv.state.input_ids(self._global))
+        # An input template may carry the caller's OTHER fields too — a per-dataset,
+        # per-season raw feed is `raw/{dataset}/{dataset}_{season}.parquet`, and only
+        # `season` is the partition key.
+        ids = dict(self.iv.state.input_ids(
+            {self._fill(t): how for t, how in self._global.items()}))
         for template, how in self._per.items():
-            rel = _render_template(template, {self.key: source})
+            rel = self._fill(template, {self.key: source})
             ids[rel] = self.iv.state.id_of(rel, how)
         body = "|".join([
             f"meta={self.iv.state.metadata_term(self.spec.policy)}",
@@ -86,6 +97,13 @@ class PartitionCache:
             *[f"{k}={ids[k]}" for k in sorted(ids)],
         ])
         return hashlib.sha256(body.encode()).hexdigest()[:DIGEST_LEN]
+
+    def _fill(self, template: str, extra: dict[str, str] | None = None) -> str:
+        """Render whatever fields this cache knows; leave the rest for the caller."""
+        from .paths import fields as _fields
+        vals = {**self.part, **(extra or {})}
+        have = {k: v for k, v in vals.items() if k in _fields(template)}
+        return _render_template(template, have) if have else template
 
     def _stamps(self) -> dict[str, str]:
         return (self.iv.record_of(self.artifact) or {}).get("parts") or {}
@@ -171,6 +189,7 @@ def _span(parts: list[str]) -> str:
 # ── the fan-out helper ────────────────────────────────────────────────────────
 
 def for_each(iv, over, build_one, *, output: str, key: str, why: str,
+             part: dict[str, str] | None = None,
              fp: str = "data", policy: str = "tracked",
              extra: dict[str, str] | None = None,
              fp_of: dict[str, str] | None = None, extra_key: str = "",
@@ -190,7 +209,7 @@ def for_each(iv, over, build_one, *, output: str, key: str, why: str,
     force = iv.force if force is None else force
 
     cache = PartitionCache(iv, output, key, why=why, fp=fp,
-                           policy=policy, extra=extra_key)
+                           policy=policy, extra=extra_key, part=part)
     want = [str(p) for p in over]
     reuse, rebuild = ([], want) if force else cache.plan(want, extra=extra, fp_of=fp_of)
     if not quiet:
