@@ -75,6 +75,7 @@ class State:
         self.iv = iv
         self._cache: dict | None = None
         self._collections: dict[tuple, str] = {}
+        self._roots: dict[tuple, str] = {}
 
     @property
     def path(self):
@@ -170,6 +171,7 @@ class State:
     def reset(self) -> None:
         self._cache = None
         self._collections.clear()
+        self._roots.clear()
 
     # ── ids of things ─────────────────────────────────────────────────────────
 
@@ -190,11 +192,20 @@ class State:
         from .paths import fields
         if fields(rel):
             return self.collection_id(rel, how)
+        # Memoised for the life of the process, and it is not an optimisation at the
+        # margin: a per-partition key folds the same whole-artifact inputs into every
+        # partition, so one 21-season panel re-hashed its three crosswalks 63 times over
+        # a bucket. A root cannot move mid-run — anything this pipeline writes has a
+        # record, and `stamp` clears the cache — so the second read has the same answer.
+        ckey = (rel, how if isinstance(how, str) else id(how))
+        if ckey in self._roots:
+            return self._roots[ckey]
         p = self.iv.resolve(rel)
         with self.iv.bookkeeping():
             if not p.exists():
                 return ABSENT
-            return _fp.compute(p, how)
+            self._roots[ckey] = _fp.compute(p, how)
+            return self._roots[ckey]
 
     def input_ids(self, inputs: dict[str, object],
                   assume_unchanged: dict[str, dict] | None = None) -> dict[str, str]:
@@ -311,6 +322,11 @@ class State:
             entry["parts"] = parts
         data["artifacts"][rel] = entry
         self.save(data)
+        # A write is the one thing that can move a file's identity mid-process, so both
+        # memos go. `updates` rewrites a path this run already fingerprinted, and a new
+        # partition changes what its collection contains.
+        self._roots.clear()
+        self._collections.clear()
         return new_id
 
     # ── the check ─────────────────────────────────────────────────────────────

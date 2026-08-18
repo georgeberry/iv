@@ -43,6 +43,7 @@ from .paths import fields as _template_fields
 # unproduced.
 METHODS: dict[str, tuple[str, object, str]] = {
     "reads": ("read", 0, "path"),
+    "collection": ("collection", 0, "path"),
     "writes": ("write", 0, "path"),
     "updates": ("update", 0, "path"),
     "external": ("external", 0, "name"),
@@ -122,7 +123,7 @@ class Stage:
 
     def inputs(self) -> tuple[Site, ...]:
         """Everything that must exist BEFORE this stage runs. Id-bearing only."""
-        return self._of("read", "update")
+        return self._of("read", "collection", "update")
 
     def outputs(self) -> tuple[Site, ...]:
         """Everything this stage leaves behind."""
@@ -186,7 +187,10 @@ def _sites(call: ast.Call, kind: str, at: tuple, rel_file: str,
         return [Site(kind=kind, path=EXTERNAL_PREFIX + paths[0], why=why,
                      file=rel_file, line=call.lineno, owner=owner)]
 
-    fp = _lit_str(kw.get("fp")) or ("<callable>" if "fp" in kw else "data")
+    # The default has to match the method's own, or the scan prices a check differently
+    # from the run that made the record — a collection defaults to a footer read.
+    _fp_default = "rows" if kind == "collection" else "data"
+    fp = _lit_str(kw.get("fp")) or ("<callable>" if "fp" in kw else _fp_default)
     policy = _lit_str(kw.get("policy")) or "tracked"
     if "policy" in kw and _lit_str(kw["policy"]) is None:
         raise DeclError(f"{where}: policy= must be a string literal")
@@ -200,8 +204,8 @@ def _sites(call: ast.Call, kind: str, at: tuple, rel_file: str,
 
     for p in paths:
         if "part" in kw:
-            _check_part_keys(kw["part"], p, where)
-        elif _template_fields(p) and kind != "write":
+            _check_part_keys(kw["part"], p, where, partial=kind == "collection")
+        elif _template_fields(p) and kind not in ("write", "collection"):
             # A partitioned WRITE is one artifact with a partition column, not one file
             # per partition, so its path carries no placeholder.
             raise DeclError(
@@ -217,11 +221,16 @@ def _sites(call: ast.Call, kind: str, at: tuple, rel_file: str,
             for p in paths]
 
 
-def _check_part_keys(node: ast.AST, path: str, where: str) -> None:
+def _check_part_keys(node: ast.AST, path: str, where: str, *,
+                     partial: bool = False) -> None:
     """The part KEYS must be literals even though the values need not be.
 
     The keys are structure — they say which placeholders this call fills. The values are
     the only genuinely runtime thing in a declaration.
+
+    `partial` for a COLLECTION, whose whole point is the field it leaves free: the seasons
+    on disk are discovered, so demanding a value for `{season}` would be demanding the
+    answer to the question being asked. An unknown key is still an error either way.
     """
     if not isinstance(node, ast.Dict):
         return                                  # a variable dict; the runtime check catches it
@@ -229,7 +238,7 @@ def _check_part_keys(node: ast.AST, path: str, where: str) -> None:
     if any(k is None for k in keys):
         raise DeclError(f"{where}: part= keys must be string literals")
     needed, given = set(_template_fields(path)), set(keys)
-    if needed != given:
+    if given - needed or (needed != given and not partial):
         raise DeclError(
             f"{where}: {path!r} names placeholder(s) {sorted(needed) or 'none'} but "
             f"part= supplies {sorted(given)}")
@@ -258,6 +267,7 @@ def function_digest(node: ast.AST) -> str:
 class _Visitor(ast.NodeVisitor):
     def __init__(self, rel_file: str) -> None:
         self.rel_file = rel_file
+        self.module = _module_name(rel_file)
         self.sites: list[Site] = []
         self.guards: list[str] = []
         self._seen: set[int] = set()            # step calls already handled as decorators
@@ -319,9 +329,21 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.module and not node.level:      # absolute imports only
+        # RELATIVE imports too. A library reaches its siblings with `from .data import x`,
+        # and skipping those stopped the walk at the package boundary — wvorp's panel
+        # builder then declared NO inputs at all, so new raw data could never make it
+        # stale. Resolve against this module's own package: `wvorp.panels` at level 1 is
+        # `wvorp`, at level 2 its parent.
+        mod = node.module or ""
+        if node.level:
+            pkg = self.module.rsplit(".", node.level)[0] if self.module else ""
+            mod = f"{pkg}.{mod}" if mod else pkg
+            if not mod:
+                self.generic_visit(node)
+                return
+        if mod:
             for a in node.names:
-                self.imports[a.asname or a.name] = (node.module, a.name)
+                self.imports[a.asname or a.name] = (mod, a.name)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:

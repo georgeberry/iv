@@ -112,7 +112,7 @@ def build(iv, stages: dict[str, Stage] | None = None,
             g.sites[s.path].append(s)
             if s.kind == "external":
                 continue                # provenance, not a dependency — carries no id
-            if s.kind == "read":
+            if s.kind in ("read", "collection"):
                 g.readers[s.path].append(node)
             elif s.kind == "write":
                 g.writers[s.path].append(node)

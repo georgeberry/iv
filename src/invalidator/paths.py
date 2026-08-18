@@ -69,6 +69,25 @@ def render(template: str, part: dict[str, str] | None) -> str:
     return template.format(**{k: str(v) for k, v in given.items()})
 
 
+def render_partial(template: str, part: dict[str, str] | None) -> str:
+    """Substitute what the caller knows and LEAVE the rest as placeholders.
+
+    A collection is named by the fields it does not fix: `raw/{league}/box_{season}.parquet`
+    with a league but no season is one feed, every season of it. `render` is the wrong tool
+    there — it treats a free field as the caller forgetting something, which is right for a
+    path you are about to open and wrong for a set you are about to glob.
+    """
+    given = dict(part or {})
+    extra = sorted(set(given) - set(fields(template)))
+    if extra:
+        raise DeclError(
+            f"{template!r} has no placeholder for part key(s) {extra}; "
+            f"it names {sorted(set(fields(template))) or 'none'}")
+    for k, v in given.items():
+        template = template.replace("{" + k + "}", str(v))
+    return template
+
+
 def resolve_under(root, rel: str):
     """A rendered rel path -> the concrete path under `root`."""
     if _FIELD.search(rel):

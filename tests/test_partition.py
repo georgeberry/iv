@@ -338,3 +338,72 @@ def test_only_the_dataset_whose_raw_moved_rebuilds(multi):
     assert any("rebuild ( 1): 2025" in l for l in lines), lines
     assert any("rebuild ( 0)" in l for l in lines), \
         "the other dataset's panel must not move"
+
+
+# ── branches ──────────────────────────────────────────────────────────────────
+
+BRANCHED = '''
+    """One builder, two path shapes — the tree's own league is flat, a sub-league nests."""
+    import polars as pl
+    from pipeline import iv
+
+    SEASONS = ["2024", "2025"]
+
+    def build_one(season, league, dataset):
+        if league == "own":
+            p = iv.reads("raw/{dataset}/{dataset}_{season}.parquet",
+                         why="one season of the tree's own raw feed",
+                         part={"dataset": dataset, "season": season})
+        else:
+            p = iv.reads("raw/{league}/{dataset}/{dataset}_{season}.parquet",
+                         why="one season of a nested sub-league feed",
+                         part={"league": league, "dataset": dataset, "season": season})
+        return pl.read_parquet(p).with_columns(pl.lit(season).alias("season"))
+
+    iv.for_each(SEASONS, lambda s: build_one(s, "own", "box"),
+                output="processed/panel/{dataset}.parquet", key="season",
+                part={"dataset": "box"}, why="the tree's own panel")
+
+    iv.for_each(SEASONS, lambda s: build_one(s, "sub", "box"),
+                output="processed/panel/{league}/{dataset}.parquet", key="season",
+                part={"league": "sub", "dataset": "box"}, why="a sub-league panel")
+'''
+
+
+@pytest.fixture
+def branched(project):
+    (project / "pipeline.py").write_text(textwrap.dedent(PIPELINE).lstrip())
+    (project / "stages" / "totals.py").write_text(textwrap.dedent(BRANCHED).lstrip())
+    for rel in ("raw/box", "raw/sub/box"):
+        (project / "data" / rel).mkdir(parents=True)
+    for s in ("2024", "2025"):
+        for rel in ("raw/box", "raw/sub/box"):
+            pl.DataFrame({"pts": [1]}).write_parquet(
+                project / "data" / rel / f"box_{s}.parquet")
+    return project
+
+
+def test_a_branch_this_partition_cannot_render_is_not_its_input(branched):
+    """The static scan is a union over branches. The flat panel never opens the nested
+    feed, and cannot even name it — `{league}` is a distinction it never made — so
+    demanding a value for it would make the panel unbuildable."""
+    out = run(branched, "stages/totals.py")
+    assert "rebuild ( 2)" in out, out
+
+    import json
+    st = json.loads((branched / "data" / ".invalidator" / "state.json").read_text())
+    assert set(st["artifacts"]["processed/panel/box.parquet"]["in"]) == {
+        "raw/{dataset}/{dataset}_{season}.parquet"}
+
+
+def test_the_sub_league_panel_does_not_key_on_the_parents_feed(branched):
+    """Both templates RENDER for the sub-league — it knows a dataset and a season, which is
+    all the flat one needs. Keyed on both, the parent's nightly feed would rebuild a panel
+    it never read."""
+    run(branched, "stages/totals.py")
+    pl.DataFrame({"pts": [99]}).write_parquet(
+        branched / "data" / "raw" / "box" / "box_2025.parquet")
+
+    out = run(branched, "stages/totals.py")
+    assert out.count("rebuild ( 1): 2025") == 1, out
+    assert out.count("reuse   ( 2)") == 1, out

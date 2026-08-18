@@ -63,12 +63,39 @@ class PartitionCache:
             raise DagioError(
                 f"{self.template} has no single declared producer, so its per-partition inputs "
                 f"cannot be read off the code. Run `dagio check`.")
-        self._per = {t: h for t, h in self._inputs.items()
-                     if key in _template_fields(t)}
-        self._global = {t: h for t, h in self._inputs.items() if t not in self._per}
+        self._per = self._applicable({t: h for t, h in self._inputs.items()
+                                      if key in _template_fields(t)})
+        # The same branch rule applies to the whole-artifact inputs: `load()` declares a
+        # flat panel and a nested one, and a caller that named no league reads the flat one.
+        self._global = self._applicable({t: h for t, h in self._inputs.items()
+                                         if key not in _template_fields(t)})
         self._existing = _MISSING
         self._plan_extra: dict[str, str] = {}
         self._fp_of: dict[str, str] = {}
+
+    def _applicable(self, per: dict[str, str]) -> dict[str, str]:
+        """Which per-partition templates this partition actually reads.
+
+        The static scan is a UNION over branches, and a producer that picks its path by a
+        runtime value declares every branch. `load_raw` reads
+        `raw/{dataset}/{dataset}_{season}.parquet` for the tree's own league and
+        `raw/{league}/{dataset}/{dataset}_{season}.parquet` for a nested sub-league; only
+        one of those is a real input of any given panel.
+
+        Two rules, and between them they pick the branch that was taken:
+
+        A template this partition cannot RENDER is not its input — the missing field names
+        a distinction this caller never made. And where one renderable template's fields
+        are a strict SUBSET of another's, the caller supplied the extra field on purpose,
+        so the more specific one is the branch it took. Without the second rule a sub-league
+        panel claims the parent league's flat raw feed — which moves nightly — and rebuilds
+        every night for a feed it never opened.
+        """
+        known = set(self.part) | {self.key}
+        fields = {t: set(_template_fields(t)) for t in per}
+        ok = {t: h for t, h in per.items() if fields[t] <= known}
+        return {t: h for t, h in ok.items()
+                if not any(fields[t] < fields[u] for u in ok)}
 
     # ── the key ───────────────────────────────────────────────────────────────
 
@@ -174,7 +201,10 @@ class PartitionCache:
         # uploads — exit 0, nothing in the bucket.
         out.write_parquet(str(p))
         parts = {part: self._key(part) for part in sorted(set(built) | set(reuse))}
-        new_id = self.iv.state.stamp(self.artifact, spec=self.spec, inputs=self._inputs,
+        # `_per | _global`, not `_inputs`: the branches this artifact does not take are
+        # not its lineage, and recording them draws an edge nothing ever read.
+        new_id = self.iv.state.stamp(self.artifact, spec=self.spec,
+                                     inputs={**self._global, **self._per},
                                      by=self.iv.node(), parts=parts)
         self.iv.record("io", op="write", rel=self.artifact, why=self.spec.why,
                        partitioned_by=self.key, id=new_id,

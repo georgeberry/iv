@@ -33,6 +33,7 @@ import hashlib
 import inspect
 import os
 import re
+import threading as _threading
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
@@ -127,7 +128,12 @@ class Invalidator:
         # went through a path that had been resolved for READING.
         self._read_paths: set[str] = set()
         self._trace_fh = None
-        self._depth = 0                              # bookkeeping suppression
+        # THREAD-LOCAL, because "the pipeline is inspecting itself" is a property of the
+        # CALL STACK, not of the process. A stage that loads seven feeds concurrently has
+        # one thread globbing inside `bookkeeping()` while another declares a read, and a
+        # shared counter makes the second one invisible — six of seven declared inputs
+        # silently vanished from the record that way.
+        self._local = _threading.local()
 
     def __repr__(self) -> str:
         split = "" if self.out_root is self.data_root \
@@ -161,6 +167,10 @@ class Invalidator:
 
     # ── the trace ─────────────────────────────────────────────────────────────
 
+    @property
+    def _depth(self) -> int:
+        return getattr(self._local, "depth", 0)
+
     @contextmanager
     def bookkeeping(self):
         """I/O in this scope is the pipeline inspecting itself, not a data edge.
@@ -170,11 +180,11 @@ class Invalidator:
         including the ones that never touch it. Being guarded is not the same as
         depending on the data.
         """
-        self._depth += 1
+        self._local.depth = self._depth + 1
         try:
             yield
         finally:
-            self._depth -= 1
+            self._local.depth -= 1
 
     def record(self, kind: str, **fields) -> None:
         from . import record as _rec
@@ -227,6 +237,44 @@ class Invalidator:
         self.record("io", op="read", rel=rel, why=why, optional=optional, prior=prior,
                     part=part or {})
         return p
+
+    def collection(self, path: str, *, why: str, optional: bool = False,
+                   fp: str | Callable = "rows",
+                   part: dict[str, str] | None = None) -> list[Path]:
+        """Declare a whole feed at once and return the files it currently holds.
+
+        A collection is the read whose unit is the GROWING SET rather than a named file:
+        the seasons on disk are DISCOVERED, not known, so there is no `part` to pass for
+        the free fields. `reads()` cannot express that — it renders one concrete path, and
+        would have to be told the answer it is being asked for.
+
+        Its id folds every member's id, so a new season moves it and a refetch that
+        changed nothing does not. `fp` defaults to `"rows"` rather than the full data hash
+        because a collection of ROOTS is fingerprinted on every check, and a whole feed is
+        the expensive place to ask an expensive question.
+        """
+        _check_why(why, path)
+        rel = _paths.render_partial(path, part)
+        if not _paths.fields(rel):
+            raise DeclError(
+                f"{path!r} has no free field left, so it names one file rather than a "
+                f"collection. Use reads().")
+        # Read BEFORE the glob: `instances_of` enters `bookkeeping()` itself, and asking
+        # afterwards would answer about this call rather than about its caller.
+        inspecting = bool(self._depth)
+        files = [self.resolve(r) for r in self.state.instances_of(rel)]
+        if inspecting:
+            return files
+        if not files and not optional:
+            raise FileNotFoundError(
+                f"{rel} matches nothing on disk. Its producer has not run, or has "
+                f"failed. Pass optional=True if absence is meant to degrade rather "
+                f"than fail.")
+        self._reads[rel] = fp
+        self._read_paths.update(str(f) for f in files)
+        self.record("io", op="read", rel=rel, why=why, optional=optional,
+                    collection=True, part=part or {})
+        return files
 
     @contextmanager
     def writes(self, path: str, *, why: str,
