@@ -57,3 +57,14 @@ def test_frame_reads_and_declares_in_one_call(project, iv):
     assert "raw/box.parquet" in iv._reads
 
     assert iv.frame("raw/nope.parquet", why="absent", optional=True) is None
+
+
+def test_every_read_method_takes_the_same_read_flags(iv):
+    """`reads`, `frame` and `collection` all declare an input, so a flag one accepts and
+    another silently rejects is a papercut that only shows up at runtime — which is how
+    `collection(prior=True)` reached a live refresh and stopped it."""
+    import inspect
+
+    for name in ("reads", "frame", "collection"):
+        params = inspect.signature(getattr(iv, name)).parameters
+        assert {"why", "optional", "prior", "fp", "part"} <= set(params), name

@@ -262,6 +262,7 @@ class Invalidator:
         return read_frame(p, **read_kwargs)
 
     def collection(self, path: str, *, why: str, optional: bool = False,
+                   prior: bool = False,
                    fp: str | Callable = "rows",
                    part: dict[str, str] | None = None) -> list[Path]:
         """Declare a whole feed at once and return the files it currently holds.
@@ -275,6 +276,10 @@ class Invalidator:
         changed nothing does not. `fp` defaults to `"rows"` rather than the full data hash
         because a collection of ROOTS is fingerprinted on every check, and a whole feed is
         the expensive place to ask an expensive question.
+
+        `prior` means the same as it does on `reads()`, and a collection reaches it just
+        as easily: a stage that runs before the fetchers reads the PREVIOUS run's copies
+        of a whole feed, by design rather than by an ordering mistake.
         """
         _check_why(why, path)
         rel = _paths.render_partial(path, part)
@@ -295,7 +300,7 @@ class Invalidator:
                 f"than fail.")
         self._reads[rel] = fp
         self._read_paths.update(str(f) for f in files)
-        self.record("io", op="read", rel=rel, why=why, optional=optional,
+        self.record("io", op="read", rel=rel, why=why, optional=optional, prior=prior,
                     collection=True, part=part or {})
         return files
 
