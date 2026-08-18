@@ -537,6 +537,34 @@ def slices_meet(a: str, b: str) -> bool:
     return not a or not b or a == b
 
 
+def undefined_names(iv) -> list[str]:
+    """Names a stage uses that are not defined anywhere it can see them.
+
+    Not a general linter, and not a reimplementation of one — it shells out to pyflakes,
+    which has spent twenty years on the cases that make this hard (comprehension scopes,
+    closures, star imports, builtins). What makes it `iv`'s business is WHEN it runs: a
+    stage's build function is not executed until the pipeline runs it, so a name left
+    behind by a refactor imports perfectly and raises an hour into a refresh. That is the
+    same shape of failure this package exists to move earlier.
+
+    Silent when pyflakes is not installed, because a check that cannot run should not
+    fail a pipeline. `pip install 'iv[lint]'`.
+    """
+    try:
+        from pyflakes.api import check as _check
+        from pyflakes.reporter import Reporter
+    except ImportError:
+        return []
+    import io
+
+    out, err = io.StringIO(), io.StringIO()
+    for node in sorted(scan(iv)):
+        path = iv.project_root / node
+        if path.exists():
+            _check(path.read_text(), node, Reporter(out, err))
+    return [ln for ln in out.getvalue().splitlines() if "undefined name" in ln]
+
+
 def writers_of(iv, rel: str) -> set[str]:
     """Every stage that DECLARES a write to `rel`.
 

@@ -580,3 +580,25 @@ def test_a_slice_says_an_artifact_is_not_one_population(project):
     assert _graph.find_cycle(g) is None, "disjoint slices are not a cycle"
     # The reader of `played` depends on the writer of `played`, and on nobody else.
     assert g.producers_of("processed/preds.parquet", "played") == ["stages/first.py"]
+
+
+def test_an_undefined_name_in_a_stage_is_caught_before_it_runs(project, iv):
+    """A build function is not executed until the pipeline runs it, so a name left
+    behind by a refactor imports perfectly and raises an hour in. Five of those reached
+    a live refresh one at a time before this existed."""
+    from conftest import write_stage
+    from invalidator import static
+
+    write_stage(project, "stages/rot.py", '''
+        from pipeline import iv
+
+        @iv.step("processed/out.parquet", why="the output")
+        def build(out):
+            return renamed_away        # a parameter that used to be called this
+    ''')
+    (project / "pipeline.py").write_text(
+        'from invalidator import Invalidator\n'
+        'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
+
+    bad = static.undefined_names(iv)
+    assert any("renamed_away" in b for b in bad), bad

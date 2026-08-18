@@ -245,6 +245,12 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warns: list[str] = []
 
+    # UNDEFINED NAMES in a stage. A build function is not executed until the pipeline
+    # runs it, so a name left behind by a refactor imports perfectly and raises an hour
+    # in. Moving that to the preflight is the same job as everything else here.
+    for line in _static.undefined_names(g.iv):
+        errors.append(f"UNDEFINED NAME  {line}")
+
     # A file that declares I/O and nothing runs. Worth saying; not worth graphing, since
     # in a two-pipeline repo it is usually the other pipeline's stage.
     for node in g.unreached:

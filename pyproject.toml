@@ -8,6 +8,9 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
+lint = [
+    "pyflakes>=3",
+]
 # The default fingerprint strategy hashes the DATA, not the bytes, so it needs a
 # dataframe library. Everything else in the core is stdlib.
 data = ["polars>=1.0"]

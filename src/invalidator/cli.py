@@ -150,11 +150,20 @@ def preflight() -> None:
     reports is worth fixing and does not make tonight's numbers wrong.
     """
     try:
-        _, g = _graph_of()
+        iv, g = _graph_of()
         _graph.require_acyclic(g)
     except DagioError as e:
         _die(e)
-    typer.secho("  ok — no cycle; the run order is defined", fg=typer.colors.GREEN)
+    bad = _static.undefined_names(iv)
+    if bad:
+        for line in bad:
+            typer.secho(f"  UNDEFINED NAME  {line}", fg=typer.colors.RED)
+        _die(DagioError(
+            f"{len(bad)} undefined name(s) in stages that have not run yet. Each one is "
+            f"a NameError waiting for the stage that reaches it — usually a refactor "
+            f"that renamed a parameter and left a use behind."))
+    typer.secho("  ok — no cycle, no undefined names; the run order is defined",
+                fg=typer.colors.GREEN)
 
 
 @app.command()
