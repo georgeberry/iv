@@ -112,3 +112,32 @@ def test_overlay_off_reads_only_the_shared_tree(project):
     assert on.resolve("raw/src.parquet") == local
     assert off.resolve("raw/src.parquet") == shared / "raw" / "src.parquet"
     assert off.resolve_out("processed/x.parquet") == scratch / "processed" / "x.parquet"
+
+
+def test_writing_through_a_read_resolved_path_is_refused(project):
+    """The gap that let a migration bug reach prod.
+
+    `out_root` redirects every DECLARED write. A path handed back by `reads()` points at
+    the shared tree, and a stray write through it is not declared at all — so nothing
+    redirected it. A variable-name collision in a migration script did exactly this and
+    overwrote a live parquet with a JSON dump.
+    """
+    from invalidator import DeclError
+
+    shared, scratch = project / "shared", project / "scratch"
+    (shared / "raw").mkdir(parents=True)
+    FRAME.write_parquet(shared / "raw" / "src.parquet")
+    iv = Invalidator(data_root=shared, out_root=scratch, data_version="v1",
+                     overlay=False, project_root=project)
+    iv.guard_writes()
+
+    src = iv.reads("raw/src.parquet", why="an input")
+    assert src == shared / "raw" / "src.parquet"
+    with pytest.raises(DeclError, match="that path was handed out by iv.reads"):
+        src.write_text("clobbered")
+    assert FRAME.equals(pl.read_parquet(src)), "the shared file is untouched"
+
+    # A declared output is unaffected: it resolves under out_root and was never an input.
+    with iv.writes("processed/out.parquet", why="the output", terminal=True) as p:
+        FRAME.write_parquet(p)
+    assert p.exists()

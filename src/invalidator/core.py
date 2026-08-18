@@ -120,6 +120,12 @@ class Invalidator:
         # belong to EVERY step in the file, so a step inherits them rather than starting
         # from nothing. Captured once, so step B does not also inherit step A's reads.
         self._module_reads: dict[str, object] | None = None
+        # Concrete paths handed out by `reads()`. With overlay=False these point at the
+        # SHARED tree, so a stray write through one lands in prod even though every
+        # declared write was redirected to out_root. That is how a migration script's
+        # variable-name collision overwrote a live parquet with a JSON dump: the write
+        # went through a path that had been resolved for READING.
+        self._read_paths: set[str] = set()
         self._trace_fh = None
         self._depth = 0                              # bookkeeping suppression
 
@@ -217,6 +223,7 @@ class Invalidator:
                 f"degrade rather than fail.")
 
         self._reads[rel] = fp
+        self._read_paths.add(str(p))
         self.record("io", op="read", rel=rel, why=why, optional=optional, prior=prior,
                     part=part or {})
         return p
@@ -325,6 +332,41 @@ class Invalidator:
         """
         _check_why(why, name)
         self.record("io", op="external", rel=f"external:{name}", why=why)
+
+    def guard_writes(self) -> None:
+        """Make a write through a path that was resolved for READING raise.
+
+        `reads()` hands back a real path into the shared tree. Nothing stops
+        `p.write_text(...)` on it, and then no amount of out_root redirection helps —
+        the declared writes were all redirected and this one was not declared at all.
+
+        Opt-in because it patches `Path.write_*`, and a process may have perfectly good
+        reasons to write elsewhere. It only ever objects to a path THIS Invalidator
+        handed out as an input.
+        """
+        from pathlib import Path as _P
+        if getattr(self, "_write_guard_on", False):
+            return
+        self._write_guard_on = True
+        iv = self
+
+        def wrap(name):
+            orig = getattr(_P, name)
+
+            def patched(self, *a, **kw):
+                if str(self) in iv._read_paths:
+                    raise DeclError(
+                        f"refusing to write {self}: that path was handed out by "
+                        f"iv.reads(), so it is an INPUT. Writing through it bypasses "
+                        f"out_root and lands in the shared tree. Declare the output with "
+                        f"iv.writes()/@iv.step and write to the path it yields.")
+                return orig(self, *a, **kw)
+
+            patched.__name__ = name
+            setattr(_P, name, patched)
+
+        for n in ("write_text", "write_bytes"):
+            wrap(n)
 
     def stamp_content(self, path, frame) -> None:
         """Fingerprint from a frame already in memory instead of re-reading the file.
