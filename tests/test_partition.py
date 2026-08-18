@@ -392,8 +392,10 @@ def test_a_branch_this_partition_cannot_render_is_not_its_input(branched):
 
     import json
     st = json.loads((branched / "data" / ".invalidator" / "state.json").read_text())
+    # FILLED where this cache knows the value, free where it does not: the dataset is
+    # fixed, the season is the growing set.
     assert set(st["artifacts"]["processed/panel/box.parquet"]["in"]) == {
-        "raw/{dataset}/{dataset}_{season}.parquet"}
+        "raw/box/box_{season}.parquet"}
 
 
 def test_the_sub_league_panel_does_not_key_on_the_parents_feed(branched):

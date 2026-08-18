@@ -37,6 +37,7 @@ from .fingerprint import DIGEST_LEN
 from .state import Spec
 from .paths import fields as _template_fields
 from .paths import render as _render_template
+from .paths import render_partial as _render_partial
 
 _MISSING = object()
 
@@ -99,6 +100,14 @@ class PartitionCache:
 
     # ── the key ───────────────────────────────────────────────────────────────
 
+    def _warm(self, partitions: list[str]) -> None:
+        """Fingerprint every root these partitions key on, concurrently, before keying."""
+        want = {self._fill(t): how for t, how in self._global.items()}
+        for template, how in self._per.items():
+            for p in partitions:
+                want[self._fill(template, {self.key: self._fp_of.get(p, p)})] = how
+        self.iv.state.prefetch(want)
+
     def _key(self, partition: str) -> str:
         """This partition's id: the metadata, the global inputs, and ITS inputs.
 
@@ -126,11 +135,16 @@ class PartitionCache:
         return hashlib.sha256(body.encode()).hexdigest()[:DIGEST_LEN]
 
     def _fill(self, template: str, extra: dict[str, str] | None = None) -> str:
-        """Render whatever fields this cache knows; leave the rest for the caller."""
+        """Render whatever fields this cache knows; leave the rest as placeholders.
+
+        PARTIAL on purpose. `_key` always renders fully — `_applicable` has already
+        dropped anything this partition cannot name — while `commit` wants the raw feed
+        with its dataset fixed and its season still free, which is a collection.
+        """
         from .paths import fields as _fields
         vals = {**self.part, **(extra or {})}
         have = {k: v for k, v in vals.items() if k in _fields(template)}
-        return _render_template(template, have) if have else template
+        return _render_partial(template, have)
 
     def _stamps(self) -> dict[str, str]:
         return (self.iv.record_of(self.artifact) or {}).get("parts") or {}
@@ -172,6 +186,7 @@ class PartitionCache:
             return [], want
         stamps = self._stamps()
         have = {str(v) for v in df[self.key].unique().to_list()}
+        self._warm([p for p in want if p in have])
         reuse = [p for p in want if p in have and stamps.get(p) == self._key(p)]
         return reuse, [p for p in want if p not in set(reuse)]
 
@@ -200,11 +215,20 @@ class PartitionCache:
         # object it goes through __fspath__, writes cloudpathlib's LOCAL CACHE, and never
         # uploads — exit 0, nothing in the bucket.
         out.write_parquet(str(p))
-        parts = {part: self._key(part) for part in sorted(set(built) | set(reuse))}
+        keys = sorted(set(built) | set(reuse))
+        self._warm(keys)
+        parts = {part: self._key(part) for part in keys}
         # `_per | _global`, not `_inputs`: the branches this artifact does not take are
         # not its lineage, and recording them draws an edge nothing ever read.
-        new_id = self.iv.state.stamp(self.artifact, spec=self.spec,
-                                     inputs={**self._global, **self._per},
+        #
+        # FILLED, and that is not cosmetic. The raw feed is
+        # `raw/{dataset}/{dataset}_{season}.parquet`; recorded with `{dataset}` still
+        # free, the player_box panel claims a collection over EVERY raw dataset in the
+        # tree — a bucket-wide glob and a footer read per file, for feeds it never
+        # opened. `season` stays free, because that one really is the growing set.
+        inputs = {self._fill(t): how
+                  for t, how in {**self._global, **self._per}.items()}
+        new_id = self.iv.state.stamp(self.artifact, spec=self.spec, inputs=inputs,
                                      by=self.iv.node(), parts=parts)
         self.iv.record("io", op="write", rel=self.artifact, why=self.spec.why,
                        partitioned_by=self.key, id=new_id,

@@ -228,6 +228,27 @@ class State:
             out[rel] = self.id_of(rel, how)
         return out
 
+    def prefetch(self, inputs: dict[str, object]) -> None:
+        """Fingerprint many roots at once, into the memo `id_of` already reads.
+
+        A per-partition key asks for one root per partition, and over a bucket each of
+        those is a fresh connection and a footer read: twenty-one seasons cost two
+        MINUTES serially and seconds together. That is the same shape as every other
+        one-file-per-season loop in a pipeline — the bug is the loop, not the file.
+
+        A warm-up, never a second source of truth: it computes exactly what `id_of`
+        would, and anything it skips `id_of` still answers.
+        """
+        from .paths import fields
+        todo = [(rel, how) for rel, how in inputs.items()
+                if not fields(rel) and self.record_of(rel) is None
+                and (rel, how if isinstance(how, str) else id(how)) not in self._roots]
+        if len(todo) < 2:
+            return
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(max_workers=min(16, len(todo))) as ex:
+            list(ex.map(lambda t: self.id_of(*t), todo))
+
     def instances_of(self, template: str) -> list[str]:
         """Every concrete rel path a template covers: on disk, plus anything stamped.
 
@@ -272,6 +293,9 @@ class State:
         if not found:
             out = ABSENT
         else:
+            # Concurrently: a collection is one-file-per-partition by construction, so
+            # folding its members serially is the loop this whole module exists to kill.
+            self.prefetch({rel: how for rel in found})
             body = "|".join(f"{rel}={self.id_of(rel, how)}" for rel in found)
             out = "coll:" + hashlib.sha256(body.encode()).hexdigest()[:_fp.DIGEST_LEN]
         self._collections[ckey] = out
