@@ -349,6 +349,12 @@ class _Visitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if id(node) not in self._seen:
             name = _method_name(node.func)
+            if name in METHODS and _why_is_computed(node):
+                raise DeclError(
+                    f"{self.rel_file}:{node.lineno}: {name}(why=...) is not a string "
+                    f"literal, so this declaration is invisible to the scan and the "
+                    f"artifact silently loses the input. A helper that takes `why` as a "
+                    f"parameter declares nothing — spell it at the call site.")
             if name in METHODS and _has_why(node):
                 kind, index, keyword = METHODS[name]
                 self.sites.extend(_sites(node, kind, (index, keyword), self.rel_file,
@@ -388,6 +394,17 @@ def _has_why(call: ast.Call) -> bool:
     """`why=` as a string literal. Every one of our methods requires it, and nothing else
     in ordinary Python is spelled this way — which is what makes name-matching safe."""
     return any(k.arg == "why" and _lit_str(k.value) for k in call.keywords)
+
+
+def _why_is_computed(call: ast.Call) -> bool:
+    """A `why=` that is present but not a literal.
+
+    Worth its own error rather than a silent skip: the call looks exactly like a
+    declaration, the scan cannot read it, and the artifact quietly loses an input. Found
+    the hard way — a four-line helper taking `why` as a parameter declared nothing, and
+    the only symptom was an artifact with one input where it should have had five.
+    """
+    return any(k.arg == "why" and _lit_str(k.value) is None for k in call.keywords)
 
 
 def _guarded_paths(call: ast.Call) -> list[str]:
@@ -472,9 +489,21 @@ def matches(template: str, rel: str) -> bool:
 
 
 def _write_site(iv, rel: str) -> tuple[Stage, Site] | None:
-    """The one stage and the one write site that produce `rel`."""
+    """The one stage and the one write site that produce `rel`.
+
+    The scan covers every source dir, which in a repo running two pipelines out of one
+    tree means two stages can declare the same artifact — wvorp's `xpm.parquet` is
+    written by `scripts/build_xpm.py` on one league and `mnba/build_ui_parquets.py` on
+    the other. `declared_order()` says which stages THIS configuration actually runs, so
+    it breaks the tie; without it, or if it does not resolve to one, there is no single
+    producer and saying so is the honest answer.
+    """
     hits = [(st, s) for st in scan(iv).values() for s in st.outputs()
             if matches(s.path, rel)]
+    if len(hits) > 1:
+        order = iv.declared_order()
+        if order:
+            hits = [h for h in hits if h[0].node in set(order)] or hits
     return hits[0] if len(hits) == 1 else None
 
 

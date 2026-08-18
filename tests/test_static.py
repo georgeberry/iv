@@ -462,3 +462,29 @@ def test_reads_inside_a_dependency_are_not_ours_to_declare(project):
             pl.read_parquet("/somewhere/else.parquet")
     '''})
     assert static.inputs_for_artifact(g.iv, "processed/out.parquet") == {}
+
+
+def test_a_computed_why_is_an_error_not_a_silent_skip(project, iv):
+    """The call looks exactly like a declaration and the scan cannot read it, so the
+    artifact quietly loses an input. Found the hard way, by a helper taking `why=why`."""
+    from conftest import write_stage
+    from invalidator.errors import DeclError
+    import pytest
+
+    write_stage(project, "stages/roll.py", '''
+        from pipeline import iv
+
+        def _declare(path, why):
+            iv.reads(path, why=why)
+
+        @iv.step("processed/out.parquet", why="the rollup")
+        def build(out):
+            _declare("raw/box.parquet", "one raw feed")
+    ''')
+    (project / "pipeline.py").write_text(
+        'from invalidator import Invalidator\n'
+        'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
+
+    from invalidator import static
+    with pytest.raises(DeclError, match="not a string literal"):
+        static.scan(iv)
