@@ -68,3 +68,23 @@ def test_every_read_method_takes_the_same_read_flags(iv):
     for name in ("reads", "frame", "collection"):
         params = inspect.signature(getattr(iv, name)).parameters
         assert {"why", "optional", "prior", "fp", "part"} <= set(params), name
+
+
+def test_tracing_never_takes_down_a_run(project, tmp_path):
+    """The trace describes the run; it is not part of it. A pipeline that dies because
+    its logging could not serialise a value has its priorities backwards — a
+    `datetime.date` in a `part=` did exactly that, 102 seconds into a stage."""
+    import datetime as dt
+    import polars as pl
+    from invalidator import Invalidator
+
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project,
+                     trace=tmp_path / "t.ndjson")
+    (project / "data" / "raw").mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "d_2026-08-18.parquet")
+
+    # A date object, not a string. `render` stringifies it for the PATH already.
+    p = iv.reads("raw/d_{date}.parquet", why="one day",
+                 part={"date": dt.date(2026, 8, 18)})
+    assert p.exists()

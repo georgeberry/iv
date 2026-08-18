@@ -44,22 +44,43 @@ RECORDER_VERSION = 2
 
 
 def emit(iv, kind: str, **fields) -> None:
-    """Append one event, unless tracing is off or we are inside `bookkeeping()`."""
+    """Append one event, unless tracing is off or we are inside `bookkeeping()`.
+
+    NEVER RAISES. The trace is observability: it describes the run, it is not part of
+    it, and a pipeline that dies because its logging could not serialise a value has its
+    priorities backwards. A `datetime.date` in a `part=` did exactly that — 102 seconds
+    into a stage, after the fits.
+
+    `default=str` handles the ordinary case, which is a `part=` value that is not a
+    string; `render` already stringifies those for the PATH, so nothing required them to
+    be strings in the first place. Anything stranger is reported once and dropped.
+    """
     if iv.trace_path is None or iv._depth:
         return
-    if iv._trace_fh is None:
-        iv.trace_path.parent.mkdir(parents=True, exist_ok=True)
-        # Line-buffered: many stage processes append to one file concurrently, and the
-        # flush-on-newline is what keeps one event to one write. See the module docstring.
-        iv._trace_fh = iv.trace_path.open("a", buffering=1)
-    iv._trace_fh.write(json.dumps({
-        "v": RECORDER_VERSION,
-        "kind": kind,
-        "node": iv.node(),
-        "pid": os.getpid(),
-        "t": round(time.time(), 3),
-        **fields,
-    }) + "\n")
+    try:
+        if iv._trace_fh is None:
+            iv.trace_path.parent.mkdir(parents=True, exist_ok=True)
+            # Line-buffered: many stage processes append to one file concurrently, and
+            # the flush-on-newline keeps one event to one write. See the module docstring.
+            iv._trace_fh = iv.trace_path.open("a", buffering=1)
+        iv._trace_fh.write(json.dumps({
+            "v": RECORDER_VERSION,
+            "kind": kind,
+            "node": iv.node(),
+            "pid": os.getpid(),
+            "t": round(time.time(), 3),
+            **fields,
+        }, default=str) + "\n")
+    except Exception as e:                  # noqa: BLE001 — see the docstring
+        global _WARNED
+        if not _WARNED:
+            _WARNED = True
+            print(f"  invalidator: trace disabled — {type(e).__name__}: {e}. "
+                  f"The run continues; `iv drift` will have nothing to read.")
+        iv.trace_path = None
+
+
+_WARNED = False
 
 
 def age_of(events: list[dict]) -> float | None:
