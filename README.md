@@ -74,6 +74,10 @@ inputs' ids into its own, so:
 - `data_version` sits in every id, so bumping it rebuilds everything. That is what covers
   the one thing no fingerprint of the inputs can see: a builder whose logic changed.
 
+The stamps are a **directory, one small JSON per artifact**, so stamping touches only the
+artifact it is about and parallel stages cannot erase each other's records. A pre-existing
+single `state.json` is migrated on first touch rather than thrown away.
+
 A staleness check is **O(number of root files)**, not O(data) and not O(depth). A derived
 input's id is a dict lookup in the state file; only roots are fingerprinted — and reading
 them is the *only* I/O a check ever does, which is why it is optional:
@@ -110,7 +114,7 @@ iv = Invalidator(
     stages=[...],                     # or order_from="refresh.sh", for the ORDER check
     trace=".invalidator/trace.ndjson",
     out_root="/tmp/scratch",          # optional: writes go here, reads fall back
-    state_path="/tmp/shadow.json",    # optional: stamps somewhere other than out_root
+    state_path="/tmp/shadow",         # optional: stamps somewhere other than out_root
 )
 ```
 
@@ -288,12 +292,6 @@ iv drift
 `declared − recorded` is a **warning** (an absent optional input, a branch not taken).
 
 ## Known limits
-
-**Parallel stages corrupt the state file.** Stamping is read-modify-write on one shared
-JSON, so concurrent stages clobber each other's records (8 artifacts written, 4 stamped,
-in a measured run) and can race on the temp file. The failure direction is safe — an
-unstamped artifact rebuilds — but parallel pipelines do not work yet. The fix is one
-record file per artifact.
 
 **Fingerprinting a per-partition collection is O(files) round trips.** Measured against a
 real GCS bucket: 21 files at `fp="rows"` (footer only) took 7.1s. Fine when one stage reads

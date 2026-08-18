@@ -189,7 +189,7 @@ def test_two_invalidators_are_independent(project, iv):
     other = Invalidator(data_root=project / "data2", data_version="other-1",
                         source_dirs=["stages"], project_root=project)
     assert other.data_root != iv.data_root
-    assert other.state.path != iv.state.path
+    assert other.state.dir != iv.state.dir
     assert iv.data_version == "v1" and other.data_version == "other-1"
 
 

@@ -75,7 +75,7 @@ class Invalidator:
                  roots: Sequence[str] = ("raw/",),
                  project_root: str | os.PathLike | None = None,
                  trace: str | os.PathLike | None = None,
-                 state_rel: str = ".invalidator/state.json",
+                 state_rel: str = ".invalidator/state",
                  force: bool | None = None) -> None:
         if not data_version or not isinstance(data_version, str):
             raise ConfigError(
@@ -107,6 +107,9 @@ class Invalidator:
         self.stages = tuple(stages) if stages is not None else None
         self.order_from = Path(order_from) if order_from else None
         self.roots = tuple(roots)
+        # A DIRECTORY, one JSON per artifact — so two stages stamping at once cannot
+        # erase each other. A `.json` here (or in `state_path`) names the old single file
+        # and is read as the directory beside it; see State.dir.
         self.state_rel = state_rel
         self.state_path_override = _paths.mkpath(state_path, self.project_root) \
             if state_path is not None else None

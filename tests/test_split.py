@@ -11,6 +11,7 @@ import pytest
 
 from conftest import write_stage
 from invalidator import Invalidator
+from invalidator.state import read_records
 
 FRAME = pl.DataFrame({"a": [1, 2, 3]})
 
@@ -55,7 +56,7 @@ def test_the_out_root_shadows_the_shared_one_for_reads(split, project):
 def test_the_state_lives_with_the_writes_not_the_reads(split, project):
     with split.writes("processed/out.parquet", why="the output", terminal=True) as p:
         FRAME.write_parquet(p)
-    assert (project / "scratch" / ".invalidator" / "state.json").exists()
+    assert read_records(project / "scratch" / ".invalidator" / "state")
     assert not (project / "shared" / ".invalidator").exists()
 
 
@@ -63,14 +64,14 @@ def test_state_path_puts_the_stamps_anywhere(project, tmp_path):
     shared = project / "shared"
     (shared / "raw").mkdir(parents=True)
     FRAME.write_parquet(shared / "raw" / "src.parquet")
-    elsewhere = tmp_path / "somewhere" / "shadow.json"
+    elsewhere = tmp_path / "somewhere" / "shadow"
 
     iv = Invalidator(data_root=shared, out_root=project / "scratch",
                      state_path=elsewhere, data_version="v1",
                      source_dirs=["stages"], project_root=project)
     with iv.writes("processed/out.parquet", why="the output", terminal=True) as p:
         FRAME.write_parquet(p)
-    assert elsewhere.exists()
+    assert read_records(elsewhere)
     assert not (project / "scratch" / ".invalidator").exists()
 
 

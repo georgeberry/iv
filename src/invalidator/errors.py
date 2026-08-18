@@ -35,8 +35,9 @@ class PolicyError(DagioError):
 
 
 class StateError(DagioError):
-    """The state file is unreadable or malformed.
+    """A stamp is unreadable or malformed.
 
     Deliberately fatal rather than an empty dict: an empty state makes invalidation a
-    no-op and every builder rebuild forever. A MISSING file is the only legal empty state.
+    no-op and every builder rebuild forever. A MISSING record directory is the only legal
+    empty state.
     """

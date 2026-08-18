@@ -32,6 +32,22 @@ bigger promise than it looks.
 ONE IMPLEMENTATION. `is_current` is `why_stale(...) is None`. Three hand-written copies of
 a staleness rule will disagree, and the display will report everything current while two
 artifacts are stale.
+
+ONE FILE PER ARTIFACT. The stamps used to live in a single `state.json`, and stamping was
+read-modify-write over the whole of it. Two stages running at once therefore each loaded
+the map, added their own artifact, and wrote the map back — so whichever finished last
+erased the other's record. Measured on a real parallel run: eight artifacts written, four
+stamped. The failure direction was safe (an unstamped artifact rebuilds) but the cache did
+not work, and the two writers also raced on one shared `.tmp` name.
+
+So the state is a DIRECTORY, one small JSON per artifact, and a stamp touches exactly the
+file it is about. Two stages cannot collide unless they write the same artifact, which is
+already an error the graph check reports. It also fits an object store, where there is no
+lock to take and a read-modify-write over a shared key is not something you can make safe.
+
+Reading is still ONE bulk load per process — a glob and a concurrent read — because the
+question `iv status` asks is about every artifact at once, and twenty serial round trips
+over a bucket is the loop this package exists to avoid.
 """
 from __future__ import annotations
 
@@ -39,6 +55,8 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,7 +64,8 @@ from . import fingerprint as _fp
 from .errors import StateError
 from .fingerprint import ABSENT
 
-STATE_VERSION = 2
+STATE_VERSION = 3
+LEGACY_VERSION = 2                   # the single `state.json`, migrated on first touch
 
 # The closed vocabulary. Each entry changes what the id MEANS, not merely what is done
 # with it — which is why they live at the write site rather than in a list somewhere.
@@ -78,15 +97,28 @@ class State:
         self._roots: dict[tuple, str] = {}
 
     @property
-    def path(self):
-        """Where the stamps live.
+    def dir(self):
+        """The DIRECTORY the stamps live in, one file per artifact.
 
         Under the OUT root by default, because the state describes what THIS pipeline
         built — a local run writing into a scratch tree must not stamp the shared one.
         `state_path=` overrides it outright, which is what a shadow run over someone
         else's data wants.
+
+        A path ending in `.json` names the OLD single file, so it is read as the directory
+        beside it: `state_path=".../shadow.json"` keeps working and its records land in
+        `.../shadow/`. That is the same rule `legacy_path` inverts, so a config written for
+        the single file migrates itself.
         """
-        return self.iv.state_path_override or (self.iv.out_root / self.iv.state_rel)
+        p = self.iv.state_path_override or (self.iv.out_root / self.iv.state_rel)
+        s = str(p)
+        return p.parent / p.name[:-len(".json")] if s.endswith(".json") else p
+
+    @property
+    def legacy_path(self):
+        """Where a pre-directory `state.json` would be, if this tree has one."""
+        d = self.dir
+        return d.parent / (d.name + ".json")
 
     # ── the id ────────────────────────────────────────────────────────────────
 
@@ -124,49 +156,101 @@ class State:
             body += [f"{k}={inputs[k]}" for k in sorted(inputs)]
         return hashlib.sha256("|".join(body).encode()).hexdigest()[:_fp.DIGEST_LEN]
 
-    # ── the state file ────────────────────────────────────────────────────────
+    # ── the stamps ────────────────────────────────────────────────────────────
 
-    def load(self) -> dict:
-        """The whole state file.
+    def records(self) -> dict[str, dict]:
+        """Every stamp, by rel path. One bulk load per process.
 
-        Fails LOUD on malformed JSON. Returning `{}` there would make invalidation a no-op
-        and every builder rebuild forever, which reads as "the cache does not work" rather
-        than as "the state file is corrupt". A missing file is the only legal empty state.
+        Lazily reading one record per question would be N round trips over a bucket to
+        answer what a glob and a concurrent read answer in two, and `iv status` asks about
+        every artifact at once. A process therefore sees the state as of its first look —
+        which is what the single file did too, and is fine because a stage cannot be
+        downstream of a stamp that has not happened yet.
+
+        Fails LOUD on a malformed record. Returning `{}` there would make invalidation a
+        no-op and every builder rebuild forever, which reads as "the cache does not work"
+        rather than as "the state is corrupt". A missing directory is the only legal empty
+        state.
         """
         if self._cache is not None:
             return self._cache
-        p = self.path
+        self._migrate()
+        d = self.dir
         with self.iv.bookkeeping():
-            if not p.exists():
-                self._cache = {"version": STATE_VERSION, "artifacts": {}}
-                return self._cache
-            try:
-                raw = json.loads(p.read_text())
-            except (json.JSONDecodeError, OSError) as e:
-                raise StateError(
-                    f"state file {p} is unreadable: {e}. Fix or delete it — deleting "
-                    f"costs a full rebuild, which is recoverable; guessing is not.") from e
-        if raw.get("version") != STATE_VERSION:
-            raise StateError(
-                f"state file {p} is version {raw.get('version')}, this invalidator writes "
-                f"{STATE_VERSION}. Delete it to rebuild from scratch.")
-        self._cache = raw
+            files = sorted(d.glob("*.json")) if d.exists() else []
+            if len(files) > 1:
+                # Small files, one per artifact: serially over a bucket this is the same
+                # per-file round trip that `prefetch` exists to kill.
+                import concurrent.futures as cf
+                with cf.ThreadPoolExecutor(max_workers=min(16, len(files))) as ex:
+                    loaded = list(ex.map(_read_record, files))
+            else:
+                loaded = [_read_record(f) for f in files]
+        self._cache = {raw["rel"]: raw for raw in loaded}
         return self._cache
 
-    def save(self, data: dict) -> None:
-        p = self.path
-        body = json.dumps(data, indent=2, sort_keys=True)
+    def _write_record(self, rel: str, entry: dict) -> None:
+        """Stamp ONE artifact. Touches only that artifact's file.
+
+        The temp name carries the pid and thread id: two stages stamping at the same
+        moment used to write the same `state.json.tmp`, so one could rename the other's
+        half-written file into place.
+        """
+        p = self._record_path(rel)
+        # `state_version`, not `version`: an artifact's OWN `version=` is a field of the
+        # entry, and one envelope key shadowing it wrote every record as version "".
+        body = json.dumps({"state_version": STATE_VERSION, "rel": rel, **entry},
+                          indent=2, sort_keys=True)
         with self.iv.bookkeeping():
             p.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(p, Path):
-                tmp = p.with_suffix(p.suffix + ".tmp")
+                tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
                 tmp.write_text(body)
-                os.replace(tmp, p)          # atomic, so a crash cannot leave it torn
+                os.replace(tmp, p)      # atomic, so a crash cannot leave it torn
             else:
                 p.write_text(body)
 
+    def _record_path(self, rel: str):
+        return self.dir / record_filename(rel)
+
+    def _migrate(self) -> None:
+        """A pre-directory `state.json` -> one file per artifact, once.
+
+        Worth doing rather than telling people to delete it: the records are unchanged in
+        shape, only in layout, and the alternative is a full rebuild of a real pipeline for
+        a bookkeeping change. Two processes racing here both write the same bytes to the
+        same per-artifact names, so the race is harmless.
+        """
+        d, legacy = self.dir, self.legacy_path
+        with self.iv.bookkeeping():
+            if d.exists() or not legacy.exists():
+                return
+            try:
+                raw = json.loads(legacy.read_text())
+            except (json.JSONDecodeError, OSError) as e:
+                raise StateError(
+                    f"state file {legacy} is unreadable: {e}. Fix or delete it — deleting "
+                    f"costs a full rebuild, which is recoverable; guessing is not.") from e
+        if raw.get("version") != LEGACY_VERSION:
+            raise StateError(
+                f"state file {legacy} is version {raw.get('version')}, and the only single "
+                f"file this invalidator can move to the new layout is version "
+                f"{LEGACY_VERSION}. Delete it to rebuild from scratch.")
+        artifacts = raw.get("artifacts") or {}
+        for rel, entry in artifacts.items():
+            self._write_record(rel, entry)
+        with self.iv.bookkeeping():
+            try:
+                legacy.rename(legacy.parent / (legacy.name + ".migrated"))
+            except Exception:
+                # Best effort. Leaving it behind is harmless — the directory now exists,
+                # so this never runs again — but a stale file beside a live one misleads.
+                pass
+        if artifacts:
+            print(f"  migrated {len(artifacts)} stamp(s) from {legacy.name} to {d.name}/")
+
     def record_of(self, rel: str) -> dict | None:
-        return self.load()["artifacts"].get(rel)
+        return self.records().get(rel)
 
     def reset(self) -> None:
         self._cache = None
@@ -270,7 +354,7 @@ class State:
                          str(self.iv.out_root): self.iv.out_root}.values():
                 on_disk |= {str(p)[len(str(root)) + 1:] for p in root.glob(pattern)}
         rx = path_pattern(template)
-        stamped = {rel for rel in self.load()["artifacts"] if rx.match(rel)}
+        stamped = {rel for rel in self.records() if rx.match(rel)}
         return sorted(on_disk | stamped)
 
     def collection_id(self, template: str, how: object = "data") -> str:
@@ -326,7 +410,6 @@ class State:
         meta = self.metadata_term(spec.policy, spec.code, spec.version)
         new_id = self.compute_id(value, meta, ids, spec.policy)
 
-        data = self.load()
         entry = {
             "id": new_id,
             "fp": value,
@@ -344,8 +427,8 @@ class State:
         }
         if parts is not None:
             entry["parts"] = parts
-        data["artifacts"][rel] = entry
-        self.save(data)
+        self._write_record(rel, entry)
+        self.records()[rel] = {"state_version": STATE_VERSION, "rel": rel, **entry}
         # A write is the one thing that can move a file's identity mid-process, so both
         # memos go. `updates` rewrites a path this run already fingerprinted, and a new
         # partition changes what its collection contains.
@@ -463,6 +546,46 @@ class State:
     def is_current(self, rel: str, code: str | None = None,
                    version: str | None = None, fingerprint: bool = True) -> bool:
         return self.why_stale(rel, code, version, fingerprint) is None
+
+
+# ── the record file ───────────────────────────────────────────────────────────
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def record_filename(rel: str) -> str:
+    """The file one artifact's stamp lives in.
+
+    The readable half is for whoever opens the directory; the digest is what makes it a
+    NAME rather than a guess — two rel paths that differ only in a character the sanitiser
+    folds (`raw/box/{season}.parquet` and `raw/box_{season}.parquet`) must not share a
+    file. The rel path is stored inside the record, so the filename is only an address.
+    """
+    safe = _UNSAFE.sub("_", rel).lstrip("._")[:96] or "artifact"
+    return f"{safe}-{hashlib.sha256(rel.encode()).hexdigest()[:12]}.json"
+
+
+def _read_record(p) -> dict:
+    try:
+        raw = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        raise StateError(
+            f"state record {p} is unreadable: {e}. Fix or delete it — deleting costs a "
+            f"rebuild of that one artifact, which is recoverable; guessing is not.") from e
+    if raw.get("state_version") != STATE_VERSION:
+        raise StateError(
+            f"state record {p} is version {raw.get('state_version')}, this invalidator writes "
+            f"{STATE_VERSION}. Delete the directory to rebuild from scratch.")
+    if not raw.get("rel"):
+        raise StateError(f"state record {p} does not say which artifact it is about.")
+    return raw
+
+
+def read_records(state_dir) -> dict[str, dict]:
+    """Every stamp in a state directory, by rel path. For tests and outside tools."""
+    d = Path(state_dir) if not hasattr(state_dir, "glob") else state_dir
+    return {} if not d.exists() else \
+        {r["rel"]: r for r in (_read_record(f) for f in sorted(d.glob("*.json")))}
 
 
 def _part_of(meta: str, key: str) -> str:

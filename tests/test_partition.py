@@ -162,9 +162,9 @@ def test_the_artifacts_own_id_still_works_downstream(parts):
     run(parts, "stages/totals.py")
     run(parts, "stages/summary.py")
 
-    import json
-    st = json.loads((parts / "data" / ".invalidator" / "state.json").read_text())
-    entry = st["artifacts"]["processed/team_totals.parquet"]
+    from invalidator.state import read_records
+    st = read_records(parts / "data" / ".invalidator" / "state")
+    entry = st["processed/team_totals.parquet"]
     assert set(entry["in"]) == {"raw/box/{season}.parquet", "raw/league_rates.parquet"}
 
     box("2026", extra=3).write_parquet(parts / "data" / "raw" / "box" / "2026.parquet")
@@ -390,11 +390,11 @@ def test_a_branch_this_partition_cannot_render_is_not_its_input(branched):
     out = run(branched, "stages/totals.py")
     assert "rebuild ( 2)" in out, out
 
-    import json
-    st = json.loads((branched / "data" / ".invalidator" / "state.json").read_text())
+    from invalidator.state import read_records
+    st = read_records(branched / "data" / ".invalidator" / "state")
     # FILLED where this cache knows the value, free where it does not: the dataset is
     # fixed, the season is the growing set.
-    assert set(st["artifacts"]["processed/panel/box.parquet"]["in"]) == {
+    assert set(st["processed/panel/box.parquet"]["in"]) == {
         "raw/box/box_{season}.parquet"}
 
 

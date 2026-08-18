@@ -15,6 +15,8 @@ import textwrap
 import polars as pl
 import pytest
 
+from invalidator.state import read_records
+
 VENV_PY = sys.executable
 
 PIPELINE = '''
@@ -98,8 +100,7 @@ def run_all(project, *args) -> str:
 
 
 def state(project) -> dict:
-    p = project / "data" / ".invalidator" / "state.json"
-    return json.loads(p.read_text())["artifacts"] if p.exists() else {}
+    return read_records(project / "data" / ".invalidator" / "state")
 
 
 def test_cold_build_then_a_no_op_run(pipeline):

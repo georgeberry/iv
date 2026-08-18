@@ -209,7 +209,7 @@ def export(out: Path = typer.Option(None, help="write here instead of stdout")) 
         typer.echo(body)
 
 
-# ── the state half: reads the state file ──────────────────────────────────────
+# ── the state half: reads the stamps ──────────────────────────────────────────
 
 @app.command()
 def status(
