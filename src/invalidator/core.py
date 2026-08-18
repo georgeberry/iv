@@ -241,6 +241,26 @@ class Invalidator:
                     part=part or {})
         return p
 
+    def frame(self, path: str, *, why: str,
+              optional: bool = False,
+              prior: bool = False,
+              fp: str | Callable = "data",
+              part: dict[str, str] | None = None,
+              **read_kwargs):
+        """`reads()`, and give me the frame. None if `optional` and it is not there.
+
+        Every read is otherwise spelled `pl.read_parquet(iv.reads(...))`, twice as wide
+        as the fact it states. This exists so the top of a stage reads as its I/O
+        contract — a list of what it takes and why — with the loading incidental.
+
+        `**read_kwargs` goes to the reader, so `columns=` still works.
+        """
+        p = self.reads(path, why=why, optional=optional, prior=prior, fp=fp, part=part)
+        if optional and not p.exists():
+            return None
+        from .fingerprint import read_frame
+        return read_frame(p, **read_kwargs)
+
     def collection(self, path: str, *, why: str, optional: bool = False,
                    fp: str | Callable = "rows",
                    part: dict[str, str] | None = None) -> list[Path]:

@@ -53,7 +53,12 @@ def _uri(path) -> str:
     return str(path)
 
 
-def _frame(path):
+def read_frame(path, **kw):
+    """Read a tabular file into polars, whatever its format. `iv.frame` is the caller."""
+    return _frame(path, **kw)
+
+
+def _frame(path, **kw):
     """Read a tabular file into polars, whatever its format."""
     try:
         import polars as pl
@@ -65,13 +70,13 @@ def _frame(path):
     src = _uri(path)
     suffix = Path(src).suffix.lower()
     if suffix == ".parquet":
-        return pl.read_parquet(src)
+        return pl.read_parquet(src, **kw)
     if suffix == ".csv":
-        return pl.read_csv(src)
+        return pl.read_csv(src, **kw)
     if suffix in (".ndjson", ".jsonl"):
-        return pl.read_ndjson(src)
+        return pl.read_ndjson(src, **kw)
     if suffix in (".arrow", ".ipc"):
-        return pl.read_ipc(src)
+        return pl.read_ipc(src, **kw)
     raise FingerprintError(
         f"fp='data' does not know how to read {path} — it is not one of {_TABULAR}. "
         f"Use fp='bytes' for a document, or pass fp=<callable>."

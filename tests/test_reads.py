@@ -43,3 +43,17 @@ def test_a_collection_with_no_free_field_is_an_error(project, iv):
     import pytest
     with pytest.raises(DeclError):
         iv.collection("raw/box/box_2024.parquet", why="one file, not a set")
+
+
+def test_frame_reads_and_declares_in_one_call(project, iv):
+    """The read and the declaration are one fact; spelling them separately makes the top
+    of a stage twice as wide as its I/O contract."""
+    import polars as pl
+    (project / "data" / "raw").mkdir(parents=True)
+    pl.DataFrame({"pts": [1, 2]}).write_parquet(project / "data" / "raw" / "box.parquet")
+
+    df = iv.frame("raw/box.parquet", why="the raw feed")
+    assert df.height == 2
+    assert "raw/box.parquet" in iv._reads
+
+    assert iv.frame("raw/nope.parquet", why="absent", optional=True) is None
