@@ -488,3 +488,16 @@ def test_a_computed_why_is_an_error_not_a_silent_skip(project, iv):
     from invalidator import static
     with pytest.raises(DeclError, match="not a string literal"):
         static.scan(iv)
+
+
+def test_every_declaring_method_is_known_to_the_scan(iv):
+    """A method that declares at RUNTIME but is missing from `METHODS` is invisible to
+    the scan, and the artifact silently loses the input — the runtime record still looks
+    right, which is what makes it hard to spot. `iv.frame` shipped that way for an hour."""
+    from invalidator import static
+
+    declaring = {"reads", "frame", "collection", "writes", "updates", "external",
+                 "step", "for_each", "partitions"}
+    assert declaring <= set(static.METHODS), declaring - set(static.METHODS)
+    for name in declaring:
+        assert callable(getattr(iv, name)), name

@@ -43,6 +43,7 @@ from .paths import fields as _template_fields
 # unproduced.
 METHODS: dict[str, tuple[str, object, str]] = {
     "reads": ("read", 0, "path"),
+    "frame": ("read", 0, "path"),
     "collection": ("collection", 0, "path"),
     "writes": ("write", 0, "path"),
     "updates": ("update", 0, "path"),
