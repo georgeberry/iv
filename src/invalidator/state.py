@@ -384,6 +384,12 @@ class State:
         found = self.instances_of(template)
         if not found:
             out = ABSENT
+        elif how == "present":
+            # Coverage, not content. A fetch-once archive answers "is it COMPLETE?", and
+            # the member list already answers that — so the whole collection costs one
+            # listing rather than 4,470 footer reads over a bucket, which is the size of
+            # the archive that forced this.
+            out = "coll:" + hashlib.sha256("|".join(found).encode()).hexdigest()[:_fp.DIGEST_LEN]
         else:
             # Concurrently: a collection is one-file-per-partition by construction, so
             # folding its members serially is the loop this whole module exists to kill.
