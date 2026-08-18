@@ -386,7 +386,7 @@ class State:
         #
         # So staleness is decided by the ids of the inputs the last build ACTUALLY read.
         # A declared-vs-recorded gap is real and worth knowing about, but it is a
-        # reporting matter: `invalidator drift` says so against a trace, where the answer
+        # reporting matter: `iv drift` says so against a trace, where the answer
         # is measured rather than inferred.
         #
         # The cost is that ADDING a read does not by itself invalidate. That is what

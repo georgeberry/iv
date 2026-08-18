@@ -16,7 +16,9 @@ viz = ["networkx>=3.0", "matplotlib>=3.8"]
 dev = ["polars>=1.0", "typer>=0.12", "networkx>=3.0", "matplotlib>=3.8", "pytest>=8.0"]
 
 [project.scripts]
-invalidator = "invalidator.cli:app"
+# `iv` is the command. It matches what the instance is conventionally called in code,
+# and it is what you actually type twenty times an hour.
+iv = "invalidator.cli:app"
 
 [build-system]
 requires = ["hatchling"]

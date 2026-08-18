@@ -1,9 +1,9 @@
 """The DAG, read out of the source without running anything.
 
 `iv.reads(...)` and `iv.writes(...)` are ordinary calls, so the graph is already in the
-code — this reads it back out with `ast`, which means `invalidator graph` and
-`invalidator check` work on a fresh checkout with no data and nothing ever run. The trace
-(`invalidator drift`) is the cross-check, not the source.
+code — this reads it back out with `ast`, which means `iv graph` and
+`iv check` work on a fresh checkout with no data and nothing ever run. The trace
+(`iv drift`) is the cross-check, not the source.
 
 THE RULE THAT MAKES THIS POSSIBLE, and it is enforced here rather than asked for politely:
 **the path and `why=` must be literals.** A computed path cannot be read statically, which
@@ -93,7 +93,7 @@ class Stage:
     are the reads inside it PLUS the reads inside any same-file function it calls,
     transitively. That is still purely static, and it is what a reader would assume.
 
-    A read in a function from ANOTHER module is still invisible; `invalidator drift`
+    A read in a function from ANOTHER module is still invisible; `iv drift`
     against a real trace is what catches those.
     """
     node: str
@@ -177,7 +177,7 @@ def _sites(call: ast.Call, kind: str, at: tuple, rel_file: str,
     if not why:
         raise DeclError(
             f"{where}: why= is required and must be a string literal saying what "
-            f"{paths[0]!r} is for. It is what `invalidator stage` and `invalidator graph` "
+            f"{paths[0]!r} is for. It is what `iv stage` and `iv graph` "
             f"print; there is nowhere else for it to live.")
 
     if kind == "external":
@@ -195,7 +195,7 @@ def _sites(call: ast.Call, kind: str, at: tuple, rel_file: str,
         raise DeclError(
             f"{where}: version= must be a string literal naming one of the "
             f"Invalidator's versions, e.g. version=\"model\". Passing the value itself "
-            f"would be a name this scan cannot resolve, and then `invalidator status` "
+            f"would be a name this scan cannot resolve, and then `iv status` "
             f"could never see a bump that a run would see.")
 
     for p in paths:
@@ -241,7 +241,7 @@ def function_digest(node: ast.AST) -> str:
     """A hash of what a function DOES, insensitive to how it is spelled.
 
     MUST match `invalidator.core.source_digest`, which computes the same thing from a live
-    function object — the decorator and `invalidator status` have to agree or one of them
+    function object — the decorator and `iv status` have to agree or one of them
     is lying. `ast.unparse` normalises whitespace, comments and formatting away, and the
     decorators are stripped, so reformatting or editing a `why=` does not invalidate data
     while a real change to the logic does.
@@ -296,7 +296,7 @@ class _Visitor(ast.NodeVisitor):
         # read set on entry, so at runtime a step's inputs are exactly the reads inside
         # it — and the scan has to say the same thing or `why_stale` reports an input the
         # record has never seen. Reads in a separately-defined helper are NOT attributed;
-        # `invalidator drift` is what catches those.
+        # `iv drift` is what catches those.
         # Every function is an owner, not just a step one: a helper's reads have to be
         # attributed to the helper so a step that calls it can pick them up.
         outer, self._owner = self._owner, node.name
@@ -514,7 +514,7 @@ def inputs_for_artifact(iv, rel: str) -> dict[str, object] | None:
     nothing to compare against.
 
     None when the answer would be a guess — no producer, or several, which is a condition
-    `invalidator check` reports rather than one this should silently resolve. A template
+    `iv check` reports rather than one this should silently resolve. A template
     input keeps its `{placeholder}`, since the concrete partitions are runtime.
     """
     hit = _write_site(iv, rel)

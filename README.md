@@ -48,7 +48,7 @@ $ python stages/daily_revenue.py
 **The decorator is the output. The `iv.reads(...)` calls in the body are the inputs.**
 Nothing else to declare.
 
-From those same call sites you also get **the DAG** (`invalidator graph`, `check`, `stage`)
+From those same call sites you also get **the DAG** (`iv graph`, `check`, `stage`)
 — read straight out of your source, so it works on a fresh checkout with no data and
 nothing ever run — and **documentation that cannot drift**, because `why=` is a required
 argument and there is nowhere else for it to live.
@@ -79,8 +79,8 @@ input's id is a dict lookup in the state file; only roots are fingerprinted — 
 them is the *only* I/O a check ever does, which is why it is optional:
 
 ```
-invalidator status                 # roots taken on trust — code, versions, derived inputs
-invalidator status --fingerprint   # read the raw feeds too, as a live run does
+iv status                 # roots taken on trust — code, versions, derived inputs
+iv status --fingerprint   # read the raw feeds too, as a live run does
 ```
 
 A live run always fingerprints; there is no point guessing when you are about to do the
@@ -148,7 +148,7 @@ static scan. Treating the scan as authoritative produces a permanent rebuild on 
 codebase — it cannot follow every call, so a run records an input the scan missed, the
 comparison fires, the rebuild records it again, and nothing settles. The cost is that
 *adding* a read does not by itself invalidate; `data_version`, `version=` or `code=True`
-is how you get that, and `invalidator drift` reports the gap against a real trace where it
+is how you get that, and `iv drift` reports the gap against a real trace where it
 is measured rather than inferred.
 
 ## Options
@@ -209,7 +209,7 @@ data, so any blind spot becomes an artifact that rebuilds forever with correct o
 no error.
 
 So: the AST says what is declared; the filesystem and the state file say what moved. Only
-**roots** are ever fingerprinted. `invalidator check` and `invalidator drift` report the
+**roots** are ever fingerprinted. `iv check` and `iv drift` report the
 gaps, which is the useful thing to do with an approximation.
 
 ## For each season, do X
@@ -249,19 +249,19 @@ term backward-looking. Test it: build incrementally and from scratch, and compar
 ## Commands
 
 ```
-invalidator graph  [--focus X] [--artifacts] [--full]   # run order down, deps as lanes
-invalidator stage  <name>                               # one stage's I/O, both ends, the whys
-invalidator check                                       # every structural check; exit 1 on error
-invalidator drift  [--trace T]                          # what the code says vs what a run did
-invalidator status                                      # current / stale, with reasons
-invalidator why    <artifact>                           # the id, its components, what moved
-invalidator plan                                        # what would rebuild, and what might
-invalidator export [--out m.json]                       # {nodes, parent_map} — dbt's shape
-invalidator viz    [--out dag.png]                      # [viz] extra
+iv graph  [--focus X] [--artifacts] [--full]   # run order down, deps as lanes
+iv stage  <name>                               # one stage's I/O, both ends, the whys
+iv check                                       # every structural check; exit 1 on error
+iv drift  [--trace T]                          # what the code says vs what a run did
+iv status                                      # current / stale, with reasons
+iv why    <artifact>                           # the id, its components, what moved
+iv plan                                        # what would rebuild, and what might
+iv export [--out m.json]                       # {nodes, parent_map} — dbt's shape
+iv viz    [--out dag.png]                      # [viz] extra
 ```
 
 ```
-$ invalidator graph
+$ iv graph
 ╮  ○ fetch
 ╰╮ ● totals
 ╮╰ ● ratings
@@ -281,7 +281,7 @@ its id that can move, so guarding its stage means it runs once and never again.
 
 ```
 INVALIDATOR_TRACE=.invalidator/trace.ndjson ./refresh.sh
-invalidator drift
+iv drift
 ```
 
 `recorded − declared` is an **error** (the process really did open that file);

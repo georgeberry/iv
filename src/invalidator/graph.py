@@ -2,7 +2,7 @@
 
 Nodes are of two kinds and both matter. A STAGE is a file. An ARTIFACT is a path. An edge
 runs producer -> artifact -> consumer, so the artifact is on the edge rather than hidden
-inside it, and `invalidator graph --artifacts` can name it.
+inside it, and `iv graph --artifacts` can name it.
 
 The checks are the point. Each one is a mistake that is invisible while you are making it
 and expensive once made:

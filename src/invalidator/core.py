@@ -100,7 +100,7 @@ class Invalidator:
         # site so the static scan can read it; the value lives here, next to data_version,
         # where a project already keeps such things. Without this indirection
         # `version=MODEL_VERSION` would be a name the scanner cannot resolve, and
-        # `invalidator status` could never see a bump that a run would see.
+        # `iv status` could never see a bump that a run would see.
         self.versions = dict(versions or {})
         self.source_dirs = tuple(source_dirs)
         self.stages = tuple(stages) if stages is not None else None
@@ -350,8 +350,20 @@ class Invalidator:
         self._write_guard_on = True
         iv = self
 
-        def wrap(name):
-            orig = getattr(_P, name)
+        owners = [_P]
+        try:
+            # The one that matters in practice. A pipeline on a bucket hands out
+            # CloudPaths, not pathlib.Paths — guarding only the latter guards nothing
+            # where the damage would actually be done.
+            from cloudpathlib import CloudPath
+            owners.append(CloudPath)
+        except ImportError:
+            pass
+
+        def wrap(owner, name):
+            orig = getattr(owner, name, None)
+            if orig is None:
+                return
 
             def patched(self, *a, **kw):
                 if str(self) in iv._read_paths:
@@ -363,10 +375,11 @@ class Invalidator:
                 return orig(self, *a, **kw)
 
             patched.__name__ = name
-            setattr(_P, name, patched)
+            setattr(owner, name, patched)
 
-        for n in ("write_text", "write_bytes"):
-            wrap(n)
+        for owner in owners:
+            for n in ("write_text", "write_bytes", "open"):
+                wrap(owner, n)
 
     def stamp_content(self, path, frame) -> None:
         """Fingerprint from a frame already in memory instead of re-reading the file.
@@ -507,7 +520,7 @@ class Invalidator:
     def declared_version(self, rel: str) -> str | None:
         """The extra version its write site names NOW, resolved through `versions`.
 
-        From the static scan, so the decorator and `invalidator status` compute it the
+        From the static scan, so the decorator and `iv status` compute it the
         same way. Read it out of the record instead and a bumped model version could never
         be seen, which is the whole point of the option.
         """
@@ -523,7 +536,7 @@ class Invalidator:
     def code_hash(self, rel: str) -> str | None:
         """The CURRENT source hash of the `step(code=True)` function that writes `rel`.
 
-        From the static scan, so the decorator and `invalidator status` compute it the
+        From the static scan, so the decorator and `iv status` compute it the
         same way and cannot disagree. None when this artifact does not track its code, or
         when the scan cannot answer.
         """
@@ -607,7 +620,7 @@ class Invalidator:
             Invalidator(..., stages=["stages/fetch.py", "stages/build.py"])
             Invalidator(..., order_from="refresh.sh")     # scanned from the script
 
-        Without either, `invalidator check` still finds a cycle, but it cannot find a
+        Without either, `iv check` still finds a cycle, but it cannot find a
         stage that runs BEFORE its producer — there is nothing to compare the graph
         against, so it says so rather than passing quietly.
         """
@@ -661,7 +674,7 @@ def _check_why(why: object, path: str) -> str:
     if not isinstance(why, str) or not why.strip():
         raise DeclError(
             f"{path!r}: why= is required and must be a non-empty string saying what this "
-            f"artifact is for. It is what `invalidator stage` prints; there is nowhere "
+            f"artifact is for. It is what `iv stage` prints; there is nowhere "
             f"else for it to live.")
     return why
 

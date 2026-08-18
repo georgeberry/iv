@@ -24,8 +24,8 @@ fingerprint. Rewrite it with identical rows and nothing downstream stirs; add a 
 the whole chain moves. `data_version` sits in every id, so bumping it rebuilds the world —
 which is the one thing no fingerprint of the inputs can see.
 
-Everything else falls out of the same call sites: the DAG (`invalidator graph`), the
-structural checks (`invalidator check`), and documentation that cannot drift, because
+Everything else falls out of the same call sites: the DAG (`iv graph`), the
+structural checks (`iv check`), and documentation that cannot drift, because
 `why=` is a required argument and there is nowhere else for it to live.
 
 invalidator observes; it does not run anything. Keep your bash, your Makefile, your

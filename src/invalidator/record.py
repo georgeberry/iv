@@ -5,7 +5,7 @@ The static scan says what the code declares. This says what it did. Off unless t
 cost is one attribute check per call.
 
     INVALIDATOR_TRACE=.invalidator/trace.ndjson ./refresh.sh
-    invalidator drift
+    iv drift
 
 Two things about the file are load-bearing:
 
