@@ -160,3 +160,24 @@ def test_the_cheap_status_still_sees_a_version_bump(pipeline):
     r = cli(pipeline, "status")
     assert r.returncode == 1
     assert "data_version bumped" in r.stdout
+
+
+def test_drift_refuses_a_trace_it_cannot_believe(pipeline):
+    """A trace that outlives the code reports reads from stages that no longer exist —
+    every line fiction, and confidently so. wvorp ran a whole refresh against a trace
+    two days old because the pipeline exported one variable and `iv` read another."""
+    import json, time
+
+    t = pipeline / "old.ndjson"
+    t.write_text(json.dumps({
+        "v": 2, "kind": "io", "node": "stages/build_stats.py", "op": "read",
+        "rel": "raw/box.parquet", "t": time.time() - 3 * 24 * 3600}) + "\n")
+    r = cli(pipeline, "drift", "--trace", str(t))
+    assert r.returncode == 1
+    assert "not this run" in (r.stdout + r.stderr)
+
+    empty = pipeline / "empty.ndjson"
+    empty.write_text("")
+    r = cli(pipeline, "drift", "--trace", str(empty))
+    assert r.returncode == 1
+    assert "is empty" in (r.stdout + r.stderr)

@@ -62,6 +62,14 @@ def emit(iv, kind: str, **fields) -> None:
     }) + "\n")
 
 
+def age_of(events: list[dict]) -> float | None:
+    """Seconds since the NEWEST event, or None if the trace is empty or unstamped."""
+    import time
+
+    stamps = [e["t"] for e in events if isinstance(e.get("t"), (int, float))]
+    return time.time() - max(stamps) if stamps else None
+
+
 def load(path: Path) -> list[dict]:
     """Every event in a trace, dropping any written by an older recorder."""
     if not path.exists():

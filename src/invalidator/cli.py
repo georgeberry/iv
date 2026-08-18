@@ -192,6 +192,12 @@ def check(
     raise typer.Exit(1 if errors else 0)
 
 
+# A trace older than this is refused rather than believed. Generous, because a long
+# pipeline legitimately takes hours; the failure it guards against is a trace from DAYS
+# ago describing code that has since been deleted.
+_STALE_TRACE_S = 12 * 3600
+
+
 @app.command()
 def drift(
     trace: Path = typer.Option(None, help="the recorded run; defaults to the configured one"),
@@ -208,7 +214,20 @@ def drift(
             _die(DagioError(
                 "no trace. Construct your Invalidator with trace=..., set "
                 "$INVALIDATOR_TRACE, or pass --trace."))
-        errors, warns = _graph.drift(g, _rec.load(path))
+        events = _rec.load(path)
+        if not events:
+            _die(DagioError(
+                f"{path} is empty — nothing recorded this run, so there is nothing to "
+                f"compare. The usual cause is the pipeline exporting a different "
+                f"variable from the one `iv` reads ($INVALIDATOR_TRACE)."))
+        age = _rec.age_of(events)
+        if age is not None and age > _STALE_TRACE_S:
+            _die(DagioError(
+                f"{path} was last written {age / 3600:.1f}h ago, which is almost "
+                f"certainly not this run. A trace that outlives the code reports reads "
+                f"from stages that no longer exist — every line would be fiction, and "
+                f"confidently so. Re-run the pipeline, or pass a fresher --trace."))
+        errors, warns = _graph.drift(g, events)
     except DagioError as e:
         _die(e)
     for w in warns:
