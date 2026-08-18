@@ -488,6 +488,17 @@ def matches(template: str, rel: str) -> bool:
     return template == rel or bool(path_pattern(template).match(rel))
 
 
+def writers_of(iv, rel: str) -> set[str]:
+    """Every stage that DECLARES a write to `rel`.
+
+    More than one is a chain, not a conflict: an artifact several stages build in
+    sequence is a normal shape, and the set is what tells a stamp whose contributions
+    still belong in the record.
+    """
+    return {st.node for st in scan(iv).values() for site in st.outputs()
+            if matches(site.path, rel)}
+
+
 def _write_site(iv, rel: str) -> tuple[Stage, Site] | None:
     """The one stage and the one write site that produce `rel`.
 

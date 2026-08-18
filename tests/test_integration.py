@@ -302,11 +302,11 @@ CHAIN_TAIL = '''
 '''
 
 
-def test_a_chain_carries_its_head_into_the_tails_id(project):
-    """Two stages write one artifact. Without folding the previous writer's id in, the
-    surviving stamp records only the TAIL's reads, and nothing says the head built the
-    table underneath — which is how an artifact gets rebuilt from different data and
-    still looks identical downstream."""
+def test_a_chain_keeps_every_writers_contribution(project):
+    """Two stages write one artifact. A stamp CONTRIBUTES rather than replaces, so the
+    head's reads stay in the record after the tail has rewritten the file. Replacing
+    them is how an artifact gets rebuilt from different data and still looks identical
+    downstream."""
     import json
     from conftest import write_stage
     from tests.test_partition import run
@@ -323,7 +323,10 @@ def test_a_chain_carries_its_head_into_the_tails_id(project):
     run(project, "stages/head.py")
     run(project, "stages/tail.py")
     rec = json.loads(next((project / "data" / ".invalidator" / "state").glob("*.json")).read_text())
-    assert "~before:processed/table.parquet" in rec["in"], rec["in"]
+    assert set(rec["contrib"]) == {"stages/head.py", "stages/tail.py"}, rec["contrib"]
+    # The head's read survives the tail's stamp — the whole point.
+    assert "raw/seed.parquet" in rec["in"], rec["in"]
+    assert rec["by"] == "stages/tail.py"
 
     # The head's input moves. The head rebuilds, and the tail must see that.
     pl.DataFrame({"x": [2]}).write_parquet(project / "data" / "raw" / "seed.parquet")
@@ -333,10 +336,9 @@ def test_a_chain_carries_its_head_into_the_tails_id(project):
 
 
 def test_repeated_self_updates_converge(project):
-    """A stage rewriting its OWN last output must not fold the id it wrote, or it keys on
-    itself and produces a new id every run — the artifact is never current and everything
-    below it rebuilds forever. The first patch after another stage's write is a genuine
-    chain link and does fold; from then on it is stable."""
+    """A stage rewriting its own output contributes the same reads every time, so the id
+    settles. Anything that keyed on the id it wrote last time would mint a new one every
+    run and nothing below it would ever be current."""
     import json
     from conftest import write_stage
     from tests.test_partition import run
@@ -361,8 +363,43 @@ def test_repeated_self_updates_converge(project):
         return json.loads(
             next((project / "data" / ".invalidator" / "state").glob("*.json")).read_text())["id"]
 
-    run(project, "stages/patch.py")      # the chain link: folds the head's id
     run(project, "stages/patch.py")
-    second = _id()
+    first = _id()
     run(project, "stages/patch.py")
-    assert _id() == second, "a no-op self-update moved the artifact's id"
+    assert _id() == first, "a no-op self-update moved the artifact's id"
+
+
+def test_dropping_a_link_drops_its_contribution(project):
+    """A writer removed from the pipeline must not leave its reads frozen in the record,
+    or the artifact keeps a dependency on data nothing reads any more."""
+    import json
+    from conftest import write_stage
+    from tests.test_partition import run
+
+    (project / "pipeline.py").write_text(
+        'from invalidator import Invalidator\n'
+        'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
+    write_stage(project, "stages/head.py", CHAIN_HEAD)
+    write_stage(project, "stages/tail.py", CHAIN_TAIL)
+    (project / "data" / "raw").mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "seed.parquet")
+    run(project, "stages/head.py")
+    run(project, "stages/tail.py")
+
+    # The head stops writing this artifact at all.
+    write_stage(project, "stages/head.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        @iv.step("processed/other.parquet", why="something else")
+        def build(out):
+            pl.read_parquet(iv.reads("raw/seed.parquet", why="the seed")).write_parquet(out)
+
+        build()
+    ''')
+    run(project, "stages/tail.py")
+    rec = json.loads(
+        next(p for p in (project / "data" / ".invalidator" / "state").glob("*.json")
+             if json.loads(p.read_text())["rel"] == "processed/table.parquet").read_text())
+    assert set(rec["contrib"]) == {"stages/tail.py"}, rec["contrib"]
+    assert "raw/seed.parquet" not in rec["in"], rec["in"]

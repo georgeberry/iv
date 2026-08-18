@@ -71,9 +71,6 @@ LEGACY_VERSION = 2                   # the single `state.json`, migrated on firs
 # with it — which is why they live at the write site rather than in a list somewhere.
 POLICIES = ("tracked", "manual", "settled", "exempt", "clock")
 
-# An input key naming an artifact as the PREVIOUS writer in a chain left it.
-BEFORE = "~before:"
-
 
 @dataclass(frozen=True)
 class Spec:
@@ -273,11 +270,6 @@ class State:
         where the recursion bottoms out, and the absence of a record is exactly how a root
         is recognised — nothing declares it.
         """
-        # `~before:` names the file as the PREVIOUS link in a chain left it. It resolves
-        # to the same record, and that is the point: when link two asks whether it is
-        # current, link one has already run this refresh, so the record holds link one's
-        # id — exactly what link two recorded last time if nothing moved.
-        rel = rel[len(BEFORE):] if rel.startswith(BEFORE) else rel
         entry = self.record_of(rel)
         if entry is not None:
             return entry["id"]
@@ -401,6 +393,22 @@ class State:
 
     # ── stamping ──────────────────────────────────────────────────────────────
 
+    def _live_contributions(self, rel: str) -> dict[str, dict]:
+        """What OTHER writers have put into `rel`, minus any that no longer write it."""
+        entry = self.record_of(rel) or {}
+        contrib = entry.get("contrib")
+        if contrib is None:
+            # A record written before contributions were split. Its whole input map is
+            # its writer's share, which is exactly right for the single-writer case that
+            # every such record is.
+            got = entry.get("in")
+            contrib = {entry.get("by", "?"): got} if got else {}
+        from . import static as _static
+        writers = _static.writers_of(self.iv, rel)
+        if not writers:
+            return dict(contrib)                    # the scan cannot see it; keep all
+        return {w: c for w, c in contrib.items() if w in writers}
+
     def stamp(self, rel: str, *, spec: Spec, inputs: dict[str, object], by: str,
               fp_value: str | None = None, parts: dict[str, str] | None = None) -> str:
         """Fingerprint the artifact, fold everything into one id, write the record.
@@ -411,6 +419,19 @@ class State:
         `inputs` maps each input's rel path to the strategy to use IF it is a root. Both
         the ids and the strategies are stored: the ids are what the next check compares
         against, the strategies are what lets it recompute a root's id at all.
+
+        SEVERAL STAGES CAN WRITE ONE ARTIFACT, and then a stamp CONTRIBUTES rather than
+        replaces. wvorp's `college_features.parquet` is built by one stage and then
+        rewritten by two more, each folding its own block in; the last of those is not
+        the only thing that made the file, and a record holding only its reads says the
+        college feed had nothing to do with the table. So contributions are kept per
+        writer and the identity is the fold of all of them — which is just the honest
+        reading of "an artifact's inputs are what went into it".
+
+        A writer that no longer declares this artifact is dropped, so deleting a link
+        from a chain removes its contribution rather than freezing it in. Nothing is
+        dropped when the scan cannot see the artifact at all, because then absence is
+        not evidence.
         """
         p = self.iv.resolve_out(rel)
         with self.iv.bookkeeping():
@@ -420,7 +441,10 @@ class State:
                     f"a stamp means one thing only: THIS code produced THIS file.")
             value = fp_value if fp_value is not None else _fp.compute(p, spec.fp)
 
-        ids = self.input_ids(inputs)
+        mine = {k: {"id": v, "fp": inputs[k] if isinstance(inputs[k], str) else "<callable>"}
+                for k, v in self.input_ids(inputs).items()}
+        contrib = {**self._live_contributions(rel), by: mine}
+        ids = {k: v["id"] for c in contrib.values() for k, v in c.items()}
         meta = self.metadata_term(spec.policy, spec.code, spec.version)
         new_id = self.compute_id(value, meta, ids, spec.policy)
 
@@ -433,9 +457,11 @@ class State:
             "version": spec.version,
             "terminal": spec.terminal,
             "why": spec.why,
-            "in": {k: {"id": ids[k],
-                       "fp": inputs[k] if isinstance(inputs[k], str) else "<callable>"}
-                   for k in sorted(ids)},
+            # `in` is the union, flattened, and it is what the staleness check walks.
+            # `contrib` is the same thing split by writer, which is what lets the next
+            # stamp replace one stage's share without touching another's.
+            "in": {k: v for c in contrib.values() for k, v in sorted(c.items())},
+            "contrib": {w: dict(sorted(c.items())) for w, c in sorted(contrib.items())},
             "by": by,
             "at": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
         }
