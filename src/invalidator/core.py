@@ -352,13 +352,27 @@ class Invalidator:
         conflict, and the temptation is to allowlist the subtlest stages out of the
         validator, which defeats it. An update is excluded from its own input set: an
         artifact cannot be its own dependency.
+
+        With ONE exception, and it is what makes a CHAIN work. When the last stamp was
+        made by a DIFFERENT stage, this update is the next link in a chain — the file it
+        is rewriting is another stage's output, which really is an input to what comes
+        out. Folding that prior id in is the only way the head of the chain reaches the
+        end of it: without it, `college_features.parquet` ends up stamped with only the
+        international fold's reads, and nothing records that the college feed built the
+        table underneath.
+
+        Same stage, same file, no fold. A patcher re-running over its own output would
+        otherwise key on the id it wrote last time and produce a new one every run, so
+        the artifact would never be current and everything below it would rebuild
+        forever.
         """
         _check_why(why, path)
         rel = _paths.render(path, part)
         p = self.resolve_out(rel)
         p.parent.mkdir(parents=True, exist_ok=True)
+        chained = (self.state.record_of(rel) or {}).get("by") not in (None, self.node())
         self.record("io", op="read", rel=rel, why=why, optional=True, prior=False,
-                    part=part or {}, update=True)
+                    part=part or {}, update=True, chained=chained)
 
         yield p
 
@@ -366,6 +380,8 @@ class Invalidator:
         spec = Spec(why=why, fp=fp, policy=policy, terminal=terminal, code=code,
                     version=self.version_value(version))
         inputs = {k: v for k, v in self._reads.items() if k != rel}
+        if chained:
+            inputs[f"~before:{rel}"] = fp
         new_id = self.state.stamp(rel, spec=spec, inputs=inputs, by=self.node(),
                                   fp_value=self._pending_fp.pop(rel, None))
         self.record("io", op="write", rel=rel, why=why, terminal=terminal,

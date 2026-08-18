@@ -276,3 +276,93 @@ def test_a_read_the_scan_cannot_see_does_not_loop(pipeline):
     # ...and the input the scan never saw still invalidates, because the RUN recorded it.
     pl.DataFrame({"x": [2]}).write_parquet(pipeline / "data" / "raw" / "extra.parquet")
     assert "input moved: raw/extra.parquet" in run(pipeline, "stages/build_stats.py")
+
+
+# ── chains ────────────────────────────────────────────────────────────────────
+
+CHAIN_HEAD = '''
+    import polars as pl
+    from pipeline import iv
+
+    @iv.step("processed/table.parquet", why="the table")
+    def build(out):
+        src = pl.read_parquet(iv.reads("raw/seed.parquet", why="the seed"))
+        src.with_columns(pl.lit("head").alias("by")).write_parquet(out)
+
+    build()
+'''
+
+CHAIN_TAIL = '''
+    import polars as pl
+    from pipeline import iv
+
+    with iv.updates("processed/table.parquet", why="the table") as p:
+        df = pl.read_parquet(p)
+    df.with_columns(pl.lit("tail").alias("by")).write_parquet(p)
+'''
+
+
+def test_a_chain_carries_its_head_into_the_tails_id(project):
+    """Two stages write one artifact. Without folding the previous writer's id in, the
+    surviving stamp records only the TAIL's reads, and nothing says the head built the
+    table underneath — which is how an artifact gets rebuilt from different data and
+    still looks identical downstream."""
+    import json
+    from conftest import write_stage
+    from tests.test_partition import run
+
+    (project / "pipeline.py").write_text(
+        'from invalidator import Invalidator\n'
+        'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"],\n'
+        '                 stages=["stages/head.py", "stages/tail.py"])\n')
+    write_stage(project, "stages/head.py", CHAIN_HEAD)
+    write_stage(project, "stages/tail.py", CHAIN_TAIL)
+    (project / "data" / "raw").mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "seed.parquet")
+
+    run(project, "stages/head.py")
+    run(project, "stages/tail.py")
+    rec = json.loads(next((project / "data" / ".invalidator" / "state").glob("*.json")).read_text())
+    assert "~before:processed/table.parquet" in rec["in"], rec["in"]
+
+    # The head's input moves. The head rebuilds, and the tail must see that.
+    pl.DataFrame({"x": [2]}).write_parquet(project / "data" / "raw" / "seed.parquet")
+    out = run(project, "stages/head.py")
+    assert "is current" not in out, out
+    assert "is current" not in run(project, "stages/tail.py", check=False)
+
+
+def test_repeated_self_updates_converge(project):
+    """A stage rewriting its OWN last output must not fold the id it wrote, or it keys on
+    itself and produces a new id every run — the artifact is never current and everything
+    below it rebuilds forever. The first patch after another stage's write is a genuine
+    chain link and does fold; from then on it is stable."""
+    import json
+    from conftest import write_stage
+    from tests.test_partition import run
+
+    (project / "pipeline.py").write_text(
+        'from invalidator import Invalidator\n'
+        'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
+    write_stage(project, "stages/head.py", CHAIN_HEAD)
+    (project / "data" / "raw").mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "seed.parquet")
+    run(project, "stages/head.py")
+
+    write_stage(project, "stages/patch.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        with iv.updates("processed/table.parquet", why="the table") as p:
+            df = pl.read_parquet(p)
+        df.write_parquet(p)
+    ''')
+    def _id():
+        return json.loads(
+            next((project / "data" / ".invalidator" / "state").glob("*.json")).read_text())["id"]
+
+    run(project, "stages/patch.py")      # the chain link: folds the head's id
+    run(project, "stages/patch.py")
+    second = _id()
+    run(project, "stages/patch.py")
+    assert _id() == second, "a no-op self-update moved the artifact's id"

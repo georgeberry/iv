@@ -71,6 +71,9 @@ LEGACY_VERSION = 2                   # the single `state.json`, migrated on firs
 # with it — which is why they live at the write site rather than in a list somewhere.
 POLICIES = ("tracked", "manual", "settled", "exempt", "clock")
 
+# An input key naming an artifact as the PREVIOUS writer in a chain left it.
+BEFORE = "~before:"
+
 
 @dataclass(frozen=True)
 class Spec:
@@ -270,6 +273,11 @@ class State:
         where the recursion bottoms out, and the absence of a record is exactly how a root
         is recognised — nothing declares it.
         """
+        # `~before:` names the file as the PREVIOUS link in a chain left it. It resolves
+        # to the same record, and that is the point: when link two asks whether it is
+        # current, link one has already run this refresh, so the record holds link one's
+        # id — exactly what link two recorded last time if nothing moved.
+        rel = rel[len(BEFORE):] if rel.startswith(BEFORE) else rel
         entry = self.record_of(rel)
         if entry is not None:
             return entry["id"]
