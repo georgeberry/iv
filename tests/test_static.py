@@ -6,6 +6,7 @@ import pytest
 from conftest import write_stage
 from invalidator import Invalidator
 from invalidator import graph as G
+from invalidator import static
 from invalidator.errors import DeclError
 
 GOOD = {
@@ -625,3 +626,74 @@ def test_an_import_of_a_retired_module_is_caught(project, iv):
 
     bad = static.missing_imports(iv)
     assert any("stages.gone" in b for b in bad), bad
+
+
+# ── the reach walk, and what used to break it ─────────────────────────────────
+
+def test_a_module_level_alias_is_a_call_edge(iv, project):
+    """`load_schedule = _load_forecast_schedule` binds a function to a second name.
+
+    The call site then says `load_schedule(...)`, which is neither defined in the file
+    nor imported, so a walk that follows only calls and imports stops dead and every
+    declaration the aliased function makes is attributed to nobody. In wvorp that lost
+    `raw/crosswalk/teams.parquet` from `predict_games`, and the runtime trace reported
+    it as an undeclared read — the symptom three steps from the cause.
+    """
+    write_stage(project, "stages/lib.py", '''
+        from mypipe import iv
+
+        def real_loader():
+            return iv.reads("raw/sched.parquet", why="the schedule")
+    ''')
+    write_stage(project, "stages/stage.py", '''
+        from mypipe import iv
+        from stages.lib import real_loader
+
+        loader = real_loader          # the alias
+
+        @iv.step("out.parquet", why="the output")
+        def build(out):
+            loader()
+    ''')
+    reach = static.entry_reach(iv, "stages/stage.py")
+    assert ("stages/lib.py", "real_loader") in reach
+    assert "raw/sched.parquet" in {s.path for s in static.sites_of_entry(iv, "stages/stage.py")}
+
+
+def test_arms_of_one_if_are_alternatives(iv, project):
+    """Two branches of one `if` are a choice, not a set — no run takes both.
+
+    `data.load` reads a flat panel on the parent league and a nested one on a sub-league.
+    Reporting the untaken arm as "declared but not seen" fires on every run of every
+    stage that reads a panel, and a warning that never changes is not information.
+    """
+    write_stage(project, "stages/stage.py", '''
+        from mypipe import iv
+
+        def load(sub):
+            if sub:
+                p = iv.reads("raw/{league}/p.parquet", why="a sub-league panel",
+                             part={"league": sub})
+            else:
+                p = iv.reads("raw/p.parquet", why="the parent panel")
+            return p
+    ''')
+    sites = static.scan(iv)["stages/stage.py"].inputs()
+    groups = {s.branch for s in sites}
+    assert len(sites) == 2
+    assert len(groups) == 1 and "" not in groups, "both arms share one branch group"
+
+
+def test_unrelated_reads_are_not_grouped(iv, project):
+    """The grouping is arms of ONE fork, not every read in a function — otherwise a
+    dropped input hides behind an unrelated one that was read."""
+    write_stage(project, "stages/stage.py", '''
+        from mypipe import iv
+
+        def load():
+            a = iv.reads("raw/a.parquet", why="one thing")
+            b = iv.reads("raw/b.parquet", why="another thing")
+            return a, b
+    ''')
+    sites = static.scan(iv)["stages/stage.py"].inputs()
+    assert {s.branch for s in sites} == {""}

@@ -374,28 +374,61 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
 # ── declared vs recorded ──────────────────────────────────────────────────────
 
 def drift(g: Graph, events: list[dict]) -> tuple[list[str], list[str]]:
-    """What a run did, against what the code says it does.
+    """What a run DECLARED, against what the static scan says it declares.
 
-    The asymmetry is what makes this usable rather than noisy:
+    Be precise about what this can and cannot see. The trace records every `iv.reads` /
+    `iv.writes` the run executed — declarations, not file opens. So this compares two
+    views of the same declarations: the one the scan derives by walking calls from each
+    entry point, and the one the process actually reached.
 
-      recorded - declared  is an ERROR. The process really did open that file.
-      declared - recorded  is a WARN.  An absent optional=True input, or a branch this run
-                           did not take, produces it legitimately.
+      recorded - declared  is an ERROR. The run declared it and the scan does not see it,
+                           so the artifact's stored input map is missing an edge and it
+                           can go stale without noticing. A module-level alias breaking
+                           the call walk is the shape this catches.
+      declared - recorded  is a WARN.  An absent optional=True input, or a branch this
+                           run did not take, produces it legitimately.
+
+    What it CANNOT catch is a bare `pl.read_parquet` that no declaration covers — it is
+    absent from both sides. Only wrapping the I/O primitive sees that, which is a
+    different mechanism and not this one.
     """
     errors, warns = [], []
     rec_by_node: dict[str, dict[str, set[str]]] = defaultdict(
         lambda: {"read": set(), "write": set()})
+    # Stages whose work the cache skipped. `declared - recorded` says nothing about them:
+    # of course a stage that did not run did not read its inputs. Two ways to skip — the
+    # whole step, and every partition of one — and both have to be visible here or the
+    # report is dominated by the cache doing its job.
+    idle: set[str] = set()
     for ev in events:
+        if ev.get("kind") == "skip":
+            idle.add(ev["node"])
+            continue
         if ev.get("kind") != "io" or ev.get("op") == "external":
             continue                    # an external carries no id and no path to diff
         op = "write" if ev.get("op") == "write" else "read"
         rec_by_node[ev["node"]][op].add(ev["rel"])
+        if op == "write" and ev.get("built") == []:
+            idle.add(ev["node"])        # a partitioned write that reused every partition
 
     for node in sorted(set(rec_by_node) | set(g.stages)):
         stage = g.stages.get(node)
-        declared_r = {s.path for s in stage.inputs()} if stage else set()
-        declared_w = {s.path for s in stage.outputs()} if stage else set()
+        sites_r = stage.inputs() if stage else ()
+        sites_w = stage.outputs() if stage else ()
+        declared_r = {s.path for s in sites_r}
+        declared_w = {s.path for s in sites_w}
+        # Arms of one if/elif/else are alternatives: no run takes more than one, so a
+        # recorded arm answers for its siblings. Without this the untaken half of
+        # `data.load`'s parent-vs-sub-league fork is reported unseen on every run.
+        alts: dict[str, set[str]] = defaultdict(set)
+        for site in (*sites_r, *sites_w):
+            if site.branch:
+                alts[site.branch].add(site.path)
         rec = rec_by_node.get(node, {"read": set(), "write": set()})
+
+        def _sibling_seen(d: str, seen: set[str]) -> bool:
+            return any(d in group and any(_same(a, r) for a in group for r in seen)
+                       for group in alts.values())
 
         for op, declared in (("read", declared_r), ("write", declared_w)):
             extra = {r for r in rec[op]
@@ -403,10 +436,16 @@ def drift(g: Graph, events: list[dict]) -> tuple[list[str], list[str]]:
             for r in sorted(extra):
                 errors.append(f"UNDECLARED {op.upper()}  {node} -> {r}")
             missing = {d for d in declared
-                       if not any(_same(d, r) for r in rec[op])}
+                       if not any(_same(d, r) for r in rec[op])
+                       and not _sibling_seen(d, rec[op])}
             for d in sorted(missing):
-                if node in rec_by_node:     # the stage ran; it just did not touch this
+                if node in rec_by_node and node not in idle:
                     warns.append(f"declared but not seen  {node} -> {d} ({op})")
+    if idle:
+        # Said out loud rather than silently dropped: a quiet report and a report with
+        # nothing to say should not look the same.
+        warns.append(f"{len(idle)} stage(s) skipped their work this run, so their "
+                     f"declared inputs are not diffed: {', '.join(sorted(idle))}")
     return errors, warns
 
 

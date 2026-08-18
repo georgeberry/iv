@@ -705,6 +705,10 @@ class Invalidator:
             if all(reason is None for _, reason in reasons):
                 for r in rels:
                     print(f"  {r} is current — skipping")
+                    # Recorded so `drift` can tell "ran and never read this" from "did
+                    # not run at all". Without it every skipped stage reports each of its
+                    # declared inputs as unseen, which is the cache working.
+                    self.record("skip", rel=r)
                 return False
             for r, reason in reasons:
                 if reason is not None:

@@ -30,7 +30,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .errors import DeclError
@@ -76,6 +76,7 @@ class Site:
     owner: str = ""                             # the @step function this sits inside
     guarded: bool = False                       # @step guards; a bare writes() does not
     slice: str = ""                             # which ROWS of the artifact; see `slices`
+    branch: str = ""                            # arms of one if/elif/else are alternatives
 
     @property
     def partitioned(self) -> bool:
@@ -106,6 +107,7 @@ class Stage:
     calls: tuple[tuple[str, tuple[str, ...]], ...] = ()     # fn -> names it calls
     defines: tuple[str, ...] = ()               # functions defined in this file
     imports: tuple[tuple[str, str, str], ...] = ()          # local name -> (module, attr)
+    aliases: tuple[tuple[str, str], ...] = ()               # local name -> the name it IS
 
     def _of(self, *kinds: str) -> tuple[Site, ...]:
         return tuple(s for s in self.sites if s.kind in kinds)
@@ -282,6 +284,7 @@ class _Visitor(ast.NodeVisitor):
         self._defined: set[str] = set()         # every function defined in this file
         self.calls: dict[str, set[str]] = {}    # caller -> callee names
         self.imports: dict[str, tuple[str, str]] = {}   # local name -> (module, attr)
+        self.aliases: dict[str, str] = {}       # local name -> the name it is bound to
 
     # A `@iv.step(...)` decorator is handled here rather than in visit_Call, because only
     # from the FunctionDef can we see the body it guards and hash it.
@@ -351,6 +354,56 @@ class _Visitor(ast.NodeVisitor):
         if mod:
             for a in node.names:
                 self.imports[a.asname or a.name] = (mod, a.name)
+        self.generic_visit(node)
+
+    def visit_If(self, node: ast.If) -> None:
+        """Declarations in sibling arms of one `if` are ALTERNATIVES, not a set.
+
+        `data.load` reads `processed/panel/{dataset}.parquet` on the parent league and
+        `processed/panel/{league}/{dataset}.parquet` on a sub-league. Both are true
+        declarations; no run makes both. Without knowing they are arms of one choice,
+        `drift` reports the untaken one as unseen on every run of every stage that reads
+        a panel — seven stages, every night, forever. A warning that never changes is not
+        information.
+
+        An `elif` chain nests as `orelse=[If(...)]`, so the inner group is subsumed by
+        the outer one and the whole chain ends up as a single set of alternatives, which
+        is what it is.
+        """
+        self.visit(node.test)
+        spans = []
+        for arm in (node.body, node.orelse):
+            start = len(self.sites)
+            for stmt in arm:
+                self.visit(stmt)
+            spans.append(range(start, len(self.sites)))
+        if all(len(sp) for sp in spans):        # only a real fork declares in both arms
+            gid = f"{self.rel_file}:{node.lineno}"
+            for sp in spans:
+                for i in sp:
+                    self.sites[i] = replace(self.sites[i], branch=gid)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """`load_schedule = _load_forecast_schedule` is a call edge under another name.
+
+        A function bound to a second name is invisible to a walk that only follows calls
+        and imports: the call site says `load_schedule(...)`, which is neither defined in
+        this file nor imported, so the walk stops — and every declaration the aliased
+        function makes is silently attributed to nobody. `predict_games` lost
+        `raw/crosswalk/teams.parquet` exactly this way, which the runtime trace then
+        reported as an undeclared read.
+
+        Only a bare `name = other_name` or `name = mod.attr` counts. A call, a subscript
+        or anything computed is a value, not another spelling of a function.
+        """
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            src = _method_name(node.value) if isinstance(
+                node.value, (ast.Name, ast.Attribute)) else None
+            if isinstance(node.value, ast.Attribute) and \
+                    isinstance(node.value.value, ast.Name):
+                src = f"{node.value.value.id}.{node.value.attr}"
+            if src and src != node.targets[0].id:
+                self.aliases[node.targets[0].id] = src
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -430,7 +483,7 @@ def scan_file(path: Path, root: Path, keep_empty: bool = False) -> Stage | None:
         return None
     v = _Visitor(rel)
     v.visit(tree)
-    if not v.sites and not (keep_empty or v.calls or v.imports):
+    if not v.sites and not (keep_empty or v.calls or v.imports or v.aliases):
         return None
     # Keep every callee name, not just the same-file ones — an imported name is resolved
     # against the project index after every file has been scanned.
@@ -438,7 +491,8 @@ def scan_file(path: Path, root: Path, keep_empty: bool = False) -> Stage | None:
     return Stage(node=rel, module=_module_name(rel), sites=tuple(v.sites),
                  guards=tuple(v.guards), calls=calls,
                  defines=tuple(sorted(v._defined)),
-                 imports=tuple(sorted((k, m, a) for k, (m, a) in v.imports.items())))
+                 imports=tuple(sorted((k, m, a) for k, (m, a) in v.imports.items())),
+                 aliases=tuple(sorted(v.aliases.items())))
 
 
 def _module_name(rel: str) -> str:
@@ -659,7 +713,15 @@ def _reach(iv, start_node: str, start_fn: str) -> set[tuple[str, str]]:
         seen.add((node, fn))
         st = stages[node]
         imports = {k: (m, a) for k, m, a in st.imports}
+        aliases = dict(st.aliases)
         for name in st.called_by(fn):
+            # `load_schedule = _load_forecast_schedule` — follow the binding to the name
+            # that actually carries the declarations. Bounded, so a chain of aliases
+            # resolves and a cycle cannot spin.
+            for _ in range(8):
+                if name not in aliases or name in st.defines:
+                    break
+                name = aliases[name]
             if name in st.defines:
                 stack.append((node, name))          # a helper in this file
                 continue
