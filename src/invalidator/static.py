@@ -75,6 +75,7 @@ class Site:
     code: str = ""                              # source hash, when step(code=True)
     owner: str = ""                             # the @step function this sits inside
     guarded: bool = False                       # @step guards; a bare writes() does not
+    slice: str = ""                             # which ROWS of the artifact; see `slices`
 
     @property
     def partitioned(self) -> bool:
@@ -213,7 +214,12 @@ def _sites(call: ast.Call, kind: str, at: tuple, rel_file: str,
                 f"{where}: {p!r} has placeholder(s) {list(_template_fields(p))} "
                 f"but no part=")
 
+    slice_ = _lit_str(kw.get("slice")) or ""
+    if "slice" in kw and not slice_:
+        raise DeclError(f"{where}: slice= must be a string literal")
+
     return [Site(kind=kind, path=p, why=why, file=rel_file, line=call.lineno,
+                 slice=slice_,
                  optional=_lit_bool(kw.get("optional"), False),
                  prior=_lit_bool(kw.get("prior"), False),
                  terminal=_lit_bool(kw.get("terminal"), False),
@@ -514,6 +520,21 @@ def path_pattern(template: str) -> re.Pattern:
 def matches(template: str, rel: str) -> bool:
     """Does a concrete rel path come from this template? Exact match when unpartitioned."""
     return template == rel or bool(path_pattern(template).match(rel))
+
+
+def slices_meet(a: str, b: str) -> bool:
+    """Can two sites on one artifact touch the same ROWS?
+
+    An artifact is one node in the graph but not always one population.
+    `game_predictions.parquet` holds the seasons that have been played and the one that
+    has not; `build_preseason` calibrates on the first and `predict_upcoming_games`
+    writes the second. Both edges are real and it is not a cycle, because the rows never
+    meet — an argument that lived in a comment and a filter until it could be said here.
+
+    An unlabelled site means the WHOLE artifact, so it meets everything. Two different
+    labels are disjoint by declaration.
+    """
+    return not a or not b or a == b
 
 
 def writers_of(iv, rel: str) -> set[str]:

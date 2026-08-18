@@ -16,13 +16,38 @@ matplotlib.use("Agg")                       # no display; this runs in CI and ov
 import matplotlib.pyplot as plt             # noqa: E402
 import networkx as nx                       # noqa: E402
 
+from .static import slices_meet as _slices_meet  # noqa: E402
+
 
 def to_networkx(g) -> nx.DiGraph:
-    """The ARTIFACT graph: artifact -> artifact, with the stages collapsed onto edges."""
+    """The ARTIFACT graph: artifact -> artifact, with the stages collapsed onto edges.
+
+    A SLICED artifact is more than one node. `game_predictions.parquet` holds the seasons
+    that have been played and the one that has not, and drawn as a single node it is a
+    ring: the played rows feed `preseason_team`, which feeds the upcoming rows. Split by
+    slice it is a chain, which is what it actually is.
+    """
+    sliced = {}
+    for path, sites in g.sites.items():
+        labels = {s.slice for s in sites if s.slice}
+        if labels:
+            sliced[path] = labels
+
+    def nodes_for(site) -> list[str]:
+        """The node(s) a site touches. An UNLABELLED site on a sliced artifact means the
+        whole of it, so it touches every slice."""
+        labels = sliced.get(site.path)
+        if not labels:
+            return [site.path]
+        return [f"{site.path}#{site.slice}"] if site.slice else [
+            f"{site.path}#{l}" for l in sorted(labels)]
+
     d = nx.DiGraph()
     for path in g.artifacts:
-        d.add_node(path, kind="root" if not g.producers_of(path)
-                   else "terminal" if g.is_terminal(path) else "derived")
+        for n in ([f"{path}#{l}" for l in sorted(sliced[path])] if path in sliced
+                  else [path]):
+            d.add_node(n, kind="root" if not g.producers_of(path)
+                       else "terminal" if g.is_terminal(path) else "derived")
     for node, stage in g.stages.items():
         updated = {s.path for s in stage.sites if s.kind == "update"}
         for out in stage.outputs():
@@ -38,11 +63,11 @@ def to_networkx(g) -> nx.DiGraph:
                     # Two paths the SAME stage rewrites. Either alternative branches of
                     # one declaration — the flat and the nested league spelling of a raw
                     # feed — or simply independent. Neither is built FROM the other: both
-                    # already exist when the stage starts. Linked anyway, each pair drew
-                    # a two-node cycle, which is how `iv viz` came to crash on a graph
-                    # the stage-level check called acyclic.
+                    # already exist when the stage starts.
                     continue
-                d.add_edge(inp.path, out.path, stage=node)
+                for a in nodes_for(inp):
+                    for b in nodes_for(out):
+                        d.add_edge(a, b, stage=node)
     return d
 
 

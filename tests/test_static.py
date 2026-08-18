@@ -532,3 +532,51 @@ def test_viz_draws_a_temporal_loop_by_cutting_the_later_edge(project):
     pairs = [("a", "b"), ("b", "a")]
     cut = max(pairs, key=lambda e: order[d.edges[e]["stage"]])
     assert cut == ("b", "a"), "the amendment is the edge to cut, not the dependency"
+
+
+def test_a_slice_says_an_artifact_is_not_one_population(project):
+    """`game_predictions` holds the seasons that have been played and the one that has
+    not. Calibrating on the first while another stage writes the second is two real
+    edges and not a cycle — an argument that lived in a comment until it could be said
+    in the declaration."""
+    import polars as pl
+    from conftest import write_stage
+    from invalidator import Invalidator, graph as _graph
+
+    (project / "data" / "raw").mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "seed.parquet")
+    write_stage(project, "stages/first.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        @iv.step("processed/preds.parquet", why="predictions", slice="played")
+        def build(out):
+            pl.read_parquet(iv.reads("raw/seed.parquet", why="the seed")).write_parquet(out)
+        build()
+    ''')
+    write_stage(project, "stages/second.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        @iv.step("processed/ratings.parquet", why="ratings")
+        def build(out):
+            iv.reads("processed/preds.parquet", why="predictions", slice="played")
+            pl.DataFrame({"r": [1]}).write_parquet(out)
+        build()
+    ''')
+    write_stage(project, "stages/third.py", '''
+        import polars as pl
+        from pipeline import iv
+
+        iv.reads("processed/ratings.parquet", why="ratings")
+        with iv.updates("processed/preds.parquet", why="predictions",
+                        slice="upcoming") as p:
+            pass
+    ''')
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project,
+                     stages=["stages/first.py", "stages/second.py", "stages/third.py"])
+    g = _graph.build(iv)
+    assert _graph.find_cycle(g) is None, "disjoint slices are not a cycle"
+    # The reader of `played` depends on the writer of `played`, and on nobody else.
+    assert g.producers_of("processed/preds.parquet", "played") == ["stages/first.py"]

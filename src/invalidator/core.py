@@ -72,6 +72,7 @@ class Invalidator:
                  source_dirs: Sequence[str] = ("src", "scripts", "stages"),
                  stages: Sequence[str] | None = None,
                  order_from: str | os.PathLike | None = None,
+                 slices: dict[str, Callable] | None = None,
                  roots: Sequence[str] = ("raw/",),
                  project_root: str | os.PathLike | None = None,
                  trace: str | os.PathLike | None = None,
@@ -104,6 +105,10 @@ class Invalidator:
         # `iv status` could never see a bump that a run would see.
         self.versions = dict(versions or {})
         self.source_dirs = tuple(source_dirs)
+        # `{label: predicate}`. A slice says an artifact is not one population — which
+        # ROWS a site touches. The label is what the graph reads; the predicate is what
+        # makes the label true rather than merely claimed, by doing the filtering itself.
+        self.slices = dict(slices or {})
         self.stages = tuple(stages) if stages is not None else None
         self.order_from = Path(order_from) if order_from else None
         self.roots = tuple(roots)
@@ -199,7 +204,8 @@ class Invalidator:
               optional: bool = False,
               prior: bool = False,
               fp: str | Callable = "data",
-              part: dict[str, str] | None = None) -> Path:
+              part: dict[str, str] | None = None,
+              slice: str = "") -> Path:
         """Declare and resolve an input. Returns the concrete path.
 
         optional  an absent input degrades a feature rather than failing the stage.
@@ -238,7 +244,7 @@ class Invalidator:
         self._reads[rel] = fp
         self._read_paths.add(str(p))
         self.record("io", op="read", rel=rel, why=why, optional=optional, prior=prior,
-                    part=part or {})
+                    part=part or {}, slice=slice)
         return p
 
     def frame(self, path: str, *, why: str,
@@ -246,6 +252,7 @@ class Invalidator:
               prior: bool = False,
               fp: str | Callable = "data",
               part: dict[str, str] | None = None,
+              slice: str = "",
               **read_kwargs):
         """`reads()`, and give me the frame. None if `optional` and it is not there.
 
@@ -255,11 +262,24 @@ class Invalidator:
 
         `**read_kwargs` goes to the reader, so `columns=` still works.
         """
-        p = self.reads(path, why=why, optional=optional, prior=prior, fp=fp, part=part)
+        p = self.reads(path, why=why, optional=optional, prior=prior, fp=fp, part=part,
+                       slice=slice)
         if optional and not p.exists():
             return None
         from .fingerprint import read_frame
-        return read_frame(p, **read_kwargs)
+        df = read_frame(p, **read_kwargs)
+        if slice:
+            # The label and the filter are the SAME fact, so the label does the filtering.
+            # Stated and not applied, a slice is a comment — and a comment is what this
+            # replaced: `game_predictions` was read whole and filtered by hand, with the
+            # reason those rows were the safe ones written above it in prose.
+            if slice not in self.slices:
+                raise DeclError(
+                    f"{path} declares slice={slice!r}, which this Invalidator does not "
+                    f"define. Pass slices={{{slice!r}: <predicate>}} so the label filters "
+                    f"rather than merely asserts. Known: {sorted(self.slices) or 'none'}")
+            df = self.slices[slice](df)
+        return df
 
     def collection(self, path: str, *, why: str, optional: bool = False,
                    prior: bool = False,
@@ -312,6 +332,7 @@ class Invalidator:
                part: dict[str, str] | None = None,
                version: str = "",
                allow_missing: bool = False,
+               slice: str = "",
                code: str = "") -> Iterator[Path]:
         """Declare an output. Yields the concrete path; stamps it on clean exit.
 
@@ -361,7 +382,7 @@ class Invalidator:
         new_id = self.state.stamp(rel, spec=spec, inputs=inputs, by=self.node(),
                                   fp_value=self._pending_fp.pop(rel, None))
         self.record("io", op="write", rel=rel, why=why, terminal=terminal,
-                    part=part or {}, policy=policy, id=new_id)
+                    part=part or {}, policy=policy, id=new_id, slice=slice)
 
     @contextmanager
     def updates(self, path: str, *, why: str,
@@ -371,6 +392,7 @@ class Invalidator:
                 part: dict[str, str] | None = None,
                 version: str = "",
                 allow_missing: bool = False,
+                slice: str = "",
                 code: str = "") -> Iterator[Path]:
         """An artifact this stage reads AND writes — an append, a patch, a cache.
 
@@ -393,7 +415,7 @@ class Invalidator:
         p = self.resolve_out(rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         self.record("io", op="read", rel=rel, why=why, optional=True, prior=False,
-                    part=part or {}, update=True)
+                    part=part or {}, update=True, slice=slice)
 
         yield p
 
@@ -410,7 +432,7 @@ class Invalidator:
         new_id = self.state.stamp(rel, spec=spec, inputs=inputs, by=self.node(),
                                   fp_value=self._pending_fp.pop(rel, None))
         self.record("io", op="write", rel=rel, why=why, terminal=terminal,
-                    part=part or {}, policy=policy, id=new_id, update=True)
+                    part=part or {}, policy=policy, id=new_id, update=True, slice=slice)
 
     def external(self, name: str, *, why: str) -> None:
         """Declare that this stage pulls from something outside the pipeline.

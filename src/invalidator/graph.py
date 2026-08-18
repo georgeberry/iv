@@ -29,6 +29,7 @@ from dataclasses import replace as _replace
 from . import static as _static
 from .errors import DagioError
 from .static import Site, Stage, matches
+from .static import slices_meet as _slices_meet
 
 
 def _same(a: str, b: str) -> bool:
@@ -60,9 +61,19 @@ class Graph:
     def is_terminal(self, path: str) -> bool:
         return any(s.terminal for s in self.sites[path])
 
-    def producers_of(self, path: str) -> list[str]:
+    def producers_of(self, path: str, slice: str = "") -> list[str]:
+        """The stages that write `path` — narrowed to those whose ROWS this could see.
+
+        `slice` is how an artifact says it is not one population. A writer of a disjoint
+        slice is not a producer of what you are reading, however much it writes the file.
+        """
         out = {n for p, ns in self.writers.items() if _same(p, path) for n in ns}
         out |= {n for p, ns in self.updaters.items() if _same(p, path) for n in ns}
+        if slice:
+            out = {n for n in out
+                   if any(_same(w.path, path) and _slices_meet(w.slice, slice)
+                          for w in self.stages[n].sites
+                          if w.kind in ("write", "update"))}
         return sorted(out)
 
     def consumers_of(self, path: str) -> list[str]:
@@ -190,7 +201,7 @@ def stage_parents(g) -> dict[str, list[str]]:
         for s in stage.inputs():
             if s.prior or any(_same(s.path, u) for u in updated):
                 continue
-            prod = {p for p in g.producers_of(s.path) if p != node}
+            prod = {p for p in g.producers_of(s.path, s.slice) if p != node}
             # A producer that runs LATER is not what this stage read — it is a downstream
             # amendment to the same file. `build_preseason` reads `game_predictions`,
             # which `predict_games` writes before it and `predict_upcoming_games` amends
