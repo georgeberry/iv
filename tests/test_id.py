@@ -222,3 +222,45 @@ def test_bookkeeping_suppresses_the_input_too_not_just_the_trace(project, iv, pi
     iv.state.reset()
     assert list(iv.record_of("processed/self_inspecting.parquet")["in"]) == \
         ["raw/games.parquet"]
+
+
+def test_a_module_level_read_is_every_steps_input(project, iv):
+    """`SRC = iv.reads(...)` at module scope executes before any step and feeds all of
+    them. Clearing the read set on step entry dropped it — an UNDER-declaration, the
+    unsafe direction: the artifact would not rebuild when that input moved.
+
+    Found on a real dump whose source parquet was resolved once at import.
+    """
+    write_root(project)
+    module_level = iv.reads("raw/games.parquet", why="resolved once, at import")
+    assert module_level.exists()
+
+    @iv.step("processed/from_module_scope.parquet", why="reads nothing of its own",
+             terminal=True, code=False)
+    def build(out):
+        pl.read_parquet(module_level).write_parquet(out)
+
+    build()
+    iv.state.reset()
+    assert list(iv.record_of("processed/from_module_scope.parquet")["in"]) == \
+        ["raw/games.parquet"]
+
+
+def test_one_steps_reads_are_not_inherited_by_the_next(project, iv):
+    """Module scope is shared; a step's own reads are not. Capturing the inherited set
+    once is what keeps step B from picking up step A's inputs."""
+    write_root(project)
+
+    @iv.step("processed/first.parquet", why="reads the root", code=False)
+    def first(out):
+        pl.read_parquet(iv.reads("raw/games.parquet", why="only first reads this")) \
+          .write_parquet(out)
+
+    @iv.step("processed/second.parquet", why="reads nothing", terminal=True, code=False)
+    def second(out):
+        pl.DataFrame({"a": [1]}).write_parquet(out)
+
+    first()
+    second()
+    iv.state.reset()
+    assert list(iv.record_of("processed/second.parquet")["in"]) == []

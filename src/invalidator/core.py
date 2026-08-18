@@ -116,6 +116,10 @@ class Invalidator:
         self._reads: dict[str, object] = {}          # rel -> fp strategy, this process
         self._writes: list[str] = []
         self._pending_fp: dict[str, str] = {}
+        # Reads made before any step ran — a module-level `SRC = iv.reads(...)`. They
+        # belong to EVERY step in the file, so a step inherits them rather than starting
+        # from nothing. Captured once, so step B does not also inherit step A's reads.
+        self._module_reads: dict[str, object] | None = None
         self._trace_fh = None
         self._depth = 0                              # bookkeeping suppression
 
@@ -400,12 +404,15 @@ class Invalidator:
             @functools.wraps(fn)
             def wrapper(*args, **kwargs):
                 def run():
+                    if self._module_reads is None:
+                        self._module_reads = dict(self._reads)
                     outer, outer_w = dict(self._reads), list(self._writes)
-                    # This step's reads AND writes are its own. Without scoping the
-                    # writes, a second step reading in the same process trips the
-                    # read-after-write warning against the FIRST step's output, which is
-                    # true and entirely irrelevant.
+                    # This step's reads AND writes are its own, plus whatever the module
+                    # read before any step started. Without scoping the writes, a second
+                    # step reading in the same process trips the read-after-write warning
+                    # against the FIRST step's output, which is true and irrelevant.
                     self._reads.clear()
+                    self._reads.update(self._module_reads)
                     self._writes.clear()
                     try:
                         with ExitStack() as stack:

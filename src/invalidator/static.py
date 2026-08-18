@@ -471,7 +471,9 @@ def _reach(iv, start_node: str, start_fn: str) -> set[tuple[str, str]]:
     by_module = {st.module: st for st in stages.values() if st.module}
 
     seen: set[tuple[str, str]] = set()
-    stack = [(start_node, start_fn)]
+    # Module scope too: a module-level `SRC = iv.reads(...)` executes before any step and
+    # feeds all of them, so it is every step's input and the scan has to say so.
+    stack = [(start_node, start_fn), (start_node, "")]
     while stack:
         node, fn = stack.pop()
         if (node, fn) in seen or node not in stages:
