@@ -424,7 +424,7 @@ def scan_file(path: Path, root: Path, keep_empty: bool = False) -> Stage | None:
         return None
     v = _Visitor(rel)
     v.visit(tree)
-    if not v.sites and not keep_empty:
+    if not v.sites and not (keep_empty or v.calls or v.imports):
         return None
     # Keep every callee name, not just the same-file ones — an imported name is resolved
     # against the project index after every file has been scanned.
@@ -453,10 +453,16 @@ def _module_name(rel: str) -> str:
 def scan(iv, force: bool = False) -> dict[str, Stage]:
     """Every stage in the configured source dirs, keyed by project-relative file path.
 
-    A file with no declarations of its own is kept IF the project names it as something
-    it runs. That is not a corner case: the natural shape is a thin entry point calling a
-    library that does the I/O, and dropping the entry point leaves the LIBRARY as the
-    node — which cannot be ordered, because the refresh never names it.
+    A file with no declarations of its own is KEPT if it calls or imports anything —
+    which is nearly all of them. It has to be: the cross-module walk can only enter a
+    file it scanned, so a library that declares nothing is a hole the walk stops at, and
+    everything that library calls is lost with it. That is not hypothetical — it is what
+    happens the moment a library is refactored to take frames instead of reading them,
+    which is the direction this repo is moving. `wvorp.replacement` stopped declaring and
+    `wvorp.wvorp.parquet` silently went from four declared inputs to one.
+
+    Only a file that declares nothing AND calls nothing is dropped, and only the graph
+    decides which of the rest are NODES — see `graph.build`.
     """
     key = (str(iv.project_root), iv.source_dirs)
     if key in _cache and not force:
