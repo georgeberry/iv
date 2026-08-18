@@ -159,3 +159,51 @@ def test_the_write_guard_still_allows_reading(project):
     assert FRAME.equals(pl.read_parquet(src))
     with pytest.raises(DeclError):
         src.open("w")
+
+
+def test_a_partitioned_artifact_reuses_what_THIS_run_built(project):
+    """The A/A caught this: a full rebuild followed by a reuse-everything pass LOST rows.
+
+    The partition cache read its own artifact through `resolve()`, which with overlay off
+    is the SHARED tree — so it reused rows it had not produced, and threw away whatever
+    the rebuild had just added. An output has to be read from where outputs go.
+    """
+    shared, scratch = project / "shared", project / "scratch"
+    (shared / "processed").mkdir(parents=True)
+    # The shared tree holds an OLD, shorter version of the same artifact.
+    pl.DataFrame({"season": ["2024"], "v": [1]}).write_parquet(
+        shared / "processed" / "t.parquet")
+
+    write_stage(project, "stages/p.py", '''
+        import polars as pl
+        from mypipe import iv
+
+        def build_one(season):
+            iv.reads("raw/src.parquet", why="the source")
+            return pl.DataFrame({"season": [season], "v": [int(season)]})
+
+        iv.for_each(["2024", "2025"], build_one, output="processed/t.parquet",
+                    key="season", why="two partitions")
+    ''')
+    (shared / "raw").mkdir(parents=True, exist_ok=True)
+    FRAME.write_parquet(shared / "raw" / "src.parquet")
+
+    iv = Invalidator(data_root=shared, out_root=scratch, data_version="v1",
+                     overlay=False, source_dirs=["stages"], project_root=project)
+    from invalidator.partition import for_each
+
+    def build_one(season):
+        iv.reads("raw/src.parquet", why="the source")
+        return pl.DataFrame({"season": [season], "v": [int(season)]})
+
+    full = for_each(iv, ["2024", "2025"], build_one, output="processed/t.parquet",
+                    key="season", why="two partitions")
+    assert full.height == 2
+
+    iv.state.reset()
+    again = for_each(iv, ["2024", "2025"], build_one, output="processed/t.parquet",
+                     key="season", why="two partitions")
+    assert again.equals(full), "a reuse pass must not lose what the rebuild produced"
+    assert (scratch / "processed" / "t.parquet").exists()
+    assert pl.read_parquet(shared / "processed" / "t.parquet").height == 1, \
+        "the shared tree is untouched"

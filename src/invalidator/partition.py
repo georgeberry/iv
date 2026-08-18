@@ -119,7 +119,12 @@ class PartitionCache:
         """
         if self._existing is _MISSING:
             import polars as pl
-            p = self.iv.resolve(self.artifact)
+            # resolve_OUT. This artifact is an OUTPUT, so the copy that matters is the one
+            # THIS pipeline built. Reading it through `resolve()` takes the SHARED tree
+            # when overlay is off, so a run reuses rows it did not produce — a full
+            # rebuild followed by a reuse-everything pass then loses whatever the rebuild
+            # added, which is exactly how the A/A caught it.
+            p = self.iv.resolve_out(self.artifact)
             with self.iv.bookkeeping():
                 self._existing = pl.read_parquet(p) if p.exists() else None
         return self._existing
@@ -162,9 +167,12 @@ class PartitionCache:
         A partition in neither list is dropped from `parts` rather than left behind, so a
         stamp can never outlive the rows it describes.
         """
-        p = self.iv.resolve(self.artifact)
+        p = self.iv.resolve_out(self.artifact)
         p.parent.mkdir(parents=True, exist_ok=True)
-        out.write_parquet(p)
+        # `str(p)`: polars reads and writes a gs:// URI natively, but handed a CloudPath
+        # object it goes through __fspath__, writes cloudpathlib's LOCAL CACHE, and never
+        # uploads — exit 0, nothing in the bucket.
+        out.write_parquet(str(p))
         parts = {part: self._key(part) for part in sorted(set(built) | set(reuse))}
         new_id = self.iv.state.stamp(self.artifact, spec=self.spec, inputs=self._inputs,
                                      by=self.iv.node(), parts=parts)
