@@ -54,11 +54,16 @@ def test_check_is_clean_and_exits_zero(pipeline):
 
 
 def test_check_exits_one_on_an_error(pipeline):
+    """The orphan is added to the project's declared `stages`, because a file nothing
+    runs is reported as NOT RUN rather than graphed — see `graph.build`."""
     (pipeline / "stages" / "orphan.py").write_text(
         'from pipeline import iv\n\n'
         '@iv.step("processed/orphan.parquet", why="nobody reads this")\n'
         'def build(out):\n'
         '    iv.reads("processed/team_stats.parquet", why="season points")\n')
+    pp = pipeline / "pipeline.py"
+    pp.write_text(pp.read_text().replace(
+        '"stages/build_ratings.py"]', '"stages/build_ratings.py", "stages/orphan.py"]'))
     r = cli(pipeline, "check")
     assert r.returncode == 1
     assert "WRITE WITH NO CONSUMER" in r.stdout

@@ -24,6 +24,8 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from dataclasses import replace as _replace
+
 from . import static as _static
 from .static import Site, Stage, matches
 
@@ -38,6 +40,9 @@ class Graph:
     iv: object = None
     stages: dict[str, Stage] = field(default_factory=dict)
     order: dict[str, int] = field(default_factory=dict)
+    # Files that declare I/O and no entry point reaches. In a two-pipeline repo these are
+    # usually the other pipeline's stages, so they are reported and not graphed.
+    unreached: list[str] = field(default_factory=list)
     writers: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     updaters: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     readers: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
@@ -94,14 +99,32 @@ def build(iv, stages: dict[str, Stage] | None = None,
     if order is None:
         order = iv.declared_order()
 
-    # A STAGE produces something. A file that only reads — a library like `wvorp.data`,
-    # which declares the panel read once for every stage that calls it — is not a node in
-    # the pipeline; its reads belong to whoever calls it, and the cross-module walk
-    # attributes them there. Left in, it appears as a stage that consumes and produces
-    # nothing, which is noise in every view.
-    stages = {n: st for n, st in stages.items() if st.outputs()}
+    # A NODE IS AN ENTRY POINT — a file the pipeline actually invokes. A library is not
+    # one, however much it declares: `wvorp.data` reads the panels on behalf of every
+    # stage and writes the raw feeds on behalf of every fetcher, so as a node it both
+    # precedes and follows everything, and the graph is one cycle through it.
+    #
+    # When the project says what it runs, that list IS the node set and each entry point
+    # owns its libraries' declarations. Without a declared order there is nothing better
+    # to go on than "it produces something", which is the old rule.
+    if order:
+        entries = [n for n in order if n in stages]
+        sites = {n: _static.sites_of_entry(iv, n) for n in entries}
+        # A file that declares I/O and is reached by NO entry point is NOT a node. It may
+        # be a stage nothing runs, which is worth saying — but in a repo running two
+        # pipelines out of one tree it is usually just the other pipeline's, and folding
+        # those in reports every shared artifact name as two writers in conflict. So they
+        # are reported (`g.unreached`) rather than graphed.
+        reached = {n for e in entries for n in _static.entry_owners(iv, e)}
+        unreached = sorted(n for n, st in stages.items()
+                           if n not in reached and st.outputs())
+        stages = {n: _replace(stages[n], sites=sites[n]) for n in entries}
+    else:
+        unreached = []
+        stages = {n: st for n, st in stages.items() if st.outputs()}
 
     g = Graph(iv=iv, stages=dict(stages))
+    g.unreached = unreached
     ranks = {n: i for i, n in enumerate(order)} if order else {}
     # A stage the order does not mention sorts after everything it does, rather than
     # silently at the front where it would look like a legal producer for everyone.
@@ -158,6 +181,13 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warns: list[str] = []
 
+    # A file that declares I/O and nothing runs. Worth saying; not worth graphing, since
+    # in a two-pipeline repo it is usually the other pipeline's stage.
+    for node in g.unreached:
+        warns.append(
+            f"NOT RUN  {node} declares I/O, but nothing this pipeline runs reaches it. "
+            f"Another pipeline's stage, or one that has fallen out of the refresh.")
+
     # READ WITH NO PRODUCER — a root is fine, anything else is a missing stage.
     for path in sorted(set(g.readers)):
         if g.producers_of(path):
@@ -190,9 +220,13 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                 f"Use updates() if the second one amends the first.")
 
     # POLICY CONFLICT — the artifact cannot be two things at once.
+    #
+    # `code` is NOT in the list, and cannot be: it is a digest of the writing function,
+    # so two writers of one artifact disagree about it by construction. A chain would
+    # report a conflict for simply being a chain.
     for path in g.produced:
         outs = [s for s in g.sites[path] if s.kind in ("write", "update")]
-        for attr in ("policy", "fp", "terminal", "code", "version"):
+        for attr in ("policy", "fp", "terminal", "version"):
             values = {getattr(s, attr) for s in outs}
             if len(values) > 1:
                 errors.append(

@@ -415,7 +415,7 @@ def _guarded_paths(call: ast.Call) -> list[str]:
     return list(_lit_strs(arg) or ())
 
 
-def scan_file(path: Path, root: Path) -> Stage | None:
+def scan_file(path: Path, root: Path, keep_empty: bool = False) -> Stage | None:
     rel = str(path.relative_to(root))
     try:
         tree = ast.parse(path.read_text())
@@ -423,7 +423,7 @@ def scan_file(path: Path, root: Path) -> Stage | None:
         return None
     v = _Visitor(rel)
     v.visit(tree)
-    if not v.sites:
+    if not v.sites and not keep_empty:
         return None
     # Keep every callee name, not just the same-file ones — an imported name is resolved
     # against the project index after every file has been scanned.
@@ -450,17 +450,25 @@ def _module_name(rel: str) -> str:
 
 
 def scan(iv, force: bool = False) -> dict[str, Stage]:
-    """Every stage in the configured source dirs, keyed by project-relative file path."""
+    """Every stage in the configured source dirs, keyed by project-relative file path.
+
+    A file with no declarations of its own is kept IF the project names it as something
+    it runs. That is not a corner case: the natural shape is a thin entry point calling a
+    library that does the I/O, and dropping the entry point leaves the LIBRARY as the
+    node — which cannot be ordered, because the refresh never names it.
+    """
     key = (str(iv.project_root), iv.source_dirs)
     if key in _cache and not force:
         return _cache[key]
+    entries = set(iv.declared_order() or ())
     out: dict[str, Stage] = {}
     for d in iv.source_dirs:
         base = iv.project_root / d
         if not base.exists():
             continue
         for p in sorted(base.rglob("*.py")):
-            stage = scan_file(p, iv.project_root)
+            rel = str(p.relative_to(iv.project_root))
+            stage = scan_file(p, iv.project_root, keep_empty=rel in entries)
             if stage is not None:
                 out[stage.node] = stage
     _cache[key] = out
@@ -566,6 +574,44 @@ def _reach(iv, start_node: str, start_fn: str) -> set[tuple[str, str]]:
                 stack.append((other.node, ""))       # module-level reads in that file
                 break
     return seen
+
+
+def sites_of_entry(iv, node: str) -> tuple[Site, ...]:
+    """Every declaration an ENTRY POINT is responsible for, its libraries included.
+
+    A stage's declarations are not all in the file the refresh names. wvorp reads through
+    `wvorp.data.load` and writes raw feeds through `wvorp.data.fetch_one`, so attributing
+    those to `src/wvorp/data.py` makes the LIBRARY a node in the pipeline — one that
+    reads the panels every stage reads and writes the feeds every fetcher writes. Ordering
+    it is meaningless, and the graph collapses into a single cycle through it.
+
+    So a library is not a node. Its sites belong to whoever reaches it, which is what the
+    cross-module walk already computes for inputs; this is the same walk, kept for every
+    kind of site rather than just reads.
+    """
+    stages = scan(iv)
+    reach = entry_reach(iv, node)
+    # By (file, FUNCTION), not by file. `wvorp.data` holds both `load`, which every stage
+    # calls, and `fetch_one`, which only the fetchers do — attributing the whole file
+    # would make every stage a writer of every raw feed, and the graph one cycle again.
+    return tuple(s for (n, fn) in sorted(reach)
+                 for s in stages[n].sites if s.owner == fn)
+
+
+def entry_reach(iv, node: str) -> set[tuple[str, str]]:
+    """Every (file, function) whose declarations belong to entry point `node`."""
+    stages = scan(iv)
+    if node not in stages:
+        return set()
+    reach = set()
+    for fn in ("", *stages[node].defines):
+        reach |= _reach(iv, node, fn)
+    return reach
+
+
+def entry_owners(iv, node: str) -> set[str]:
+    """Every FILE reached from entry point `node`, itself included."""
+    return {n for n, _ in entry_reach(iv, node)}
 
 
 def inputs_for_artifact(iv, rel: str) -> dict[str, object] | None:
