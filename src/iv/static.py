@@ -321,7 +321,9 @@ class _Visitor(ast.NodeVisitor):
         # attributed to the helper so a step that calls it can pick them up.
         outer, self._owner = self._owner, node.name
         try:
-            self.generic_visit(node)
+            for dec in node.decorator_list:
+                self.visit(dec)
+            self._walk_body(node.body)
         finally:
             self._owner = outer
 
@@ -357,6 +359,40 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     @staticmethod
+    def _terminates(body: list) -> bool:
+        """Does this block always leave? Then what follows it is the other arm."""
+        return bool(body) and isinstance(body[-1], (ast.Return, ast.Raise,
+                                                    ast.Continue, ast.Break))
+
+    def _walk_body(self, body: list) -> None:
+        """Walk a statement list, grouping an early-return fork as the two arms it is.
+
+        `if x: return A` followed by `return B` has no `orelse` in the tree — the else arm
+        is the rest of the list, which only the enclosing list can see. It is also the
+        commoner spelling of a fork: wvorp's `_update` picks between
+        `rollforward.parquet` and `rollforward_{model}.parquet` that way, and read as two
+        independent statements the second looked like an artifact that simply did not
+        exist, reported missing on every league that never passes `--model`.
+
+        The tail is CONSUMED here rather than revisited, or its declarations are recorded
+        twice — once as the else arm and once on their own.
+        """
+        for i, stmt in enumerate(body):
+            if (isinstance(stmt, ast.If) and not stmt.orelse
+                    and self._terminates(stmt.body) and body[i + 1:]):
+                start = len(self.sites)
+                self.visit(stmt)
+                mid = len(self.sites)
+                self._walk_body(body[i + 1:])
+                end = len(self.sites)
+                if mid > start and end > mid:      # both arms declare something
+                    gid = f"{self.rel_file}:{stmt.lineno}"
+                    for k in range(start, end):
+                        self.sites[k] = replace(self.sites[k], branch=gid)
+                return
+            self.visit(stmt)
+
+    @staticmethod
     def _is_main_guard(test: ast.AST) -> bool:
         """`if __name__ == "__main__":` — the block that does NOT run on import."""
         return (isinstance(test, ast.Compare)
@@ -364,6 +400,9 @@ class _Visitor(ast.NodeVisitor):
                 and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
                 and isinstance(test.comparators[0], ast.Constant)
                 and test.comparators[0].value == "__main__")
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._walk_body(node.body)
 
     def visit_If(self, node: ast.If) -> None:
         """Declarations in sibling arms of one `if` are ALTERNATIVES, not a set.
@@ -378,6 +417,13 @@ class _Visitor(ast.NodeVisitor):
         An `elif` chain nests as `orelse=[If(...)]`, so the inner group is subsumed by
         the outer one and the whole chain ends up as a single set of alternatives, which
         is what it is.
+
+        EARLY RETURN counts too. `if model is None: return A` followed by `return B` is
+        the same fork written without an `else`, and it is the commoner spelling — wvorp's
+        `_update` picks between `rollforward.parquet` and `rollforward_{model}.parquet`
+        that way. Read as two independent statements, the second looked like an artifact
+        that simply did not exist, reported missing on every league that never passes
+        `--model`.
         """
         self.visit(node.test)
         guard = self._is_main_guard(node.test)
@@ -394,8 +440,7 @@ class _Visitor(ast.NodeVisitor):
             outer_owner = self._owner
             if guard and arm is node.body:
                 self._owner = "__main__"
-            for stmt in arm:
-                self.visit(stmt)
+            self._walk_body(list(arm))
             self._owner = outer_owner
             spans.append(range(start, len(self.sites)))
         if all(len(sp) for sp in spans):        # only a real fork declares in both arms

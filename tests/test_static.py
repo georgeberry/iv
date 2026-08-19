@@ -747,3 +747,27 @@ def test_an_ambiguous_bare_import_is_not_guessed(iv, project):
     static.reset()
     assert "processed/x.parquet" not in {
         s.path for s in static.sites_of_entry(iv, "stages/consumer.py")}
+
+
+def test_an_early_return_fork_is_two_arms(iv, project):
+    """`if x: return A` then `return B` is a fork written without an `else`, and it is the
+    commoner spelling.
+
+    wvorp's `_update` picks between `rollforward.parquet` and
+    `rollforward_{model}.parquet` that way. Read as two independent statements, the second
+    looked like an artifact that simply did not exist — reported missing on every league
+    that never passes `--model`, with no action that could clear it.
+    """
+    write_stage(project, "stages/stage.py", '''
+        from mypipe import iv
+
+        def _update(model):
+            if model is None:
+                return iv.updates("out/plain.parquet", why="the prod file")
+            return iv.updates("out/{model}.parquet", why="a variant",
+                              part={"model": model})
+    ''')
+    sites = static.scan(iv)["stages/stage.py"].outputs()
+    assert len(sites) == 2, [s.path for s in sites]
+    groups = {s.branch for s in sites}
+    assert len(groups) == 1 and "" not in groups, sites
