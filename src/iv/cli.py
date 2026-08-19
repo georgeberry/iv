@@ -264,6 +264,75 @@ def export(out: Path = typer.Option(None, help="write here instead of stdout")) 
 
 # ── the state half: reads the stamps ──────────────────────────────────────────
 
+def _facts(iv, rel: str) -> str:
+    """The one-line shape of an artifact, for a human reading a wall of `current`.
+
+    Whether something is up to date is only half of what you want to know; the other half
+    is what KIND of thing it is, because that is what tells you whether "current" is a
+    strong claim or a weak one. A settled archive being current says almost nothing. A
+    20-partition walk-forward whose inputs are period-bounded says a great deal.
+
+    Everything here is read off the stored record, so it describes the artifact as it was
+    actually built rather than as the code currently declares it.
+    """
+    from .paths import fields
+
+    rec = iv.state.record_of(rel)
+    if rec is None and fields(rel):
+        # A partitioned FEED: one template, many files, a record each. Summarised, because
+        # "current" over a 21-season feed is a different claim from "current" over one
+        # file and the path alone does not say which.
+        inst = iv.state.instances_of(rel)
+        stamped = [r for r in (iv.state.record_of(i) for i in inst) if r]
+        out = [f"{len(inst)} file" + ("s" if len(inst) != 1 else "")]
+        if len(stamped) < len(inst):
+            out.append(f"{len(inst) - len(stamped)} unstamped")
+        out += sorted({r.get("policy", "tracked") for r in stamped} - {"tracked"})
+        if ages := [r["at"] for r in stamped if r.get("at")]:
+            out.append(_ago(max(ages)))
+        return " · ".join(out)
+    if rec is None:
+        return ""
+    bits = []
+    if rec.get("parts"):
+        bits.append(f"{len(rec['parts'])} parts")
+    policy = rec.get("policy", "tracked")
+    if policy != "tracked":
+        bits.append(policy)
+    if rec.get("version"):
+        bits.append(rec["version"])
+    ins = rec.get("in") or {}
+    if n := sum(1 for v in ins.values() if v.get("prior")):
+        bits.append(f"prior x{n}" if n > 1 else "prior")
+    if n := sum(1 for v in ins.values() if v.get("upto")):
+        bits.append(f"bounded x{n}" if n > 1 else "bounded")
+    if n := sum(1 for v in ins.values() if v.get("slice")):
+        bits.append(f"sliced x{n}" if n > 1 else "sliced")
+    if rec.get("terminal"):
+        bits.append("terminal")
+    if at := rec.get("at"):
+        bits.append(_ago(at))
+    return " · ".join(bits)
+
+
+def _ago(at: str) -> str:
+    """How long since it was built — the first thing you look for after a run."""
+    import datetime as _dt
+
+    try:
+        sec = (_dt.datetime.now(_dt.timezone.utc)
+               - _dt.datetime.fromisoformat(at)).total_seconds()
+    except ValueError:
+        return ""
+    if sec < 90:
+        return "just now"
+    if sec < 5400:
+        return f"{int(sec // 60)}m ago"
+    if sec < 86400:
+        return f"{int(sec // 3600)}h ago"
+    return f"{int(sec // 86400)}d ago"
+
+
 @app.command()
 def status(
     fingerprint: bool = typer.Option(
@@ -286,13 +355,18 @@ def status(
     for path in g.produced:
         reason = iv.why_stale(path, fingerprint=fingerprint)
         stale += reason is not None
-        rows.append((path, reason))
-    for path, reason in sorted(rows):
-        if reason is None:
-            typer.secho(f"  current  {path}", fg=typer.colors.GREEN)
+        rows.append((path, reason, _facts(iv, path)))
+    width = max((len(p) for p, _, f in rows if f), default=0)
+    for path, reason, facts in sorted(rows):
+        label, colour = (("current", typer.colors.GREEN) if reason is None
+                         else ("stale  ", typer.colors.YELLOW))
+        if facts:
+            typer.secho(f"  {label}  {path.ljust(width)}", fg=colour, nl=False)
+            typer.secho(f"  {facts}", fg=typer.colors.BRIGHT_BLACK)
         else:
-            typer.secho(f"  stale    {path}\n             {reason}",
-                        fg=typer.colors.YELLOW)
+            typer.secho(f"  {label}  {path}", fg=colour)
+        if reason is not None:
+            typer.secho(f"             {reason}", fg=typer.colors.YELLOW)
     typer.echo(f"\n{len(rows) - stale}/{len(rows)} current")
     if not fingerprint:
         typer.secho("  (raw feeds not read — pass --fingerprint for the full answer)",
