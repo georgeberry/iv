@@ -627,3 +627,34 @@ def test_the_artifact_record_agrees_with_the_partition_keys(walk):
                      source_dirs=["stages"], project_root=walk)
     assert iv.why_stale("processed/cohorts.parquet") is None, \
         iv.why_stale("processed/cohorts.parquet")
+
+
+def test_status_flagging_what_plan_does_not_is_refused(walk):
+    """`iv status` must be a SUBSET of `plan`, and the relation is one-directional.
+
+    `plan` reads the artifact, sees which partitions exist and fingerprints the roots;
+    `status` takes roots on trust and answers from records alone. Plan strictly dominates.
+    So plan flagging more than status is fine and expected; status flagging what plan does
+    not is a bug, always — the pipeline runs to completion and still reports stale, and no
+    further run fixes it.
+
+    Simulated by corrupting the artifact record the way a formula drift would: the stored
+    input id no longer matches, while every partition key still does.
+    """
+    import json
+
+    _features(walk, {"season": ["2023", "2024", "2025"], "x": [1, 2, 3]})
+    run(walk, "stages/totals.py")
+
+    state = walk / "data" / ".iv" / "state"
+    rec = next(f for f in state.glob("*.json")
+               if json.loads(f.read_text())["rel"] == "processed/cohorts.parquet")
+    body = json.loads(rec.read_text())
+    # The ARTIFACT id is what `why_stale` compares against; the per-input ids are
+    # recomputed. Moving it is how a formula drift shows up: the record now claims a
+    # different world from the one the partition keys were computed in.
+    body["id"] = "deadbeefdeadbeef"
+    rec.write_text(json.dumps(body))
+
+    out = run(walk, "stages/totals.py", check=False)
+    assert "two answers" in out or "record says" in out, out

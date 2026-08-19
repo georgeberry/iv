@@ -252,7 +252,32 @@ class PartitionCache:
         have = {str(v) for v in df[self.key].unique().to_list()}
         self._warm([p for p in want if p in have])
         reuse = [p for p in want if p in have and stamps.get(p) == self._key(p)]
-        return reuse, [p for p in want if p not in set(reuse)]
+        rebuild = [p for p in want if p not in set(reuse)]
+
+        # `iv status` MUST BE A SUBSET OF `plan`. The relation is one-directional and it
+        # follows from what each one knows: `plan` reads the artifact, sees which
+        # partitions exist, and fingerprints the roots; `status` takes roots on trust and
+        # answers from records alone. So plan strictly dominates — everything status can
+        # flag, plan can flag, and plan can flag more besides.
+        #
+        # The reverse is a bug, always. If status says stale where plan says current, the
+        # pipeline can run to completion and still report stale, and no further run fixes
+        # it: the stage keeps finding nothing to do while the record keeps describing an
+        # older world. ONE RUN, THEN CURRENT — that is the property, and this is what
+        # holds it.
+        #
+        # Raised HERE, in the stage that owns the artifact, rather than surfacing at the
+        # end of a refresh as a status line nobody can act on.
+        if not rebuild and want:
+            reason = self.iv.state.why_stale(self.artifact, fingerprint=False)
+            if reason is not None:
+                raise InvalidatorError(
+                    f"{self.artifact}: every partition is current, but the artifact's own "
+                    f"record says {reason!r}.\n"
+                    f"  These are two answers to one question and they have drifted. "
+                    f"Either the partition key is missing something the record folds in, "
+                    f"or the record was written under a rule the key does not share.")
+        return reuse, rebuild
 
     @contextmanager
     def building(self, partition: str):
