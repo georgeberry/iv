@@ -306,3 +306,34 @@ def test_an_input_that_became_declared_says_so(project, iv):
     why = iv.why_stale("processed/out.parquet")
     assert why is not None and "became declared" in why, why
     assert "unchanged" in why
+
+
+def test_a_clock_artifact_does_not_answer_to_the_global_version(project):
+    """A fetched feed is not a function of the code that consumes it.
+
+    Folding the global version into a `clock` artifact reported every raw file as behind
+    after every bump, permanently: the fetcher is conditional and correctly will not
+    re-download bytes that have not changed, so nothing ever cleared it. wvorp's
+    `raw/pbp/pbp_2026.parquet` sat at `v=wnba-w-v3.124` while the code said v3.126, with
+    no action available that would fix it. A staleness no action can resolve is the one
+    kind that must not exist.
+    """
+    import polars as pl
+    from iv import Invalidator
+
+    def make(version):
+        return Invalidator(data_root=project / "data", data_version=version,
+                           source_dirs=["stages"], project_root=project)
+
+    iv = make("v1")
+    with iv.writes("raw/feed.parquet", why="one day of the feed", policy="clock") as p:
+        pl.DataFrame({"x": [1]}).write_parquet(p)
+    assert iv.why_stale("raw/feed.parquet") is None
+
+    # The consuming pipeline's version moves. The bytes upstream sent did not.
+    assert make("v2").why_stale("raw/feed.parquet") is None
+
+    # A TRACKED artifact still answers to it — that is what the version is for.
+    with iv.writes("processed/derived.parquet", why="something we compute") as p:
+        pl.DataFrame({"x": [1]}).write_parquet(p)
+    assert make("v2").why_stale("processed/derived.parquet") is not None

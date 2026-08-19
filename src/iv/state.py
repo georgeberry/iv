@@ -142,8 +142,17 @@ class State:
         artifacts that NAME it move when it changes, which is the whole point: a model
         bump should not rebuild a feature pipeline that took four minutes and cannot have
         been affected.
+
+        A `clock` artifact does NOT carry the global version, and that is the same
+        argument one step further. `clock` means the date is the input — a fetched feed,
+        an append-only history. Bumping the version of the code that CONSUMES a feed
+        cannot change what the upstream sent, so folding it in reports every raw file as
+        behind after every bump, permanently: the fetcher is conditional and correctly
+        will not re-download bytes that have not changed, so nothing ever clears it. That
+        is a staleness no action can resolve, which is the one kind that must not exist.
         """
-        term = f"v={self.iv.data_version}|policy={policy}"
+        term = (f"policy={policy}" if policy == "clock"
+                else f"v={self.iv.data_version}|policy={policy}")
         if version:
             term += f"|version={version}"
         if code:
