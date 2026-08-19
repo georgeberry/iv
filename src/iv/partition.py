@@ -48,7 +48,6 @@ class PartitionCache:
 
     def __init__(self, iv, output: str, key: str, *, why: str,
                  fp: str = "data", policy: str = "tracked", extra: str = "",
-                 scoped: dict[str, str] | None = None,
                  part: dict[str, str] | None = None) -> None:
         self.iv = iv
         # TWO names for one artifact, and both are needed. The TEMPLATE is the literal in
@@ -72,17 +71,42 @@ class PartitionCache:
         # flat panel and a nested one, and a caller that named no league reads the flat one.
         self._global = self._applicable({t: h for t, h in self._inputs.items()
                                          if key not in _template_fields(t)})
-        # {input rel: the column that periods it}. A whole-file input that is ITSELF
-        # period-partitioned. Partition T then depends on that input's rows at or before
-        # its bound, not on the whole file — which is what stops tonight's games moving
-        # work that was fit on completed periods, without losing the ability to notice a
-        # correction to an old one.
-        self.scoped = dict(scoped or {})
+        # NO OPT-IN. A whole-file input that CARRIES THE PARTITION COLUMN is itself
+        # periodised, and partition T therefore depends on its rows at or before T's
+        # bound — never on the whole file. Detected, not declared, because a rule you have
+        # to remember to switch on is a rule that is off somewhere.
+        self._scoped: dict[str, str] | None = None
+        self._entered: set[str] = set()
         self._existing = _MISSING
         self._plan_extra: dict[str, str] = {}
         self._fp_of: dict[str, str] = {}
         self._upto: dict[str, str] = {}
         self._building: str | None = None
+
+    def scoped(self) -> dict[str, str]:
+        """`{input rel: the column that periods it}` — detected, never declared.
+
+        A whole-file input that carries this artifact's partition column holds many
+        periods, so a partition may only depend on the part of it at or before its bound.
+        Memoised per cache: it costs one look at each input's schema.
+        """
+        if self._scoped is None:
+            from . import fingerprint as _f
+            found = {}
+            for t in self._global:
+                rel = self._fill(t)
+                p = self.iv.resolve(rel)
+                with self.iv.bookkeeping():
+                    if not p.exists():
+                        continue
+                    try:
+                        cols = _f.read_frame(p).columns
+                    except Exception:            # noqa: BLE001 — not tabular; not periodised
+                        continue
+                if self.key in cols:
+                    found[rel] = self.key
+            self._scoped = found
+        return self._scoped
 
     def _applicable(self, per: dict[str, str]) -> dict[str, str]:
         """Which per-partition templates this partition actually reads.
@@ -140,7 +164,7 @@ class PartitionCache:
         plain, ids = {}, {}
         for t, how in self._global.items():
             rel = self._fill(t)
-            col = self.scoped.get(rel)
+            col = self.scoped().get(rel)
             bound = self._upto.get(partition)
             if col is not None and bound is not None:
                 ids[rel] = self.iv.state.upto_id(rel, col, bound)
@@ -209,7 +233,7 @@ class PartitionCache:
         # {partition: the newest period it is allowed to see}. Declared here rather than
         # inferred, because "<= T" and "< T" are both real and only the stage knows which.
         self._upto = {str(k): str(v) for k, v in (upto or {}).items()}
-        if self.scoped and not self._upto:
+        if self.scoped() and not self._upto:
             raise InvalidatorError(
                 f"{self.template} declares scoped inputs {sorted(self.scoped)} but plan() "
                 f"was given no `upto=`. A scoped input needs a bound per partition — "
@@ -246,13 +270,14 @@ class PartitionCache:
         row reaching back six years, inside the block the docs certified as safe. Under
         this scope the live rows are not there to be counted.
         """
+        self._entered.add(str(partition))
         bound = self._upto.get(str(partition))
-        if bound is None and self.scoped:
+        if bound is None and self.scoped():
             raise InvalidatorError(
                 f"{self.template}: building partition {partition!r} with no bound. "
                 f"`plan(upto=...)` must name one for every partition it returns.")
         outer = self.iv._period_bound
-        self.iv._period_bound = {rel: (col, bound) for rel, col in self.scoped.items()}
+        self.iv._period_bound = {rel: (col, bound) for rel, col in self.scoped().items()}
         try:
             yield bound
         finally:
@@ -283,6 +308,13 @@ class PartitionCache:
         # object it goes through __fspath__, writes cloudpathlib's LOCAL CACHE, and never
         # uploads — exit 0, nothing in the bucket.
         out.write_parquet(str(p))
+        missed = sorted(set(map(str, built)) - self._entered)
+        if missed and self.scoped():
+            raise InvalidatorError(
+                f"{self.template}: partition(s) {missed} were built without "
+                f"`with cache.building(p):`. That scope is what bounds their reads to the "
+                f"past — outside it a build can see periods it must not, which is the bug "
+                f"this exists to make impossible.")
         keys = sorted(set(built) | set(reuse))
         self._warm(keys)
         parts = {part: self._key(part) for part in keys}

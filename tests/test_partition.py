@@ -429,8 +429,7 @@ WALK = '''
     EXTRA = {c: os.environ.get("SRC_" + c, "v0") for c in COHORTS}
 
     cache = iv.partitions("processed/cohorts.parquet", "season",
-                          why="one row per cohort",
-                          scoped={"processed/features.parquet": "season"})
+                          why="one row per cohort")
     reuse, rebuild = cache.plan(COHORTS, extra=EXTRA, upto=PREV)
     cache.report(reuse, rebuild)
 
@@ -592,3 +591,14 @@ def test_a_stage_building_a_period_cannot_see_the_future(walk):
     assert dict(zip(got["season"], got["n"])) == {"2024": 1, "2025": 2, "2026": 3}, got
     assert dict(zip(got["season"], got["bound"])) == {
         "2024": "2023", "2025": "2024", "2026": "2025"}, got
+
+
+def test_building_a_partition_outside_the_scope_is_refused(walk):
+    """No opt-in. A partition built outside `building()` had unbounded reads, so its output
+    is not trustworthy and `commit` refuses it rather than stamping a lie."""
+    _features(walk, {"season": ["2023", "2024", "2025"], "x": [1, 2, 3]})
+    (walk / "stages" / "totals.py").write_text(
+        (walk / "stages" / "totals.py").read_text()
+        .replace("with cache.building(c) as bound:", "if (bound := None) is None:"))
+    out = run(walk, "stages/totals.py", check=False)
+    assert "were built without" in out, out
