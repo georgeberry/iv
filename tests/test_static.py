@@ -697,3 +697,53 @@ def test_unrelated_reads_are_not_grouped(iv, project):
     ''')
     sites = static.scan(iv)["stages/stage.py"].inputs()
     assert {s.branch for s in sites} == {""}
+
+
+def test_a_bare_sibling_import_resolves(iv, project):
+    """A stage that puts its own directory on sys.path imports a sibling by BARE name.
+
+    `build_possessions_official` does `import build_possessions_with_lineups`, and the
+    index keys that file as `scripts.build_possessions_with_lineups` — so the bare name
+    missed and every declaration behind it was attributed to nobody. Three panels and
+    `eval_prospective_team.parquet` were reported as UNDECLARED READS because of it.
+    """
+    write_stage(project, "stages/sibling.py", '''
+        from mypipe import iv
+
+        def build(seasons):
+            return iv.reads("processed/panel.parquet", why="the parsed panel")
+    ''')
+    write_stage(project, "stages/stage.py", '''
+        from mypipe import iv
+        import sibling
+
+        @iv.step("out.parquet", why="the output")
+        def build(out):
+            sibling.build(["2026"])
+    ''')
+    assert "processed/panel.parquet" in {
+        s.path for s in static.sites_of_entry(iv, "stages/stage.py")}
+
+
+def test_an_ambiguous_bare_import_is_not_guessed(iv, project):
+    """Two source dirs can hold the same filename, and a bare import does not say which.
+    Guessing would attribute reads to a stage that never makes them."""
+    for d in ("stages", "other"):
+        write_stage(project, f"{d}/dup.py", '''
+            from mypipe import iv
+
+            def build():
+                return iv.reads("processed/x.parquet", why="a thing")
+        ''')
+    write_stage(project, "stages/consumer.py", '''
+        from mypipe import iv
+        import dup
+
+        @iv.step("out.parquet", why="the output")
+        def build(out):
+            dup.build()
+    ''')
+    iv.source_dirs = ("stages", "other")
+    static.reset()
+    assert "processed/x.parquet" not in {
+        s.path for s in static.sites_of_entry(iv, "stages/consumer.py")}

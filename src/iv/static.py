@@ -356,6 +356,15 @@ class _Visitor(ast.NodeVisitor):
                 self.imports[a.asname or a.name] = (mod, a.name)
         self.generic_visit(node)
 
+    @staticmethod
+    def _is_main_guard(test: ast.AST) -> bool:
+        """`if __name__ == "__main__":` — the block that does NOT run on import."""
+        return (isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Name) and test.left.id == "__name__"
+                and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == "__main__")
+
     def visit_If(self, node: ast.If) -> None:
         """Declarations in sibling arms of one `if` are ALTERNATIVES, not a set.
 
@@ -371,11 +380,23 @@ class _Visitor(ast.NodeVisitor):
         is what it is.
         """
         self.visit(node.test)
+        guard = self._is_main_guard(node.test)
         spans = []
         for arm in (node.body, node.orelse):
             start = len(self.sites)
+            # Calls under `if __name__ == "__main__":` are recorded under their own owner.
+            # They run when the file is the ENTRY POINT and not when it is imported, and
+            # collapsing that into module scope made importing a module attribute its
+            # whole pipeline to you: `predict_upcoming_games` imports one function from
+            # `build_preseason` and was reported as a second WRITER of
+            # `preseason_player.parquet`, because module scope called `main` which called
+            # the step.
+            outer_owner = self._owner
+            if guard and arm is node.body:
+                self._owner = "__main__"
             for stmt in arm:
                 self.visit(stmt)
+            self._owner = outer_owner
             spans.append(range(start, len(self.sites)))
         if all(len(sp) for sp in spans):        # only a real fork declares in both arms
             gid = f"{self.rel_file}:{node.lineno}"
@@ -702,11 +723,29 @@ def _reach(iv, start_node: str, start_fn: str) -> set[tuple[str, str]]:
     """
     stages = scan(iv)
     by_module = {st.module: st for st in stages.values() if st.module}
+    # A stage that puts its OWN directory on sys.path imports a sibling by BARE name:
+    # `scripts/build_possessions_official.py` does `import build_possessions_with_lineups`,
+    # and `predict_upcoming_games` does `from build_preseason import margin_calibration`.
+    # The index keys those files as `scripts.build_possessions_with_lineups`, so the bare
+    # name missed and every declaration behind it was attributed to nobody — three panels
+    # and `eval_prospective_team.parquet`, all reported as UNDECLARED READS.
+    #
+    # Only when the basename is UNAMBIGUOUS across the scanned tree. Two source dirs can
+    # hold the same filename, and then a bare import genuinely does not say which.
+    short: dict[str, list] = {}
+    for st in stages.values():
+        if st.module:
+            short.setdefault(st.module.rsplit(".", 1)[-1], []).append(st)
+    for base, hits in short.items():
+        if len(hits) == 1 and base not in by_module:
+            by_module[base] = hits[0]
 
     seen: set[tuple[str, str]] = set()
     # Module scope too: a module-level `SRC = iv.reads(...)` executes before any step and
     # feeds all of them, so it is every step's input and the scan has to say so.
-    stack = [(start_node, start_fn), (start_node, "")]
+    # `__main__` is seeded for the ENTRY POINT only. That is exactly Python's rule: the
+    # guarded block runs when this file is what you invoked, never when someone imports it.
+    stack = [(start_node, start_fn), (start_node, ""), (start_node, "__main__")]
     while stack:
         node, fn = stack.pop()
         if (node, fn) in seen or node not in stages:
