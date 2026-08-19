@@ -355,8 +355,40 @@ class State:
             self._roots[ckey] = _fp.compute(p, how)
             return self._roots[ckey]
 
+    def slice_id(self, rel: str, label: str) -> str:
+        """The identity of ONE SLICE of an artifact: a digest of the rows it selects.
+
+        An artifact can be two populations that different stages own. wvorp's
+        `game_predictions.parquet` is written for PLAYED games by `predict_games` and for
+        UPCOMING ones by `predict_upcoming_games`, and `build_preseason` reads only the
+        played half — it takes a calibration sigma off completed seasons and cannot see an
+        unplayed game.
+
+        `slice=` already stopped that being a graph EDGE. It did not stop being a
+        staleness trigger: the read recorded the whole-artifact id, so appending tomorrow's
+        fixtures moved it and `preseason_*` came out of every refresh stale against rows
+        that had not changed. A label that filters what you READ and not what you DEPEND
+        ON is only half a slice.
+
+        Computed through the SAME predicate `iv.frame` filters with, so the label cannot
+        drift from the measurement.
+        """
+        from . import fingerprint as _f
+        pred = self.iv.slices.get(label)
+        if pred is None:
+            raise StateError(
+                f"input {rel} was stamped under slice {label!r}, which this Invalidator "
+                f"does not define. Known: {sorted(self.iv.slices) or 'none'}. Add it to "
+                f"slices={{...}} or rebuild the artifact.")
+        p = self.iv.resolve(rel)
+        with self.iv.bookkeeping():
+            if not p.exists():
+                return _f.ABSENT
+            return "slice:" + _f.frame_digest(pred(_f.read_frame(p)))
+
     def input_ids(self, inputs: dict[str, object],
-                  assume_unchanged: dict[str, dict] | None = None) -> dict[str, str]:
+                  assume_unchanged: dict[str, dict] | None = None,
+                  slices: dict[str, str] | None = None) -> dict[str, str]:
         """`{rel: fp strategy}` -> `{rel: id}`. The strategy is only used for roots.
 
         `assume_unchanged` is the cheap mode: a ROOT's id is taken from the record rather
@@ -367,7 +399,11 @@ class State:
         A derived input is a record lookup either way, so nothing is given up there.
         """
         out = {}
+        sl = slices or {}
         for rel, how in inputs.items():
+            if rel in sl:
+                out[rel] = self.slice_id(rel, sl[rel])
+                continue
             if assume_unchanged is not None and self.record_of(rel) is None:
                 stored = (assume_unchanged.get(rel) or {}).get("id")
                 if stored is not None:
@@ -483,7 +519,8 @@ class State:
 
     def stamp(self, rel: str, *, spec: Spec, inputs: dict[str, object], by: str,
               fp_value: str | None = None, parts: dict[str, str] | None = None,
-              prior: set[str] | None = None) -> str:
+              prior: set[str] | None = None,
+              slices: dict[str, str] | None = None) -> str:
         """Fingerprint the artifact, fold everything into one id, write the record.
 
         Called only on a write that completed. A raise inside the write leaves no record,
@@ -524,10 +561,11 @@ class State:
                     f"a stamp means one thing only: THIS code produced THIS file.")
             value = fp_value if fp_value is not None else _fp.compute(p, spec.fp)
 
-        lagged = prior or set()
+        lagged, sl = prior or set(), slices or {}
         mine = {k: {"id": v, "fp": inputs[k] if isinstance(inputs[k], str) else "<callable>",
-                    **({"prior": True} if k in lagged else {})}
-                for k, v in self.input_ids(inputs).items()}
+                    **({"prior": True} if k in lagged else {}),
+                    **({"slice": sl[k]} if k in sl else {})}
+                for k, v in self.input_ids(inputs, slices=sl).items()}
         contrib = {**self._live_contributions(rel), by: mine}
         ids = {k: v["id"] for c in contrib.values() for k, v in c.items()
                if not v.get("prior")}
@@ -647,6 +685,8 @@ class State:
         # makes the artifact permanently stale one step behind itself. See `stamp`.
         wanted = {k: v.get("fp", "data") for k, v in stored_inputs.items()
                   if not v.get("prior")}
+        sliced = {k: v["slice"] for k, v in stored_inputs.items()
+                  if v.get("slice") and k in wanted}
 
         # THE RECORDED SET GOVERNS, NOT THE DECLARED ONE.
         #
@@ -673,7 +713,8 @@ class State:
         # The cost is that ADDING a read does not by itself invalidate. That is what
         # `data_version`, `version=` and `step(code=True)` are for — and it is the rule
         # this pipeline already lives by.
-        ids_now = self.input_ids(wanted, None if fingerprint else stored_inputs)
+        ids_now = self.input_ids(wanted, None if fingerprint else stored_inputs,
+                                 slices=sliced)
         stored_meta = entry.get("meta", "")
         code_now = _part_of(stored_meta, "code") if code is None else code
         version_now = _part_of(stored_meta, "version") if version is None else version

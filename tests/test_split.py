@@ -208,3 +208,40 @@ def test_a_partitioned_artifact_reuses_what_THIS_run_built(project):
     assert (scratch / "processed" / "t.parquet").exists()
     assert pl.read_parquet(shared / "processed" / "t.parquet").height == 1, \
         "the shared tree is untouched"
+
+
+def test_a_sliced_read_depends_on_its_slice_not_the_file(project):
+    """An artifact can be two populations, and a reader of one must not move for the other.
+
+    wvorp's `game_predictions.parquet` is written for PLAYED games by `predict_games` and
+    for UPCOMING ones by `predict_upcoming_games`; `build_preseason` reads only the played
+    half. `slice=` already stopped that being a graph EDGE — it did not stop being a
+    staleness trigger, so appending tomorrow's fixtures moved the whole-artifact id and
+    `preseason_*` came out of every refresh stale against rows that had not changed.
+    """
+    import polars as pl
+    from iv import Invalidator
+
+    iv = Invalidator(
+        data_root=project / "data", data_version="v1", source_dirs=["stages"],
+        project_root=project,
+        slices={"played": lambda df: df.filter(pl.col("done")),
+                "upcoming": lambda df: df.filter(~pl.col("done"))})
+
+    games = project / "data" / "processed" / "games.parquet"
+    games.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"g": [1, 2], "done": [True, True]}).write_parquet(games)
+
+    with iv.writes("processed/sigma.parquet", why="the calibration sigma") as p:
+        iv.frame("processed/games.parquet", why="completed games only", slice="played")
+        pl.DataFrame({"s": [1.0]}).write_parquet(p)
+    assert iv.why_stale("processed/sigma.parquet") is None
+
+    # Tomorrow's fixtures land. The played rows are untouched, so sigma must not move.
+    pl.DataFrame({"g": [1, 2, 3], "done": [True, True, False]}).write_parquet(games)
+    assert iv.why_stale("processed/sigma.parquet") is None, "an upcoming game moved it"
+
+    # A PLAYED row changing is a real change and must be caught.
+    pl.DataFrame({"g": [1, 9, 3], "done": [True, True, False]}).write_parquet(games)
+    reason = iv.why_stale("processed/sigma.parquet")
+    assert reason is not None and "games.parquet" in reason, reason
