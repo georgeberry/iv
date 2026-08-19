@@ -258,7 +258,7 @@ def _check_part_keys(node: ast.AST, path: str, where: str, *,
 def function_digest(node: ast.AST) -> str:
     """A hash of what a function DOES, insensitive to how it is spelled.
 
-    MUST match `invalidator.core.source_digest`, which computes the same thing from a live
+    MUST match `iv.core.source_digest`, which computes the same thing from a live
     function object — the decorator and `iv status` have to agree or one of them
     is lying. `ast.unparse` normalises whitespace, comments and formatting away, and the
     decorators are stripped, so reformatting or editing a `why=` does not invalidate data
@@ -601,14 +601,15 @@ def undefined_names(iv) -> list[str]:
     behind by a refactor imports perfectly and raises an hour into a refresh. That is the
     same shape of failure this package exists to move earlier.
 
-    Silent when pyflakes is not installed, because a check that cannot run should not
-    fail a pipeline. `pip install 'iv[lint]'`.
+    Returns None — not [] — when pyflakes is absent, because "nothing wrong" and "I did
+    not look" are different answers and a caller that cannot tell them apart will print
+    the first one. `pip install 'iv[lint]'`.
     """
     try:
         from pyflakes.api import check as _check
         from pyflakes.reporter import Reporter
     except ImportError:
-        return []
+        return None
     import io
 
     out, err = io.StringIO(), io.StringIO()

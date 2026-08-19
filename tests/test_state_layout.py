@@ -14,9 +14,9 @@ import shutil
 import polars as pl
 import pytest
 
-from invalidator import Invalidator
-from invalidator.errors import StateError
-from invalidator.state import STATE_VERSION, read_records, record_filename
+from iv import Invalidator
+from iv.errors import StateError
+from iv.state import STATE_VERSION, read_records, record_filename
 
 FRAME = pl.DataFrame({"a": [1, 2, 3]})
 
@@ -94,7 +94,7 @@ def test_a_legacy_state_json_migrates_and_the_stamps_still_count(iv, project):
     assert fresh.is_current(rel), "a migrated stamp has to mean what it meant before"
     assert set(read_records(fresh.state.dir)) == set(records)
     assert not fresh.state.legacy_path.exists(), "the migrated file is moved aside"
-    assert (project / "data" / ".invalidator" / "state.json.migrated").exists()
+    assert (project / "data" / ".iv" / "state.json.migrated").exists()
 
 
 def test_migration_does_not_run_once_the_directory_is_there(iv, project):
@@ -123,3 +123,52 @@ def test_a_state_path_naming_the_old_file_still_works(project, tmp_path):
     assert iv.state.dir == tmp_path / "somewhere" / "shadow"
     assert iv.state.legacy_path == elsewhere
     assert set(read_records(iv.state.dir)) == {rel}
+
+
+def test_the_rename_moves_the_stamps_rather_than_rebuilding(project):
+    """`invalidator` -> `iv` renamed the state directory too. Copy, do not rebuild.
+
+    For wvorp that directory is the difference between a no-op refresh and re-running the
+    287-second xPM fit and everything below it — for a package name.
+    """
+    import json
+
+    import polars as pl
+    from iv import Invalidator
+
+    old = project / "data" / ".invalidator" / "state"
+    old.mkdir(parents=True)
+    (old / "processed_thing.parquet.json").write_text(json.dumps(
+        {"state_version": 3, "rel": "processed/thing.parquet", "id": "abc", "in": {}}))
+
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project)
+    rec = iv.record_of("processed/thing.parquet")
+    assert rec is not None and rec["id"] == "abc", "the stamp survived the rename"
+    assert (project / "data" / ".iv" / "state").exists()
+    # A MOVE, not a copy. Two directories both called `state`, both holding stamps, one
+    # of them dead, is the exact hazard this package exists to prevent.
+    assert not (project / "data" / ".invalidator").exists()
+
+
+def test_a_half_finished_move_completes(project):
+    """It may find the destination already populated — finish the move anyway."""
+    import json
+
+    from iv import Invalidator
+
+    old = project / "data" / ".invalidator" / "state"
+    new = project / "data" / ".iv" / "state"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    rec = {"state_version": 3, "rel": "processed/thing.parquet", "id": "new", "in": {}}
+    (new / "processed_thing.parquet.json").write_text(json.dumps(rec))
+    (old / "processed_thing.parquet.json").write_text(json.dumps({**rec, "id": "old"}))
+    (old / "processed_other.parquet.json").write_text(json.dumps(
+        {"state_version": 3, "rel": "processed/other.parquet", "id": "o", "in": {}}))
+
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project)
+    assert iv.record_of("processed/thing.parquet")["id"] == "new", "destination wins"
+    assert iv.record_of("processed/other.parquet")["id"] == "o", "the rest came across"
+    assert not (project / "data" / ".invalidator").exists()

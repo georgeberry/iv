@@ -8,7 +8,7 @@ and `plan` read the STATE FILE — they need a run to have happened but not the 
 The CLI has to find your `Invalidator`, since that is where the configuration lives. One
 line in pyproject.toml says where:
 
-    [tool.invalidator]
+    [tool.iv]
     instance = "mypkg.pipeline:iv"
 
 or pass it per-invocation with `-i mypkg.pipeline:iv`. Nothing else is read from TOML —
@@ -29,7 +29,7 @@ from . import graph as _graph
 from . import record as _rec
 from . import render as _render
 from . import static as _static
-from .errors import ConfigError, DagioError
+from .errors import ConfigError, InvalidatorError
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="Cache invalidation and lineage declared at the call sites.")
@@ -59,15 +59,15 @@ def _find_root(start: Path) -> Path | None:
 
 def _load_instance():
     """Import the project's Invalidator. The one piece of discovery in the package."""
-    target = _INSTANCE or os.environ.get("INVALIDATOR_INSTANCE")
+    target = _INSTANCE or os.environ.get("IV_INSTANCE")
     root = _find_root(Path.cwd().resolve())
     if not target and root:
         raw = tomllib.loads((root / "pyproject.toml").read_text())
-        target = raw.get("tool", {}).get("invalidator", {}).get("instance")
+        target = raw.get("tool", {}).get("iv", {}).get("instance")
     if not target:
         raise ConfigError(
             "no Invalidator to load. Add\n\n"
-            "    [tool.invalidator]\n"
+            "    [tool.iv]\n"
             '    instance = "mypkg.pipeline:iv"\n\n'
             "to pyproject.toml, or pass -i mypkg.pipeline:iv")
     if ":" not in target:
@@ -122,7 +122,7 @@ def graph(
                     for p in g.producers_of(s.path):
                         edge_art.setdefault(f"{p}->{node}", []).append(s.path)
         typer.echo(_render.render(order, parents, edge_art))
-    except (DagioError, KeyError) as e:
+    except (InvalidatorError, KeyError) as e:
         _die(e)
 
 
@@ -133,10 +133,10 @@ def stage(name: str) -> None:
         _, g = _graph_of()
         hits = [n for n in sorted(g.stages) if name in n]
         if not hits:
-            _die(DagioError(f"no stage matching {name!r}. Known: {sorted(g.stages)}"))
+            _die(InvalidatorError(f"no stage matching {name!r}. Known: {sorted(g.stages)}"))
         for n in hits:
             typer.echo(_render.stage_card(n, g))
-    except DagioError as e:
+    except InvalidatorError as e:
         _die(e)
 
 
@@ -152,18 +152,26 @@ def preflight() -> None:
     try:
         iv, g = _graph_of()
         _graph.require_acyclic(g)
-    except DagioError as e:
+    except InvalidatorError as e:
         _die(e)
-    bad = _static.undefined_names(iv) + _static.missing_imports(iv)
+    names = _static.undefined_names(iv)
+    bad = (names or []) + _static.missing_imports(iv)
     if bad:
         for line in bad:
             typer.secho(f"  {line}", fg=typer.colors.RED)
-        _die(DagioError(
+        _die(InvalidatorError(
             f"{len(bad)} name(s) or module(s) a stage uses and cannot reach. Each is an "
             f"error waiting for the stage that gets there — a refactor that renamed a "
             f"parameter and left a use behind, or an import of something retired."))
-    typer.secho("  ok — no cycle, no unreachable name or module; the order is defined",
-                fg=typer.colors.GREEN)
+    if names is None:
+        # Not an error, but not silence either: the green line below would otherwise
+        # claim a check that never ran. `undefined_names` is the one that found seven
+        # real breakages the day it was added.
+        typer.secho("  note — pyflakes is not installed, so undefined names were NOT "
+                    "checked. `uv pip install pyflakes`.", fg=typer.colors.YELLOW)
+    typer.secho("  ok — no cycle, no unreachable module"
+                + ("" if names is None else ", no unreachable name")
+                + "; the order is defined", fg=typer.colors.GREEN)
 
 
 @app.command()
@@ -179,7 +187,7 @@ def check(
             de, dw = _graph.drift(g, _rec.load(path))
             errors += de
             warns += dw
-    except DagioError as e:
+    except InvalidatorError as e:
         _die(e)
 
     for w in warns:
@@ -211,24 +219,24 @@ def drift(
         iv, g = _graph_of()
         path = trace or iv.trace_path
         if path is None:
-            _die(DagioError(
+            _die(InvalidatorError(
                 "no trace. Construct your Invalidator with trace=..., set "
-                "$INVALIDATOR_TRACE, or pass --trace."))
+                "$IV_TRACE, or pass --trace."))
         events = _rec.load(path)
         if not events:
-            _die(DagioError(
+            _die(InvalidatorError(
                 f"{path} is empty — nothing recorded this run, so there is nothing to "
                 f"compare. The usual cause is the pipeline exporting a different "
-                f"variable from the one `iv` reads ($INVALIDATOR_TRACE)."))
+                f"variable from the one `iv` reads ($IV_TRACE)."))
         age = _rec.age_of(events)
         if age is not None and age > _STALE_TRACE_S:
-            _die(DagioError(
+            _die(InvalidatorError(
                 f"{path} was last written {age / 3600:.1f}h ago, which is almost "
                 f"certainly not this run. A trace that outlives the code reports reads "
                 f"from stages that no longer exist — every line would be fiction, and "
                 f"confidently so. Re-run the pipeline, or pass a fresher --trace."))
         errors, warns = _graph.drift(g, events)
-    except DagioError as e:
+    except InvalidatorError as e:
         _die(e)
     for w in warns:
         typer.secho(f"warn   {w}", fg=typer.colors.YELLOW)
@@ -245,7 +253,7 @@ def export(out: Path = typer.Option(None, help="write here instead of stdout")) 
     try:
         _, g = _graph_of()
         body = json.dumps(_graph.export(g), indent=2, sort_keys=True)
-    except DagioError as e:
+    except InvalidatorError as e:
         _die(e)
     if out:
         out.write_text(body)
@@ -271,7 +279,7 @@ def status(
     """
     try:
         iv, g = _graph_of()
-    except DagioError as e:
+    except InvalidatorError as e:
         _die(e)
     typer.secho(f"  {iv!r}\n", fg=typer.colors.BRIGHT_BLACK)
     rows, stale = [], 0
@@ -303,7 +311,7 @@ def why(
     try:
         iv = _load_instance()
         reason = iv.why_stale(artifact, fingerprint=fingerprint)
-    except DagioError as e:
+    except InvalidatorError as e:
         _die(e)
     entry = iv.record_of(artifact)
     if entry:
@@ -333,7 +341,7 @@ def plan(
     """
     try:
         iv, g = _graph_of()
-    except DagioError as e:
+    except InvalidatorError as e:
         _die(e)
     definite = {p for p in g.produced
                 if iv.why_stale(p, fingerprint=fingerprint) is not None}
@@ -362,12 +370,12 @@ def viz(out: Path = typer.Option(Path("dag.png"), help="where to write the image
     try:
         from .viz import draw
     except ImportError:
-        _die(DagioError("viz needs networkx and matplotlib: pip install 'iv[viz]'"))
+        _die(InvalidatorError("viz needs networkx and matplotlib: pip install 'iv[viz]'"))
     try:
         _, g = _graph_of()
         _graph.require_acyclic(g)
         draw(g, out)
-    except DagioError as e:
+    except InvalidatorError as e:
         _die(e)
     typer.echo(f"wrote {out}")
 

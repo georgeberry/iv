@@ -12,7 +12,7 @@ import pytest
 SEASONS = ["2024", "2025", "2026"]
 
 PIPELINE = '''
-    from invalidator import Invalidator
+    from iv import Invalidator
 
     iv = Invalidator(
         data_root="data",
@@ -108,9 +108,9 @@ def run(project, stage: str, *, force: bool = False, check: bool = True, **env_e
            "PYTHONDONTWRITEBYTECODE": "1", **env_extra}
     env.pop("VIRTUAL_ENV", None)
     if force:
-        env["INVALIDATOR_FORCE"] = "1"
+        env["IV_FORCE"] = "1"
     else:
-        env.pop("INVALIDATOR_FORCE", None)
+        env.pop("IV_FORCE", None)
     r = subprocess.run([sys.executable, stage], cwd=project, env=env,
                        capture_output=True, text=True)
     if check:
@@ -162,8 +162,8 @@ def test_the_artifacts_own_id_still_works_downstream(parts):
     run(parts, "stages/totals.py")
     run(parts, "stages/summary.py")
 
-    from invalidator.state import read_records
-    st = read_records(parts / "data" / ".invalidator" / "state")
+    from iv.state import read_records
+    st = read_records(parts / "data" / ".iv" / "state")
     entry = st["processed/team_totals.parquet"]
     assert set(entry["in"]) == {"raw/box/{season}.parquet", "raw/league_rates.parquet"}
 
@@ -269,7 +269,7 @@ def test_the_collection_and_its_members_agree(fetched):
 
 def test_editing_a_written_artifact_behind_our_back_moves_nothing(fetched):
     """A file the pipeline writes is identified by its STAMP. Editing it without going
-    through invalidator leaves the stamp — and therefore the id — untouched, and the
+    through iv leaves the stamp — and therefore the id — untouched, and the
     collection agrees rather than reporting a phantom change."""
     run(fetched, "stages/fetch.py")
     run(fetched, "stages/totals.py")
@@ -390,8 +390,8 @@ def test_a_branch_this_partition_cannot_render_is_not_its_input(branched):
     out = run(branched, "stages/totals.py")
     assert "rebuild ( 2)" in out, out
 
-    from invalidator.state import read_records
-    st = read_records(branched / "data" / ".invalidator" / "state")
+    from iv.state import read_records
+    st = read_records(branched / "data" / ".iv" / "state")
     # FILLED where this cache knows the value, free where it does not: the dataset is
     # fixed, the season is the growing set.
     assert set(st["processed/panel/box.parquet"]["in"]) == {

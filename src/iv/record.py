@@ -1,10 +1,10 @@
 """What a run actually touched, appended as ndjson.
 
 The static scan says what the code declares. This says what it did. Off unless the
-`Invalidator` was given a `trace=` path (or `$INVALIDATOR_TRACE` names one); when off the
+`Invalidator` was given a `trace=` path (or `$IV_TRACE` names one); when off the
 cost is one attribute check per call.
 
-    INVALIDATOR_TRACE=.invalidator/trace.ndjson ./refresh.sh
+    IV_TRACE=.iv/trace.ndjson ./refresh.sh
     iv drift
 
 Three things about the file are load-bearing:
@@ -17,7 +17,7 @@ Three things about the file are load-bearing:
     the loader drops older events rather than merging them.
   * **One event is one line, and the file is SHARED across stages.** The stamps are
     per-artifact files precisely because a shared file is where parallel runs go wrong
-    (see `invalidator.state`), so this one is worth being explicit about rather than
+    (see `iv.state`), so this one is worth being explicit about rather than
     assuming. It stays shared: a trace is a union by construction, one greppable file is
     the point of it, and a file per process per run would accumulate forever.
 
@@ -75,7 +75,7 @@ def emit(iv, kind: str, **fields) -> None:
         global _WARNED
         if not _WARNED:
             _WARNED = True
-            print(f"  invalidator: trace disabled — {type(e).__name__}: {e}. "
+            print(f"  iv: trace disabled — {type(e).__name__}: {e}. "
                   f"The run continues; `iv drift` will have nothing to read.")
         iv.trace_path = None
 

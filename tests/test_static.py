@@ -4,10 +4,10 @@ from __future__ import annotations
 import pytest
 
 from conftest import write_stage
-from invalidator import Invalidator
-from invalidator import graph as G
-from invalidator import static
-from invalidator.errors import DeclError
+from iv import Invalidator
+from iv import graph as G
+from iv import static
+from iv.errors import DeclError
 
 GOOD = {
     "stages/build_stats.py": '''
@@ -303,7 +303,7 @@ def test_an_artifact_from_nothing_warns_about_provenance(project):
 
 
 def test_external_shows_up_in_the_stage_card(project):
-    from invalidator import render
+    from iv import render
     g = make(project, {"stages/a.py": '''
         from mypipe import iv
         iv.external("espn/scoreboard", why="pulled every morning")
@@ -338,7 +338,7 @@ def test_a_steps_inputs_are_its_own_not_the_files(project):
     exactly the reads inside it. The scan has to say the same thing — otherwise a second
     step in the same file contributes a phantom input and every check reports
     'input added' forever."""
-    from invalidator import static
+    from iv import static
     g = make(project, {"stages/two.py": '''
         from mypipe import iv
 
@@ -359,7 +359,7 @@ def test_a_steps_inputs_follow_its_helpers(project):
     """The first stage migrated in anger factored its one read into a helper shared by two
     steps. Attributed lexically, neither step owned any read and both were permanently
     stale — so a step's inputs follow same-file calls, transitively."""
-    from invalidator import static
+    from iv import static
     g = make(project, {"stages/two.py": '''
         from mypipe import iv
 
@@ -387,7 +387,7 @@ def test_a_steps_inputs_follow_its_helpers(project):
 def test_a_function_passed_by_name_is_reached(project):
     """`for_each(seasons, build_one, ...)` never calls build_one syntactically, but its
     reads are the artifact's inputs."""
-    from invalidator import static
+    from iv import static
     g = make(project, {"stages/p.py": '''
         from mypipe import iv
 
@@ -406,7 +406,7 @@ def test_a_steps_inputs_follow_calls_into_other_modules(project):
     """A real pipeline reads through its own library. wvorp's stages call
     `wvorp.data.load`, so a walk that stopped at the file boundary would report them as
     having no inputs and every artifact would be permanently stale."""
-    from invalidator import static
+    from iv import static
     g = make(project, {
         "stages/lib.py": '''
             from mypipe import iv
@@ -430,7 +430,7 @@ def test_a_steps_inputs_follow_calls_into_other_modules(project):
 def test_a_module_attribute_call_is_followed_too(project):
     """`from x import y` then `y.load(...)` records the ATTRIBUTE name, so the module
     itself has to be tried as a target as well as the bare name."""
-    from invalidator import static
+    from iv import static
     g = make(project, {
         "stages/lib.py": '''
             from mypipe import iv
@@ -453,7 +453,7 @@ def test_a_module_attribute_call_is_followed_too(project):
 
 def test_reads_inside_a_dependency_are_not_ours_to_declare(project):
     """Only modules inside the scanned source dirs are followed."""
-    from invalidator import static
+    from iv import static
     g = make(project, {"stages/use.py": '''
         from mypipe import iv
         import polars as pl
@@ -469,7 +469,7 @@ def test_a_computed_why_is_an_error_not_a_silent_skip(project, iv):
     """The call looks exactly like a declaration and the scan cannot read it, so the
     artifact quietly loses an input. Found the hard way, by a helper taking `why=why`."""
     from conftest import write_stage
-    from invalidator.errors import DeclError
+    from iv.errors import DeclError
     import pytest
 
     write_stage(project, "stages/roll.py", '''
@@ -483,10 +483,10 @@ def test_a_computed_why_is_an_error_not_a_silent_skip(project, iv):
             _declare("raw/box.parquet", "one raw feed")
     ''')
     (project / "pipeline.py").write_text(
-        'from invalidator import Invalidator\n'
+        'from iv import Invalidator\n'
         'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
 
-    from invalidator import static
+    from iv import static
     with pytest.raises(DeclError, match="not a string literal"):
         static.scan(iv)
 
@@ -495,7 +495,7 @@ def test_every_declaring_method_is_known_to_the_scan(iv):
     """A method that declares at RUNTIME but is missing from `METHODS` is invisible to
     the scan, and the artifact silently loses the input — the runtime record still looks
     right, which is what makes it hard to spot. `iv.frame` shipped that way for an hour."""
-    from invalidator import static
+    from iv import static
 
     declaring = {"reads", "frame", "collection", "writes", "updates", "external",
                  "step", "for_each", "partitions"}
@@ -509,7 +509,7 @@ def test_a_repeated_field_must_match_the_same_word():
     prefix are the same word. Two independent wildcards also matched
     `raw/predictions/rollforward_v2.parquet`, which drew an edge from that file's writer
     to every reader of a raw feed and made wvorp's whole graph one cycle."""
-    from invalidator.static import matches
+    from iv.static import matches
 
     t = "raw/{dataset}/{dataset}_{season}.parquet"
     assert matches(t, "raw/player_box/player_box_2026.parquet")
@@ -522,7 +522,7 @@ def test_viz_draws_a_temporal_loop_by_cutting_the_later_edge(project):
     cut edge named — refusing outright would make `iv viz` useless on a pipeline whose
     last stage amends a file an earlier one read."""
     import networkx as nx
-    from invalidator.viz import find_cycle
+    from iv.viz import find_cycle
 
     d = nx.DiGraph()
     d.add_edge("a", "b", stage="early.py")
@@ -542,7 +542,7 @@ def test_a_slice_says_an_artifact_is_not_one_population(project):
     in the declaration."""
     import polars as pl
     from conftest import write_stage
-    from invalidator import Invalidator, graph as _graph
+    from iv import Invalidator, graph as _graph
 
     (project / "data" / "raw").mkdir(parents=True)
     pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "seed.parquet")
@@ -588,7 +588,7 @@ def test_an_undefined_name_in_a_stage_is_caught_before_it_runs(project, iv):
     behind by a refactor imports perfectly and raises an hour in. Five of those reached
     a live refresh one at a time before this existed."""
     from conftest import write_stage
-    from invalidator import static
+    from iv import static
 
     write_stage(project, "stages/rot.py", '''
         from pipeline import iv
@@ -598,7 +598,7 @@ def test_an_undefined_name_in_a_stage_is_caught_before_it_runs(project, iv):
             return renamed_away        # a parameter that used to be called this
     ''')
     (project / "pipeline.py").write_text(
-        'from invalidator import Invalidator\n'
+        'from iv import Invalidator\n'
         'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
 
     bad = static.undefined_names(iv)
@@ -610,7 +610,7 @@ def test_an_import_of_a_retired_module_is_caught(project, iv):
     a function-local import defers the failure to whenever that line runs. One of these
     got seven stages into a refresh."""
     from conftest import write_stage
-    from invalidator import static
+    from iv import static
 
     write_stage(project, "stages/keeps.py", '''
         from pipeline import iv
@@ -621,7 +621,7 @@ def test_an_import_of_a_retired_module_is_caught(project, iv):
             record()
     ''')
     (project / "pipeline.py").write_text(
-        'from invalidator import Invalidator\n'
+        'from iv import Invalidator\n'
         'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
 
     bad = static.missing_imports(iv)

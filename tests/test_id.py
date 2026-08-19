@@ -11,7 +11,7 @@ import polars as pl
 import pytest
 
 from conftest import write_stage
-from invalidator import Invalidator
+from iv import Invalidator
 
 GAMES = pl.DataFrame({
     "game_id": [1, 2, 3],
@@ -136,7 +136,7 @@ def test_data_version_bump_rebuilds_everything(project, pipe, iv):
 def test_a_current_check_reads_no_derived_artifact_off_disk(pipe, monkeypatch, iv):
     """A derived input's id is a dict lookup. Only the roots are fingerprinted."""
     pipe()
-    from invalidator import fingerprint
+    from iv import fingerprint
     seen = []
     real = fingerprint.compute
     monkeypatch.setattr(fingerprint, "compute",
@@ -184,7 +184,7 @@ def test_force_overrides_the_guard(project, iv, pipe):
     assert pipe() == [True, True]
 
 
-def test_two_invalidators_are_independent(project, iv):
+def test_two_ivs_are_independent(project, iv):
     """No globals: a second pipeline over the same tree has its own state and version."""
     other = Invalidator(data_root=project / "data2", data_version="other-1",
                         source_dirs=["stages"], project_root=project)
@@ -194,7 +194,7 @@ def test_two_invalidators_are_independent(project, iv):
 
 
 def test_data_version_is_required():
-    from invalidator import ConfigError
+    from iv import ConfigError
     with pytest.raises(ConfigError, match="data_version is required"):
         Invalidator(data_root="/tmp/x", data_version="")
 
@@ -276,7 +276,7 @@ def test_an_input_that_became_declared_says_so(project, iv):
     from tests.test_partition import run
 
     (project / "pipeline.py").write_text(
-        'from invalidator import Invalidator\n'
+        'from iv import Invalidator\n'
         'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
     (project / "data" / "raw").mkdir(parents=True)
     pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "seed.parquet")

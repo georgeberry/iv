@@ -4,8 +4,8 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from invalidator import fingerprint as fp
-from invalidator.errors import FingerprintError
+from iv import fingerprint as fp
+from iv.errors import FingerprintError
 
 FRAME = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
 

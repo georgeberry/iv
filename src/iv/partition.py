@@ -32,7 +32,7 @@ from __future__ import annotations
 import hashlib
 
 from . import static as _static
-from .errors import DagioError
+from .errors import InvalidatorError
 from .fingerprint import DIGEST_LEN
 from .state import Spec
 from .paths import fields as _template_fields
@@ -61,7 +61,7 @@ class PartitionCache:
         self.extra = extra
         self._inputs = _static.inputs_for_artifact(iv, self.template)
         if self._inputs is None:
-            raise DagioError(
+            raise InvalidatorError(
                 f"{self.template} has no single declared producer, so its per-partition inputs "
                 f"cannot be read off the code. Run `iv check`.")
         self._per = self._applicable({t: h for t, h in self._inputs.items()
@@ -297,7 +297,7 @@ def for_each(iv, over, build_one, *, output: str, key: str, why: str,
     for part in rebuild:
         frame = build_one(part)
         if frame is None or frame.height == 0:
-            raise DagioError(
+            raise InvalidatorError(
                 f"{output}: build_one({part!r}) produced no rows. A partition that is "
                 f"genuinely empty has to say so explicitly — writing a partial artifact "
                 f"reads as real downstream.")
@@ -311,7 +311,7 @@ def for_each(iv, over, build_one, *, output: str, key: str, why: str,
     out = pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
     covered = {str(v) for v in out[key].unique().to_list()}
     if covered != set(want):
-        raise DagioError(
+        raise InvalidatorError(
             f"{output}: expected partitions {sorted(want)} but built {sorted(covered)}. "
             f"Refusing to write a partial artifact.")
     cache.commit(out, rebuild, reuse)

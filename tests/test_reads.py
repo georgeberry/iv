@@ -19,7 +19,7 @@ def test_a_collection_is_declared_once_and_returns_what_is_on_disk(project, iv):
         build()
     ''')
     (project / "pipeline.py").write_text(
-        'from invalidator import Invalidator\n'
+        'from iv import Invalidator\n'
         'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
 
     import polars as pl
@@ -39,7 +39,7 @@ def test_a_collection_is_declared_once_and_returns_what_is_on_disk(project, iv):
 
 
 def test_a_collection_with_no_free_field_is_an_error(project, iv):
-    from invalidator.errors import DeclError
+    from iv.errors import DeclError
     import pytest
     with pytest.raises(DeclError):
         iv.collection("raw/box/box_2024.parquet", why="one file, not a set")
@@ -76,7 +76,7 @@ def test_tracing_never_takes_down_a_run(project, tmp_path):
     `datetime.date` in a `part=` did exactly that, 102 seconds into a stage."""
     import datetime as dt
     import polars as pl
-    from invalidator import Invalidator
+    from iv import Invalidator
 
     iv = Invalidator(data_root=project / "data", data_version="v1",
                      source_dirs=["stages"], project_root=project,
@@ -101,7 +101,7 @@ def test_a_later_write_absolves_a_late_read(project, capsys):
     usually wrong teaches you to skip the block it prints in.
     """
     import polars as pl
-    from invalidator import Invalidator
+    from iv import Invalidator
 
     iv = Invalidator(data_root=project / "data", data_version="v1",
                      source_dirs=["stages"], project_root=project)
@@ -124,7 +124,7 @@ def test_a_later_write_absolves_a_late_read(project, capsys):
 def test_a_genuinely_missed_late_read_is_reported(project, capsys):
     """The other direction: nothing wrote again, so the input really is absent."""
     import polars as pl
-    from invalidator import Invalidator
+    from iv import Invalidator
 
     iv = Invalidator(data_root=project / "data", data_version="v1",
                      source_dirs=["stages"], project_root=project)

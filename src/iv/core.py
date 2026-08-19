@@ -1,6 +1,6 @@
 """`Invalidator` — the one object. Everything is a method on it.
 
-    from invalidator import Invalidator
+    from iv import Invalidator
 
     iv = Invalidator(data_root="gs://wvorp-state/data", data_version="wnba-3.07")
 
@@ -60,7 +60,7 @@ class Invalidator:
                   this stage read NOW".
     project_root  defaults to the directory containing the file that constructed this.
     trace         where to append the runtime trace, or None for off.
-    force         rebuild regardless. Also picked up from $INVALIDATOR_FORCE.
+    force         rebuild regardless. Also picked up from $IV_FORCE.
     """
 
     def __init__(self, *,
@@ -77,7 +77,7 @@ class Invalidator:
                  roots: Sequence[str] = ("raw/",),
                  project_root: str | os.PathLike | None = None,
                  trace: str | os.PathLike | None = None,
-                 state_rel: str = ".invalidator/state",
+                 state_rel: str = ".iv/state",
                  force: bool | None = None) -> None:
         if not data_version or not isinstance(data_version, str):
             raise ConfigError(
@@ -235,7 +235,7 @@ class Invalidator:
             if rec is not None and rel not in (rec.get("in") or {}):
                 missed.append((rel, art))
         for rel, art in missed:
-            print(f"  invalidator: {art} was written before {rel} was read, and its "
+            print(f"  iv: {art} was written before {rel} was read, and its "
                   f"stored inputs do not list {rel}. If it feeds that artifact, read it "
                   f"first; if it does not, this stage writes two unrelated things.")
 
@@ -375,7 +375,7 @@ class Invalidator:
 
         terminal  consumed outside this pipeline — an app, a human. Makes "nothing here
                   reads it" correct rather than an orphan.
-        policy    tracked | manual | settled | exempt | clock. See invalidator.state.
+        policy    tracked | manual | settled | exempt | clock. See iv.state.
         fp        how to fingerprint what you wrote. A coarse strategy on a DERIVED
                   artifact is a correctness hazard: if the id does not move, everything
                   downstream wrongly skips.
@@ -479,7 +479,7 @@ class Invalidator:
         of leaving the fetcher looking like an artifact that appeared from nowhere.
 
         It carries no id, so it cannot make anything stale. That is why a fetcher must not
-        be guarded on its output — see the GUARDED FETCH check in invalidator.graph.
+        be guarded on its output — see the GUARDED FETCH check in iv.graph.
         """
         _check_why(why, name)
         self.record("io", op="external", rel=f"external:{name}", why=why)
@@ -641,7 +641,7 @@ class Invalidator:
 
                 return self.build_if_needed(rels, run, if_needed=if_needed)
 
-            wrapper.__invalidator_step__ = tuple(rels)
+            wrapper.__iv_step__ = tuple(rels)
             return wrapper
 
         return decorate
@@ -808,7 +808,7 @@ class Invalidator:
     def node(self) -> str:
         """The stage, as a project-relative script path. One process is one stage."""
         import sys
-        override = os.environ.get("INVALIDATOR_STAGE")
+        override = os.environ.get("IV_STAGE")
         if override:
             return override
         argv0 = sys.argv[0] if sys.argv else ""
@@ -873,7 +873,7 @@ def _caller_root() -> Path:
     # Walk out of this package rather than counting frames — a fixed count is right
     # exactly once and silently wrong the moment anything wraps the constructor.
     while frame is not None and \
-            frame.f_globals.get("__name__", "").split(".")[0] == "invalidator":
+            frame.f_globals.get("__name__", "").split(".")[0] == "iv":
         frame = frame.f_back
     file = frame.f_globals.get("__file__") if frame else None
     here = Path(file).resolve().parent if file else Path.cwd()
@@ -884,9 +884,9 @@ def _caller_root() -> Path:
 
 
 def _env_trace() -> Path | None:
-    dest = os.environ.get("INVALIDATOR_TRACE")
+    dest = os.environ.get("IV_TRACE")
     return Path(dest) if dest else None
 
 
 def _env_force() -> bool:
-    return os.environ.get("INVALIDATOR_FORCE", "").lower() in ("1", "true", "yes")
+    return os.environ.get("IV_FORCE", "").lower() in ("1", "true", "yes")

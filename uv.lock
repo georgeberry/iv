@@ -175,7 +175,7 @@ wheels = [
 ]
 
 [[package]]
-name = "invalidator"
+name = "iv"
 version = "0.1.0"
 source = { editable = "." }
 

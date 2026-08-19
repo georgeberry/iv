@@ -15,7 +15,7 @@ import polars as pl
 import pytest
 
 from conftest import write_stage
-from invalidator import ConfigError, DeclError, Invalidator
+from iv import ConfigError, DeclError, Invalidator
 
 FRAME = pl.DataFrame({"a": [1, 2, 3]})
 
@@ -159,7 +159,7 @@ def test_an_output_that_is_not_written_is_not_stamped_and_does_not_raise(project
 
 
 def test_without_allow_missing_not_writing_is_an_error(project):
-    from invalidator import StateError
+    from iv import StateError
     iv = make(project)
 
     @iv.step("processed/gone.parquet", why="should have written", terminal=True, code=False)

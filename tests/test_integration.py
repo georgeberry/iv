@@ -15,12 +15,12 @@ import textwrap
 import polars as pl
 import pytest
 
-from invalidator.state import read_records
+from iv.state import read_records
 
 VENV_PY = sys.executable
 
 PIPELINE = '''
-    from invalidator import Invalidator
+    from iv import Invalidator
 
     iv = Invalidator(
         data_root="data",
@@ -70,7 +70,7 @@ def pipeline(project):
     (project / "pipeline.py").write_text(textwrap.dedent(PIPELINE).lstrip())
     (project / "pyproject.toml").write_text(
         '[project]\nname = "demo"\nversion = "0"\n\n'
-        '[tool.invalidator]\ninstance = "pipeline:iv"\n')
+        '[tool.iv]\ninstance = "pipeline:iv"\n')
     for rel, body in (("stages/build_stats.py", STATS),
                       ("stages/build_ratings.py", RATINGS)):
         (project / rel).write_text(textwrap.dedent(body).lstrip())
@@ -84,7 +84,7 @@ def run(project, stage: str, *args, check: bool = True) -> str:
     env = {**os.environ, "PYTHONPATH": str(project), "NO_COLOR": "1",
            "PYTHONDONTWRITEBYTECODE": "1"}
     env.pop("VIRTUAL_ENV", None)
-    for var in ("INVALIDATOR_TRACE", "INVALIDATOR_FORCE"):
+    for var in ("IV_TRACE", "IV_FORCE"):
         if var not in os.environ:
             env.pop(var, None)
     r = subprocess.run([VENV_PY, stage, *args], cwd=project, env=env,
@@ -100,7 +100,7 @@ def run_all(project, *args) -> str:
 
 
 def state(project) -> dict:
-    return read_records(project / "data" / ".invalidator" / "state")
+    return read_records(project / "data" / ".iv" / "state")
 
 
 def test_cold_build_then_a_no_op_run(pipeline):
@@ -209,8 +209,8 @@ def test_code_true_rebuilds_when_the_function_body_changes(project, pipeline):
 
 
 def test_the_trace_records_what_ran(pipeline, monkeypatch):
-    trace = pipeline / ".invalidator" / "trace.ndjson"
-    monkeypatch.setenv("INVALIDATOR_TRACE", str(trace))
+    trace = pipeline / ".iv" / "trace.ndjson"
+    monkeypatch.setenv("IV_TRACE", str(trace))
     run_all(pipeline)
 
     events = [json.loads(l) for l in trace.read_text().splitlines() if l.strip()]
@@ -221,11 +221,11 @@ def test_the_trace_records_what_ran(pipeline, monkeypatch):
 
 
 def test_drift_is_empty_when_the_code_and_the_run_agree(pipeline, monkeypatch):
-    trace = pipeline / ".invalidator" / "trace.ndjson"
-    monkeypatch.setenv("INVALIDATOR_TRACE", str(trace))
+    trace = pipeline / ".iv" / "trace.ndjson"
+    monkeypatch.setenv("IV_TRACE", str(trace))
     run_all(pipeline)
 
-    r = subprocess.run([VENV_PY, "-m", "invalidator.cli", "drift"], cwd=pipeline,
+    r = subprocess.run([VENV_PY, "-m", "iv.cli", "drift"], cwd=pipeline,
                        env={**os.environ, "PYTHONPATH": str(pipeline), "NO_COLOR": "1"},
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -312,7 +312,7 @@ def test_a_chain_keeps_every_writers_contribution(project):
     from tests.test_partition import run
 
     (project / "pipeline.py").write_text(
-        'from invalidator import Invalidator\n'
+        'from iv import Invalidator\n'
         'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"],\n'
         '                 stages=["stages/head.py", "stages/tail.py"])\n')
     write_stage(project, "stages/head.py", CHAIN_HEAD)
@@ -322,7 +322,7 @@ def test_a_chain_keeps_every_writers_contribution(project):
 
     run(project, "stages/head.py")
     run(project, "stages/tail.py")
-    rec = json.loads(next((project / "data" / ".invalidator" / "state").glob("*.json")).read_text())
+    rec = json.loads(next((project / "data" / ".iv" / "state").glob("*.json")).read_text())
     assert set(rec["contrib"]) == {"stages/head.py", "stages/tail.py"}, rec["contrib"]
     # The head's read survives the tail's stamp — the whole point.
     assert "raw/seed.parquet" in rec["in"], rec["in"]
@@ -344,7 +344,7 @@ def test_repeated_self_updates_converge(project):
     from tests.test_partition import run
 
     (project / "pipeline.py").write_text(
-        'from invalidator import Invalidator\n'
+        'from iv import Invalidator\n'
         'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
     write_stage(project, "stages/head.py", CHAIN_HEAD)
     (project / "data" / "raw").mkdir(parents=True)
@@ -361,7 +361,7 @@ def test_repeated_self_updates_converge(project):
     ''')
     def _id():
         return json.loads(
-            next((project / "data" / ".invalidator" / "state").glob("*.json")).read_text())["id"]
+            next((project / "data" / ".iv" / "state").glob("*.json")).read_text())["id"]
 
     run(project, "stages/patch.py")
     first = _id()
@@ -377,7 +377,7 @@ def test_dropping_a_link_drops_its_contribution(project):
     from tests.test_partition import run
 
     (project / "pipeline.py").write_text(
-        'from invalidator import Invalidator\n'
+        'from iv import Invalidator\n'
         'iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])\n')
     write_stage(project, "stages/head.py", CHAIN_HEAD)
     write_stage(project, "stages/tail.py", CHAIN_TAIL)
@@ -399,7 +399,7 @@ def test_dropping_a_link_drops_its_contribution(project):
     ''')
     run(project, "stages/tail.py")
     rec = json.loads(
-        next(p for p in (project / "data" / ".invalidator" / "state").glob("*.json")
+        next(p for p in (project / "data" / ".iv" / "state").glob("*.json")
              if json.loads(p.read_text())["rel"] == "processed/table.parquet").read_text())
     assert set(rec["contrib"]) == {"stages/tail.py"}, rec["contrib"]
     assert "raw/seed.parquet" not in rec["in"], rec["in"]
@@ -410,8 +410,8 @@ def test_a_later_writer_is_not_a_dependency(project):
     `predict_upcoming_games` amends after. Counting the amendment as a dependency made
     the pair a cycle the run order plainly does not have."""
     from conftest import write_stage
-    from invalidator import graph as _graph
-    from invalidator import Invalidator
+    from iv import graph as _graph
+    from iv import Invalidator
 
     (project / "data" / "raw").mkdir(parents=True)
     pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "seed.parquet")

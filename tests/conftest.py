@@ -4,8 +4,8 @@ import textwrap
 
 import pytest
 
-from invalidator import Invalidator
-from invalidator import static as _static
+from iv import Invalidator
+from iv import static as _static
 
 
 @pytest.fixture(autouse=True)
@@ -24,8 +24,8 @@ def project(tmp_path, monkeypatch):
     (root / "stages").mkdir(parents=True)
     (root / "data").mkdir(parents=True)
     (root / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "0"\n')
-    for var in ("INVALIDATOR_TRACE", "INVALIDATOR_FORCE", "INVALIDATOR_STAGE",
-                "INVALIDATOR_INSTANCE"):
+    for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE",
+                "IV_INSTANCE"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(root)
     return root

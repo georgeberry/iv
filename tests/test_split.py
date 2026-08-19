@@ -10,8 +10,8 @@ import polars as pl
 import pytest
 
 from conftest import write_stage
-from invalidator import Invalidator
-from invalidator.state import read_records
+from iv import Invalidator
+from iv.state import read_records
 
 FRAME = pl.DataFrame({"a": [1, 2, 3]})
 
@@ -56,8 +56,8 @@ def test_the_out_root_shadows_the_shared_one_for_reads(split, project):
 def test_the_state_lives_with_the_writes_not_the_reads(split, project):
     with split.writes("processed/out.parquet", why="the output", terminal=True) as p:
         FRAME.write_parquet(p)
-    assert read_records(project / "scratch" / ".invalidator" / "state")
-    assert not (project / "shared" / ".invalidator").exists()
+    assert read_records(project / "scratch" / ".iv" / "state")
+    assert not (project / "shared" / ".iv").exists()
 
 
 def test_state_path_puts_the_stamps_anywhere(project, tmp_path):
@@ -72,7 +72,7 @@ def test_state_path_puts_the_stamps_anywhere(project, tmp_path):
     with iv.writes("processed/out.parquet", why="the output", terminal=True) as p:
         FRAME.write_parquet(p)
     assert read_records(elsewhere)
-    assert not (project / "scratch" / ".invalidator").exists()
+    assert not (project / "scratch" / ".iv").exists()
 
 
 def test_a_collection_globs_both_roots(split, project):
@@ -123,7 +123,7 @@ def test_writing_through_a_read_resolved_path_is_refused(project):
     redirected it. A variable-name collision in a migration script did exactly this and
     overwrote a live parquet with a JSON dump.
     """
-    from invalidator import DeclError
+    from iv import DeclError
 
     shared, scratch = project / "shared", project / "scratch"
     (shared / "raw").mkdir(parents=True)
@@ -147,7 +147,7 @@ def test_writing_through_a_read_resolved_path_is_refused(project):
 def test_the_write_guard_still_allows_reading(project):
     """`open` is only a write when the MODE says so. Blocking it outright blocked
     fingerprinting — which opens an input to hash it — and so blocked the check itself."""
-    from invalidator import DeclError
+    from iv import DeclError
     shared, scratch = project / "shared", project / "scratch"
     (shared / "raw").mkdir(parents=True)
     FRAME.write_parquet(shared / "raw" / "src.parquet")
@@ -191,7 +191,7 @@ def test_a_partitioned_artifact_reuses_what_THIS_run_built(project):
 
     iv = Invalidator(data_root=shared, out_root=scratch, data_version="v1",
                      overlay=False, source_dirs=["stages"], project_root=project)
-    from invalidator.partition import for_each
+    from iv.partition import for_each
 
     def build_one(season):
         iv.reads("raw/src.parquet", why="the source")

@@ -1,6 +1,6 @@
-"""invalidator — re-run a step only when something upstream actually changed.
+"""iv — re-run a step only when something upstream actually changed.
 
-    from invalidator import Invalidator
+    from iv import Invalidator
     import polars as pl
 
     iv = Invalidator(data_root="data", data_version="wnba-3.07")
@@ -28,13 +28,13 @@ Everything else falls out of the same call sites: the DAG (`iv graph`), the
 structural checks (`iv check`), and documentation that cannot drift, because
 `why=` is a required argument and there is nowhere else for it to live.
 
-invalidator observes; it does not run anything. Keep your bash, your Makefile, your
+iv observes; it does not run anything. Keep your bash, your Makefile, your
 scheduler.
 """
 from __future__ import annotations
 
 from .core import Invalidator, source_digest
-from .errors import (ConfigError, DagioError, DeclError, FingerprintError,
+from .errors import (ConfigError, InvalidatorError, DeclError, FingerprintError,
                      PolicyError, StateError)
 from .state import POLICIES, Spec
 
@@ -42,6 +42,6 @@ __version__ = "0.1.0"
 
 __all__ = [
     "Invalidator", "Spec", "POLICIES", "source_digest",
-    "DagioError", "ConfigError", "DeclError", "FingerprintError", "PolicyError",
+    "InvalidatorError", "ConfigError", "DeclError", "FingerprintError", "PolicyError",
     "StateError",
 ]

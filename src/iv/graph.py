@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from dataclasses import replace as _replace
 
 from . import static as _static
-from .errors import DagioError
+from .errors import InvalidatorError
 from .static import Site, Stage, matches
 from .static import slices_meet as _slices_meet
 
@@ -232,7 +232,7 @@ def require_acyclic(g) -> None:
     """
     cycle = find_cycle(g)
     if cycle:
-        raise DagioError(
+        raise InvalidatorError(
             f"the stage graph has a CYCLE, so its order is not defined and nothing built "
             f"from it would be true:\n    {cycle}\n"
             f"Run `iv check` for the full picture. A cycle is usually one read that "
@@ -248,7 +248,10 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     # UNDEFINED NAMES in a stage. A build function is not executed until the pipeline
     # runs it, so a name left behind by a refactor imports perfectly and raises an hour
     # in. Moving that to the preflight is the same job as everything else here.
-    for line in _static.undefined_names(g.iv):
+    names = _static.undefined_names(g.iv)
+    if names is None:
+        warns.append("pyflakes is not installed, so undefined names were NOT checked")
+    for line in names or ():
         errors.append(f"UNDEFINED NAME  {line}")
     for line in _static.missing_imports(g.iv):
         errors.append(f"MISSING MODULE  {line}")
@@ -469,7 +472,7 @@ def export(g: Graph) -> dict:
             "policy": outs[0].policy if outs else None,
             "code": bool(outs and outs[0].code),
         }
-    return {"schema": 1, "generated_by": "invalidator",
+    return {"schema": 1, "generated_by": "iv",
             "data_version": g.iv.data_version,
             "nodes": nodes, "parent_map": g.parent_map(),
             "stage_parent_map": g.stage_parents()}

@@ -1,7 +1,7 @@
 """The CLI, against the real stage files from the integration fixture.
 
 The CLI has to find the project's `Invalidator`, which is the one piece of discovery in
-the package: `[tool.invalidator] instance = "pipeline:iv"`.
+the package: `[tool.iv] instance = "pipeline:iv"`.
 """
 from __future__ import annotations
 
@@ -14,14 +14,14 @@ import pytest
 
 from test_integration import GAMES, pipeline, run_all  # noqa: F401
 
-CLI = [sys.executable, "-m", "invalidator.cli"]
+CLI = [sys.executable, "-m", "iv.cli"]
 
 
 def cli(project, *args) -> subprocess.CompletedProcess:
     env = {**os.environ, "PYTHONPATH": str(project), "NO_COLOR": "1",
            "PYTHONDONTWRITEBYTECODE": "1"}
     env.pop("VIRTUAL_ENV", None)
-    env.pop("INVALIDATOR_TRACE", None)
+    env.pop("IV_TRACE", None)
     return subprocess.run([*CLI, *args], cwd=project, env=env,
                           capture_output=True, text=True)
 
@@ -37,7 +37,7 @@ def test_a_missing_instance_says_exactly_what_to_add(pipeline):
     (pipeline / "pyproject.toml").write_text('[project]\nname = "d"\nversion = "0"\n')
     r = cli(pipeline, "graph")
     assert r.returncode == 1
-    assert "[tool.invalidator]" in r.stderr and "instance" in r.stderr
+    assert "[tool.iv]" in r.stderr and "instance" in r.stderr
 
 
 def test_the_instance_can_be_passed_per_invocation(pipeline):
@@ -127,7 +127,7 @@ def test_export_is_json_in_the_dbt_shape(pipeline):
 def test_drift_without_a_trace_says_so(pipeline):
     r = cli(pipeline, "drift")
     assert r.returncode == 1
-    assert "INVALIDATOR_TRACE" in r.stderr
+    assert "IV_TRACE" in r.stderr
 
 
 def test_viz_writes_a_png(pipeline, tmp_path):

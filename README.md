@@ -1,10 +1,10 @@
-# invalidator
+# iv
 
 **Re-run a step only when something upstream actually changed.**
 
 ```python
 # pipeline.py — once per project
-from invalidator import Invalidator
+from iv import Invalidator
 
 iv = Invalidator(data_root="data", data_version="sales-1.0", source_dirs=["stages"])
 ```
@@ -53,7 +53,7 @@ From those same call sites you also get **the DAG** (`iv graph`, `check`, `stage
 nothing ever run — and **documentation that cannot drift**, because `why=` is a required
 argument and there is nowhere else for it to live.
 
-invalidator observes; it does not run anything. Keep your bash, your Makefile, your
+iv observes; it does not run anything. Keep your bash, your Makefile, your
 scheduler.
 
 ## The rule
@@ -112,7 +112,7 @@ iv = Invalidator(
     data_version="wnba-3.07",         # in EVERY id
     source_dirs=["scripts", "src"],   # what the static scan walks
     stages=[...],                     # or order_from="refresh.sh", for the ORDER check
-    trace=".invalidator/trace.ndjson",
+    trace=".iv/trace.ndjson",
     out_root="/tmp/scratch",          # optional: writes go here, reads fall back
     state_path="/tmp/shadow",         # optional: stamps somewhere other than out_root
 )
@@ -125,7 +125,7 @@ everything else from the shared tree without touching it. The stamps follow the 
 The CLI needs one line to find it — the only discovery in the package:
 
 ```toml
-[tool.invalidator]
+[tool.iv]
 instance = "mypkg.pipeline:iv"
 ```
 
@@ -136,7 +136,7 @@ proposed exactly that and was rejected. A callable is the only thing you can cho
 call, which is why every system in this category (Dagster's `@asset`, Prefect's `@task`,
 redun's `@task`, R's `targets`) wraps the unit of work in a function.
 
-Inputs stay in the *body* rather than the decorator because invalidator never owns your
+Inputs stay in the *body* rather than the decorator because iv never owns your
 storage — an input in the decorator could only hand you a path anyway, and then there would
 be two places to look. Keeping them in the body means an optional input, a branch, a loop
 over seasons, and a path that depends on a partition all work with no special syntax, and
@@ -242,7 +242,7 @@ iv.for_each(SEASONS, build_one,
 ```
 
 Inputs *without* the partition key in their path affect every partition, so they enter
-every partition's key. `INVALIDATOR_FORCE=1` reaches both the outer guard and the inner
+every partition's key. `IV_FORCE=1` reaches both the outer guard and the inner
 cache, because forcing one while the other reuses everything is a rebuild that rebuilds
 nothing.
 
@@ -284,7 +284,7 @@ its id that can move, so guarding its stage means it runs once and never again.
 ## Tracing
 
 ```
-INVALIDATOR_TRACE=.invalidator/trace.ndjson ./refresh.sh
+IV_TRACE=.iv/trace.ndjson ./refresh.sh
 iv drift
 ```
 
@@ -298,7 +298,7 @@ real GCS bucket: 21 files at `fp="rows"` (footer only) took 7.1s. Fine when one 
 the collection and everything downstream reads a single merged file; not fine if every
 stage reads the raw collection.
 
-**invalidator only knows about I/O routed through it.** A bare `pl.read_parquet(path)` is
+**iv only knows about I/O routed through it.** A bare `pl.read_parquet(path)` is
 A bare `pl.read_parquet(path)` is invisible: it will not appear in the graph and will not
 enter any id. Patching the primitives as a *detector* — so an untagged read raises rather
 than passing quietly — is the next thing.
@@ -306,10 +306,10 @@ than passing quietly — is the next thing.
 ## Install
 
 ```
-pip install invalidator            # core is stdlib only
-pip install 'invalidator[data]'    # polars, for the default fingerprint
-pip install 'invalidator[cli]'     # typer
-pip install 'invalidator[viz]'     # networkx + matplotlib
+pip install iv            # core is stdlib only
+pip install 'iv[data]'    # polars, for the default fingerprint
+pip install 'iv[cli]'     # typer
+pip install 'iv[viz]'     # networkx + matplotlib
 ```
 
 ## License

@@ -120,6 +120,16 @@ class State:
         d = self.dir
         return d.parent / (d.name + ".json")
 
+    @property
+    def renamed_dir(self):
+        """Where the stamps lived when this package was called `invalidator`.
+
+        Only meaningful for the DEFAULT layout — an explicit `state_path=` names a tree
+        that was never under the old name.
+        """
+        d = self.dir
+        return d.parent.parent / ".invalidator" / d.name if d.parent.name == ".iv" else None
+
     # ── the id ────────────────────────────────────────────────────────────────
 
     def metadata_term(self, policy: str, code: str = "", version: str = "") -> str:
@@ -213,6 +223,49 @@ class State:
     def _record_path(self, rel: str):
         return self.dir / record_filename(rel)
 
+    def _absorb(self, old_dir, d) -> None:
+        """Take the stamps out of `old_dir` and leave nothing behind.
+
+        A MOVE, not a copy. Two directories both called `state`, both holding stamps, one
+        of them dead — that is the single hazard this whole package is against, and
+        leaving it around to be safe just relocates the confusion. So: copy every record,
+        verify the bytes landed, and only then delete the source.
+
+        Idempotent, because it may find a half-finished move: a record already present at
+        the destination is left alone and its source is still removed.
+        """
+        moved = kept = 0
+        d.mkdir(parents=True, exist_ok=True)
+        for f in (old_dir.glob("*.json") if old_dir.exists() else ()):
+            body = f.read_bytes()
+            dest = d / f.name
+            if dest.exists():
+                kept += 1
+            else:
+                dest.write_bytes(body)
+                if dest.read_bytes() != body:
+                    raise StateError(
+                        f"copying {f.name} to {dest} did not land the same bytes. "
+                        f"Nothing was deleted; fix the destination and re-run.")
+                moved += 1
+            f.unlink()
+        # `state.json.migrated` is debris from the single-file -> directory move, kept
+        # then so a stale file was not silently destroyed. The directory it was migrated
+        # INTO has now moved as well, so it is dead twice over and it is the only thing
+        # keeping the old tree alive. Nothing else here is ours to delete.
+        leftover = old_dir.parent / (old_dir.name + ".json.migrated")
+        if leftover.exists():
+            leftover.unlink()
+        for empty in (old_dir, old_dir.parent):
+            try:
+                empty.rmdir()
+            except Exception:           # noqa: BLE001 — cloudpathlib does not raise OSError
+                break                   # something we did not put there; leave it alone
+        if moved or kept:
+            print(f"  moved {moved + kept} stamp(s) out of {old_dir.parent.name}/ into "
+                  f"{d.parent.name}/ — the package was renamed, the state did not change "
+                  f"shape. The old directory is gone.")
+
     def _migrate(self) -> None:
         """A pre-directory `state.json` -> one file per artifact, once.
 
@@ -222,7 +275,18 @@ class State:
         same per-artifact names, so the race is harmless.
         """
         d, legacy = self.dir, self.legacy_path
+        # The package was renamed `invalidator` -> `iv`, and the stamps moved with it.
+        # Copying them is the whole point: a bookkeeping change must not cost a rebuild
+        # of a real pipeline — for wvorp that is the 287s xPM fit and everything below
+        # it, for a name.
+        old_dir = self.renamed_dir
         with self.iv.bookkeeping():
+            # Also when only the debris is left: the stamps can have moved on an earlier
+            # run while `state.json.migrated` kept the old tree standing.
+            if old_dir is not None and (
+                    old_dir.exists()
+                    or (old_dir.parent / (old_dir.name + ".json.migrated")).exists()):
+                self._absorb(old_dir, d)
             if d.exists() or not legacy.exists():
                 return
             try:
@@ -234,7 +298,7 @@ class State:
         if raw.get("version") != LEGACY_VERSION:
             raise StateError(
                 f"state file {legacy} is version {raw.get('version')}, and the only single "
-                f"file this invalidator can move to the new layout is version "
+                f"file this iv can move to the new layout is version "
                 f"{LEGACY_VERSION}. Delete it to rebuild from scratch.")
         artifacts = raw.get("artifacts") or {}
         for rel, entry in artifacts.items():
@@ -659,7 +723,7 @@ def _read_record(p) -> dict:
             f"rebuild of that one artifact, which is recoverable; guessing is not.") from e
     if raw.get("state_version") != STATE_VERSION:
         raise StateError(
-            f"state record {p} is version {raw.get('state_version')}, this invalidator writes "
+            f"state record {p} is version {raw.get('state_version')}, this iv writes "
             f"{STATE_VERSION}. Delete the directory to rebuild from scratch.")
     if not raw.get("rel"):
         raise StateError(f"state record {p} does not say which artifact it is about.")

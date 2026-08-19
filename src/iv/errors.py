@@ -1,4 +1,4 @@
-"""Every way invalidator refuses.
+"""Every way iv refuses.
 
 One class per kind of mistake, because the recovery differs. A `ConfigError` means the
 project is not set up; a `DeclError` means a call site is wrong and names file:line; a
@@ -11,30 +11,27 @@ keyed on a constant and permanently, silently current.
 from __future__ import annotations
 
 
-class DagioError(Exception):
-    """Base for everything invalidator raises."""
+class InvalidatorError(Exception):
+    """Base for everything iv raises."""
 
 
-InvalidatorError = DagioError
-
-
-class ConfigError(DagioError):
+class ConfigError(InvalidatorError):
     """The project root, data root, or version axes could not be resolved."""
 
 
-class DeclError(DagioError):
+class DeclError(InvalidatorError):
     """A call site is malformed. Always names the file and line where possible."""
 
 
-class FingerprintError(DagioError):
+class FingerprintError(InvalidatorError):
     """A fingerprint strategy cannot be applied to this file."""
 
 
-class PolicyError(DagioError):
+class PolicyError(InvalidatorError):
     """Two writers of one artifact disagree about how it should be treated."""
 
 
-class StateError(DagioError):
+class StateError(InvalidatorError):
     """A stamp is unreadable or malformed.
 
     Deliberately fatal rather than an empty dict: an empty state makes invalidation a

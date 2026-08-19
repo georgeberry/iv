@@ -20,14 +20,14 @@ import textwrap
 import polars as pl
 import pytest
 
-from invalidator import record as _rec
-from invalidator.state import read_records
+from iv import record as _rec
+from iv.state import read_records
 
 VENV_PY = sys.executable
 N = 6
 
 PIPELINE = '''
-    from invalidator import Invalidator
+    from iv import Invalidator
 
     iv = Invalidator(data_root="data", data_version="v1", source_dirs=["stages"])
 '''
@@ -75,7 +75,7 @@ def fanout(project):
     (project / "barrier.py").write_text(textwrap.dedent(BARRIER).lstrip())
     (project / "pyproject.toml").write_text(
         '[project]\nname = "demo"\nversion = "0"\n\n'
-        '[tool.invalidator]\ninstance = "pipeline:iv"\n')
+        '[tool.iv]\ninstance = "pipeline:iv"\n')
     for k in range(N):
         (project / "stages" / f"stage_{k}.py").write_text(
             textwrap.dedent(STAGE).lstrip().replace("{k}", str(k)).replace("{n}", str(N)))
@@ -90,10 +90,10 @@ def run_together(project, trace=None) -> list[str]:
     env = {**os.environ, "PYTHONPATH": str(project), "NO_COLOR": "1",
            "PYTHONDONTWRITEBYTECODE": "1"}
     env.pop("VIRTUAL_ENV", None)
-    for var in ("INVALIDATOR_TRACE", "INVALIDATOR_FORCE"):
+    for var in ("IV_TRACE", "IV_FORCE"):
         env.pop(var, None)
     if trace is not None:
-        env["INVALIDATOR_TRACE"] = str(trace)
+        env["IV_TRACE"] = str(trace)
     procs = [subprocess.Popen([VENV_PY, f"stages/stage_{k}.py"], cwd=project, env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
              for k in range(N)]
@@ -106,7 +106,7 @@ def run_together(project, trace=None) -> list[str]:
 
 
 def state_dir(project):
-    return project / "data" / ".invalidator" / "state"
+    return project / "data" / ".iv" / "state"
 
 
 def test_parallel_stages_all_get_stamped(fanout):
@@ -159,9 +159,9 @@ def test_the_trace_survives_stages_appending_at_once(chatty):
 
     The stamps are per-artifact files because a shared file broke under exactly this; the
     trace stays shared, so the claim that it holds up is worth a test rather than an
-    assumption. See `invalidator.record` for what was measured.
+    assumption. See `iv.record` for what was measured.
     """
-    trace = chatty / ".invalidator" / "trace.ndjson"
+    trace = chatty / ".iv" / "trace.ndjson"
     run_together(chatty, trace=trace)
 
     lines = [l for l in trace.read_text().splitlines() if l.strip()]
