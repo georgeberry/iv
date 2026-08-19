@@ -235,7 +235,7 @@ class PartitionCache:
         self._upto = {str(k): str(v) for k, v in (upto or {}).items()}
         if self.scoped() and not self._upto:
             raise InvalidatorError(
-                f"{self.template} declares scoped inputs {sorted(self.scoped)} but plan() "
+                f"{self.template} declares scoped inputs {sorted(self.scoped())} but plan() "
                 f"was given no `upto=`. A scoped input needs a bound per partition — "
                 f"without one there is nothing to scope it to.")
         want = [str(w) for w in want]
@@ -388,6 +388,7 @@ def for_each(iv, over, build_one, *, output: str, key: str, why: str,
              fp: str = "data", policy: str = "tracked",
              extra: dict[str, str] | None = None,
              fp_of: dict[str, str] | None = None, extra_key: str = "",
+             upto: dict[str, str] | None = None,
              force: bool | None = None, quiet: bool = False):
     """Run `build_one(partition)` only for the partitions that moved.
 
@@ -406,13 +407,19 @@ def for_each(iv, over, build_one, *, output: str, key: str, why: str,
     cache = PartitionCache(iv, output, key, why=why, fp=fp,
                            policy=policy, extra=extra_key, part=part)
     want = [str(p) for p in over]
-    reuse, rebuild = cache.plan(want, extra=extra, fp_of=fp_of, force=force)
+    # A partition sees its own period and no later one. Stated by the caller where the
+    # periods are not simply the partitions; defaulted to `{p: p}` where they are, which
+    # is the common case and the honest one — the partition FOR period p is built FROM
+    # period p.
+    bounds = {str(k): str(v) for k, v in upto.items()} if upto else {p: p for p in want}
+    reuse, rebuild = cache.plan(want, extra=extra, fp_of=fp_of, upto=bounds, force=force)
     if not quiet:
         cache.report(reuse, rebuild)
 
     built: dict[str, object] = {}
     for part in rebuild:
-        frame = build_one(part)
+        with cache.building(part):
+            frame = build_one(part)
         if frame is None or frame.height == 0:
             raise InvalidatorError(
                 f"{output}: build_one({part!r}) produced no rows. A partition that is "
