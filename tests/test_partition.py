@@ -473,3 +473,26 @@ def test_the_source_a_cohort_was_fit_on_is_what_rebuilds_it(walk):
 
     got = pl.read_parquet(walk / "data" / "processed" / "cohorts.parquet")
     assert dict(zip(got["season"], got["v"])) == {"2024": "v0", "2025": "v1", "2026": "v0"}
+
+
+def test_a_glob_is_a_prefilter_not_the_answer(project):
+    """`*` per field is greedy and blind to a repeated field.
+
+    `raw/{league}/{dataset}/{dataset}_{season}.parquet` globs as `raw/*/*/*_*`, which
+    swept up `raw/rosters/history/bak_roster_2026_2026-08-02.parquet` — a backup file in
+    a tree the template does not describe — and reported it forever as an unstamped
+    partition of a feed it has nothing to do with. The pattern decides membership.
+    """
+    import polars as pl
+    from iv import Invalidator
+
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project)
+    for rel in ("raw/nba/player_box/player_box_2002.parquet",
+                "raw/rosters/history/bak_roster_2026_2026-08-02.parquet"):
+        p = project / "data" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"x": [1]}).write_parquet(p)
+
+    parts = iv.state.instances_of("raw/{league}/{dataset}/{dataset}_{season}.parquet")
+    assert parts == ["raw/nba/player_box/player_box_2002.parquet"], parts

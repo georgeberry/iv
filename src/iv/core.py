@@ -127,6 +127,9 @@ class Invalidator:
         self._writes: list[str] = []
         # (input, artifact) pairs where the input was read after that artifact was
         # written. Judged at EXIT, not here — see `_report_read_after_write`.
+        # Inputs read with `prior=True`. Kept apart because they are recorded for
+        # lineage but must NOT be compared for staleness — see `writes`.
+        self._prior_reads: set[str] = set()
         self._late_reads: list[tuple[str, str]] = []
         self._late_hooked = False
         self._pending_fp: dict[str, str] = {}
@@ -279,6 +282,8 @@ class Invalidator:
                 f"degrade rather than fail.")
 
         self._reads[rel] = fp
+        if prior:
+            self._prior_reads.add(rel)
         self._read_paths.add(str(p))
         self.record("io", op="read", rel=rel, why=why, optional=optional, prior=prior,
                     part=part or {}, slice=slice)
@@ -417,6 +422,7 @@ class Invalidator:
                     version=self.version_value(version))
         inputs = {k: v for k, v in self._reads.items() if k != rel}
         new_id = self.state.stamp(rel, spec=spec, inputs=inputs, by=self.node(),
+                                  prior=self._prior_reads & set(inputs),
                                   fp_value=self._pending_fp.pop(rel, None))
         self.record("io", op="write", rel=rel, why=why, terminal=terminal,
                     part=part or {}, policy=policy, id=new_id, slice=slice)
@@ -467,6 +473,7 @@ class Invalidator:
                     version=self.version_value(version))
         inputs = {k: v for k, v in self._reads.items() if k != rel}
         new_id = self.state.stamp(rel, spec=spec, inputs=inputs, by=self.node(),
+                                  prior=self._prior_reads & set(inputs),
                                   fp_value=self._pending_fp.pop(rel, None))
         self.record("io", op="write", rel=rel, why=why, terminal=terminal,
                     part=part or {}, policy=policy, id=new_id, update=True, slice=slice)

@@ -418,6 +418,14 @@ class State:
                          str(self.iv.out_root): self.iv.out_root}.values():
                 on_disk |= {str(p)[len(str(root)) + 1:] for p in root.glob(pattern)}
         rx = path_pattern(template)
+        # The glob is a cheap PREFILTER, never the answer. `*` per field is greedy and
+        # blind to a repeated field, so `raw/{league}/{dataset}/{dataset}_{season}` globs
+        # as `raw/*/*/*_*` and swept up `raw/rosters/history/bak_roster_2026_2026-08-02`
+        # — a backup file, in a tree the template does not describe, reported forever as
+        # an unstamped partition of a feed it has nothing to do with. The pattern, with
+        # its back-references, is what decides membership; it already governed `stamped`
+        # and simply was not applied here.
+        on_disk = {rel for rel in on_disk if rx.match(rel)}
         stamped = {rel for rel in self.records() if rx.match(rel)}
         return sorted(on_disk | stamped)
 
@@ -474,7 +482,8 @@ class State:
         return {w: c for w, c in contrib.items() if w in writers}
 
     def stamp(self, rel: str, *, spec: Spec, inputs: dict[str, object], by: str,
-              fp_value: str | None = None, parts: dict[str, str] | None = None) -> str:
+              fp_value: str | None = None, parts: dict[str, str] | None = None,
+              prior: set[str] | None = None) -> str:
         """Fingerprint the artifact, fold everything into one id, write the record.
 
         Called only on a write that completed. A raise inside the write leaves no record,
@@ -483,6 +492,16 @@ class State:
         `inputs` maps each input's rel path to the strategy to use IF it is a root. Both
         the ids and the strategies are stored: the ids are what the next check compares
         against, the strategies are what lets it recompute a root's id at all.
+
+        `prior` names the inputs read with `prior=True` — deliberately the PREVIOUS run's
+        copy. They are recorded, because they are lineage, and excluded from the
+        comparison, because they cannot pass it: the producer runs LATER in the same
+        pipeline, so the value moves after the stamp, every run, for ever. wvorp's
+        `rookie_prior` reads the roster snapshot at stage [5c] and `fetch_rosters`
+        rewrites it at [8b2]; comparing them made it stale at the end of every run it had
+        just been rebuilt in. Saying "a later producer is not an ordering bug" and then
+        treating that producer as a staleness trigger are the same fact answered two
+        different ways.
 
         SEVERAL STAGES CAN WRITE ONE ARTIFACT, and then a stamp CONTRIBUTES rather than
         replaces. wvorp's `college_features.parquet` is built by one stage and then
@@ -505,10 +524,13 @@ class State:
                     f"a stamp means one thing only: THIS code produced THIS file.")
             value = fp_value if fp_value is not None else _fp.compute(p, spec.fp)
 
-        mine = {k: {"id": v, "fp": inputs[k] if isinstance(inputs[k], str) else "<callable>"}
+        lagged = prior or set()
+        mine = {k: {"id": v, "fp": inputs[k] if isinstance(inputs[k], str) else "<callable>",
+                    **({"prior": True} if k in lagged else {})}
                 for k, v in self.input_ids(inputs).items()}
         contrib = {**self._live_contributions(rel), by: mine}
-        ids = {k: v["id"] for c in contrib.values() for k, v in c.items()}
+        ids = {k: v["id"] for c in contrib.values() for k, v in c.items()
+               if not v.get("prior")}
         meta = self.metadata_term(spec.policy, spec.code, spec.version)
         new_id = self.compute_id(value, meta, ids, spec.policy)
 
@@ -592,7 +614,11 @@ class State:
             return None                     # the question is coverage, not staleness
 
         stored_inputs = entry.get("in") or {}
-        wanted = {k: v.get("fp", "data") for k, v in stored_inputs.items()}
+        # A `prior=True` input is lineage, not a trigger. Its producer runs LATER in the
+        # same pipeline, so its value moves after the stamp on every run — comparing it
+        # makes the artifact permanently stale one step behind itself. See `stamp`.
+        wanted = {k: v.get("fp", "data") for k, v in stored_inputs.items()
+                  if not v.get("prior")}
 
         # THE RECORDED SET GOVERNS, NOT THE DECLARED ONE.
         #
