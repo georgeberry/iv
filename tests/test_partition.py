@@ -602,3 +602,28 @@ def test_building_a_partition_outside_the_scope_is_refused(walk):
         .replace("with cache.building(c) as bound:", "if (bound := None) is None:"))
     out = run(walk, "stages/totals.py", check=False)
     assert "were built without" in out, out
+
+
+def test_the_artifact_record_agrees_with_the_partition_keys(walk):
+    """Two notions of "current" for one artifact is one too many.
+
+    `_key` scopes a periodised input to its partition's bound. Stamping the WHOLE-FILE id
+    at the artifact level made `iv status` report "input moved" about a change no partition
+    would rebuild for — so the stage said nothing to do, the report said stale, and neither
+    could resolve the other. wvorp's `eval_prospective_*` sat in exactly that state against
+    `rookie_prior`.
+    """
+    _features(walk, {"season": ["2023", "2024", "2025"], "x": [1, 2, 3]})
+    run(walk, "stages/totals.py")
+
+    # A period NO partition is bounded at or past. Cohort bounds are 2023/2024/2025, so a
+    # 2026 row reaches none of them — and the artifact record must say so too.
+    _features(walk, {"season": ["2023", "2024", "2025", "2026"], "x": [1, 2, 3, 9]})
+    out = run(walk, "stages/totals.py")
+    assert "reuse   ( 3)" in out, out
+
+    from iv import Invalidator
+    iv = Invalidator(data_root=walk / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=walk)
+    assert iv.why_stale("processed/cohorts.parquet") is None, \
+        iv.why_stale("processed/cohorts.parquet")

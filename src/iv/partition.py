@@ -357,8 +357,21 @@ class PartitionCache:
         # opened. `season` stays free, because that one really is the growing set.
         inputs = {self._fill(t): how
                   for t, how in {**self._global, **self._per}.items()}
+        # THE ARTIFACT-LEVEL RECORD MUST AGREE WITH THE PARTITION KEYS, or the two answer
+        # differently and the disagreement is permanent. `_key` scopes a periodised input
+        # to its partition's bound; stamping the whole-file id here made `iv status` say
+        # "input moved" about a change no partition would rebuild for, so the stage
+        # reported nothing to do and the report said stale, for ever.
+        #
+        # The bound used here is the NEWEST across the partitions, which is exactly the
+        # condition "some partition would rebuild": a change at or before it reaches one,
+        # a change after it reaches none.
+        bounds = [self._upto[k] for k in keys if k in self._upto]
+        top = max(bounds) if bounds else None
+        scoped = {rel: col for rel, col in self.scoped().items()} if top else {}
         new_id = self.iv.state.stamp(self.artifact, spec=self.spec, inputs=inputs,
-                                     by=self.iv.node(), parts=parts)
+                                     by=self.iv.node(), parts=parts,
+                                     upto={rel: (col, top) for rel, col in scoped.items()})
         # The artifact on disk is what we just wrote, so the memo from before the write
         # is a lie. It only shows in a process that plans twice — which is a test, and
         # was one: every partition read as "no artifact yet" and rebuilt.

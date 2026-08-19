@@ -565,7 +565,8 @@ class State:
     def stamp(self, rel: str, *, spec: Spec, inputs: dict[str, object], by: str,
               fp_value: str | None = None, parts: dict[str, str] | None = None,
               prior: set[str] | None = None,
-              slices: dict[str, str] | None = None) -> str:
+              slices: dict[str, str] | None = None,
+              upto: dict[str, tuple[str, str]] | None = None) -> str:
         """Fingerprint the artifact, fold everything into one id, write the record.
 
         Called only on a write that completed. A raise inside the write leaves no record,
@@ -606,11 +607,16 @@ class State:
                     f"a stamp means one thing only: THIS code produced THIS file.")
             value = fp_value if fp_value is not None else _fp.compute(p, spec.fp)
 
-        lagged, sl = prior or set(), slices or {}
+        lagged, sl, bounded = prior or set(), slices or {}, upto or {}
+        ids = self.input_ids(inputs, slices=sl)
+        for k, (col, bound) in bounded.items():
+            if k in ids:
+                ids[k] = self.upto_id(k, col, bound)
         mine = {k: {"id": v, "fp": inputs[k] if isinstance(inputs[k], str) else "<callable>",
                     **({"prior": True} if k in lagged else {}),
-                    **({"slice": sl[k]} if k in sl else {})}
-                for k, v in self.input_ids(inputs, slices=sl).items()}
+                    **({"slice": sl[k]} if k in sl else {}),
+                    **({"upto": list(bounded[k])} if k in bounded else {})}
+                for k, v in ids.items()}
         contrib = {**self._live_contributions(rel), by: mine}
         ids = {k: v["id"] for c in contrib.values() for k, v in c.items()
                if not v.get("prior")}
@@ -723,6 +729,14 @@ class State:
         policy = entry.get("policy", "tracked")
         if policy == "settled":
             return None                     # the question is coverage, not staleness
+        if policy == "clock" and _part_of(entry.get("meta", ""), "v"):
+            # A record written before `clock` stopped carrying the global version. It
+            # cannot re-stamp itself out of this: a conditional fetcher does not rewrite
+            # bytes that have not changed, so the file is never touched and the stale
+            # report never clears. The stored id was computed under the old rule and the
+            # only thing that differs is a term this policy no longer has — so accept it,
+            # and let the next real fetch write the new shape.
+            return None
 
         stored_inputs = entry.get("in") or {}
         # A `prior=True` input is lineage, not a trigger. Its producer runs LATER in the
@@ -732,6 +746,10 @@ class State:
                   if not v.get("prior")}
         sliced = {k: v["slice"] for k, v in stored_inputs.items()
                   if v.get("slice") and k in wanted}
+        # A period-scoped input is recomputed under the SAME bound it was stamped with,
+        # so the artifact-level answer and the partition keys cannot drift apart.
+        bounded = {k: tuple(v["upto"]) for k, v in stored_inputs.items()
+                   if v.get("upto") and k in wanted}
 
         # THE RECORDED SET GOVERNS, NOT THE DECLARED ONE.
         #
@@ -760,6 +778,8 @@ class State:
         # this pipeline already lives by.
         ids_now = self.input_ids(wanted, None if fingerprint else stored_inputs,
                                  slices=sliced)
+        for k, (col, bound) in bounded.items():
+            ids_now[k] = self.upto_id(k, col, bound)
         stored_meta = entry.get("meta", "")
         code_now = _part_of(stored_meta, "code") if code is None else code
         version_now = _part_of(stored_meta, "version") if version is None else version
