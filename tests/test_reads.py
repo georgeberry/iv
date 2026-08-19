@@ -139,3 +139,37 @@ def test_a_genuinely_missed_late_read_is_reported(project, capsys):
     iv._report_read_after_write()
     out = capsys.readouterr().out
     assert "was written before" in out and "raw/late.parquet" in out
+
+
+def test_a_collection_read_as_prior_is_not_compared(project):
+    """`prior=True` was accepted on `collection()`, documented as meaning what it means on
+    `reads()`, and then never recorded — so a feed read from the PREVIOUS run was still
+    compared against this one.
+
+    Three wvorp artifacts came out of every refresh stale for it: `draft` reads the
+    schedules before the fetch, `rookie_prior` and `rookie_projections` read the roster
+    snapshots that `fetch_rosters` rewrites later in the same run. All three already SAID
+    `prior=True`; nothing was listening.
+    """
+    import polars as pl
+    from iv import Invalidator
+
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project)
+    feed = project / "data" / "raw" / "rosters"
+    feed.mkdir(parents=True)
+    for s in ("2025", "2026"):
+        pl.DataFrame({"x": [1]}).write_parquet(feed / f"roster_{s}.parquet")
+
+    with iv.writes("processed/derived.parquet", why="something built from them") as p:
+        iv.collection("raw/rosters/roster_{season}.parquet",
+                      why="the roster as the fetcher last saw it", prior=True)
+        pl.DataFrame({"y": [1]}).write_parquet(p)
+
+    rec = iv.record_of("processed/derived.parquet")
+    entry = rec["in"]["raw/rosters/roster_{season}.parquet"]
+    assert entry.get("prior") is True, entry
+
+    # The fetcher rewrites the feed LATER in the same run, as it is meant to.
+    pl.DataFrame({"x": [1, 2, 3]}).write_parquet(feed / "roster_2026.parquet")
+    assert iv.why_stale("processed/derived.parquet") is None

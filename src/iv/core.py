@@ -391,6 +391,14 @@ class Invalidator:
                 f"failed. Pass optional=True if absence is meant to degrade rather "
                 f"than fail.")
         self._reads[rel] = fp
+        if prior:
+            # `prior` was accepted here, documented as meaning what it means on
+            # `reads()`, and then never recorded — so a collection read from the
+            # PREVIOUS run was still compared against this one. wvorp's
+            # `rookie_prior` and `rookie_projections` read the roster snapshots
+            # that `fetch_rosters` rewrites later in the same refresh, and came
+            # out of every run stale for it.
+            self._prior_reads.add(rel)
         self._read_paths.update(str(f) for f in files)
         self.record("io", op="read", rel=rel, why=why, optional=optional, prior=prior,
                     collection=True, part=part or {})
