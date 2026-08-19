@@ -269,7 +269,21 @@ class PartitionCache:
         # Raised HERE, in the stage that owns the artifact, rather than surfacing at the
         # end of a refresh as a status line nobody can act on.
         if not rebuild and want:
-            reason = self.iv.state.why_stale(self.artifact, fingerprint=False)
+            # ...but only between records that speak the same language. A record written
+            # before `commit` learned to bound its scoped inputs holds a WHOLE-FILE id,
+            # which moves when the live period does — exactly the movement the keys are
+            # built to ignore. That is a transition, not a drift, and a transition has to
+            # SELF-HEAL: let the run reach `commit`, which rewrites the record in the new
+            # shape. Blocking it would leave the artifact permanently unfixable, which is
+            # the very thing this check exists to prevent.
+            stored = (self.iv.state.record_of(self.artifact) or {}).get("in") or {}
+            unbounded = [rel for rel in self.scoped()
+                         if rel in stored and not stored[rel].get("upto")]
+            reason = (None if unbounded
+                      else self.iv.state.why_stale(self.artifact, fingerprint=False))
+            if unbounded:
+                print(f"    record predates bounded inputs ({', '.join(unbounded)}) — "
+                      f"re-stamping under the new rule")
             if reason is not None:
                 raise InvalidatorError(
                     f"{self.artifact}: every partition is current, but the artifact's own "

@@ -658,3 +658,37 @@ def test_status_flagging_what_plan_does_not_is_refused(walk):
 
     out = run(walk, "stages/totals.py", check=False)
     assert "two answers" in out or "record says" in out, out
+
+
+def test_a_record_written_before_bounds_self_heals(walk):
+    """A transition must not be mistaken for a drift.
+
+    A record stamped before `commit` bounded its scoped inputs holds a WHOLE-FILE id,
+    which moves when the live period does — exactly the movement the partition keys exist
+    to ignore. Raising there would leave the artifact permanently unfixable, which is what
+    the check is trying to prevent, not cause. It must reach `commit` and be rewritten.
+    """
+    import json
+
+    _features(walk, {"season": ["2023", "2024", "2025"], "x": [1, 2, 3]})
+    run(walk, "stages/totals.py")
+
+    state = walk / "data" / ".iv" / "state"
+    rec = next(f for f in state.glob("*.json")
+               if json.loads(f.read_text())["rel"] == "processed/cohorts.parquet")
+    body = json.loads(rec.read_text())
+    for entry in body["in"].values():
+        entry.pop("upto", None)                  # as an older iv would have written it
+    for w in body.get("contrib", {}).values():
+        for entry in w.values():
+            entry.pop("upto", None)
+    body["id"] = "deadbeefdeadbeef"              # and therefore disagreeing
+    rec.write_text(json.dumps(body))
+
+    out = run(walk, "stages/totals.py")          # must NOT raise
+    assert "predates bounded inputs" in out, out
+
+    from iv import Invalidator
+    iv = Invalidator(data_root=walk / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=walk)
+    assert iv.why_stale("processed/cohorts.parquet") is None, "one run, then current"
