@@ -496,3 +496,41 @@ def test_a_glob_is_a_prefilter_not_the_answer(project):
 
     parts = iv.state.instances_of("raw/{league}/{dataset}/{dataset}_{season}.parquet")
     assert parts == ["raw/nba/player_box/player_box_2002.parquet"], parts
+
+
+def test_an_unstamped_partition_is_a_root_not_a_stale_output(project):
+    """A partition on disk that nothing here has ever stamped is a ROOT.
+
+    wvorp's refresh fetches ONE season, so 90 of 93 partitions of
+    `raw/{dataset}/{dataset}_{season}` were written once in a backfill and no future run
+    will ever stamp them. Their identity is their bytes — which is what dependants
+    already fold, as `coll:…` — so nothing downstream is stale and the nightly report was
+    something nobody could act on.
+
+    A partition that HAS a record is still checked, which is what keeps "did the fetcher
+    actually run?" answerable for the live season.
+    """
+    import polars as pl
+    from iv import Invalidator
+
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project)
+    (project / "data" / "raw").mkdir(parents=True, exist_ok=True)
+    for s in ("2024", "2025"):
+        pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / f"box_{s}.parquet")
+
+    # Nothing stamped: every partition is a root, so the feed is not stale.
+    assert iv.why_stale("raw/box_{season}.parquet") is None
+
+    # Stamp the live one. It IS an output now, and stays subject to the check — here
+    # via a version bump, the same way a real refresh would notice one.
+    with iv.writes("raw/box_{season}.parquet", why="one season", part={"season": "2025"},
+                   fp="bytes") as p:
+        pl.DataFrame({"x": [1]}).write_parquet(p)
+    assert iv.why_stale("raw/box_{season}.parquet") is None
+
+    bumped = Invalidator(data_root=project / "data", data_version="v2",
+                         source_dirs=["stages"], project_root=project)
+    reason = bumped.why_stale("raw/box_{season}.parquet")
+    assert reason is not None and "box_2025" in reason, reason
+    assert "box_2024" not in reason, "the unstamped archive partition stays quiet"

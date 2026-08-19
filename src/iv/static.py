@@ -824,6 +824,24 @@ def code_hash_for_artifact(iv, rel: str) -> str | None:
     return sites[0].code if len(sites) == 1 and sites[0].code else None
 
 
+def branch_siblings(iv, rel: str) -> list[str]:
+    """The OTHER paths written in sibling arms of the same if/elif/else as `rel`.
+
+    `data._fetch_write` writes a flat `raw/{dataset}/…` on the parent league and a nested
+    `raw/{league}/{dataset}/…` on a sub-league. A W run only ever takes the first, so the
+    second has no partitions — and "not on disk" is a true statement about an arm this
+    league never executes, which is not the same as a missing artifact.
+    """
+    out = []
+    for st in scan(iv).values():
+        for site in st.outputs():
+            if not site.branch or not matches(site.path, rel):
+                continue
+            out += [o.path for s2 in scan(iv).values() for o in s2.outputs()
+                    if o.branch == site.branch and o.path != site.path]
+    return sorted(set(out))
+
+
 def spec_for_artifact(iv, rel: str) -> Site | None:
     """The write site that declares `rel`, or None if it is a root or has several."""
     sites = [s for st in scan(iv).values() for s in st.outputs() if matches(s.path, rel)]

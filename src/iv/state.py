@@ -592,8 +592,36 @@ class State:
             # only if every instance is, and the reason names the instance.
             found = self.instances_of(rel)
             if not found:
+                # An arm of an if/else this league never takes is not a missing artifact.
+                # `_fetch_write` writes a flat path on the parent league and a nested one
+                # on a sub-league; a W run only ever takes the first, so the second is
+                # empty by construction and saying so every night is noise.
+                from .static import branch_siblings
+                with self.iv.bookkeeping():
+                    taken = any(self.instances_of(sib)
+                                for sib in branch_siblings(self.iv, rel))
+                if taken:
+                    return None
                 return "not on disk (no partition of it exists)"
             for inst in found:
+                if self.record_of(inst) is None:
+                    # A partition on disk that NOTHING here has ever stamped is a ROOT,
+                    # by observation rather than inference. Its identity is its bytes,
+                    # and that is what dependants already fold — `processed/panel/
+                    # player_box.parquet` reads this feed as `coll:…`, a digest of
+                    # fingerprints, so an unstamped season contributes exactly as a
+                    # stamped one does and nothing downstream is stale.
+                    #
+                    # The archive is most of the tree: wvorp's refresh fetches ONE season,
+                    # so 90 of 93 partitions of `raw/{dataset}/{dataset}_{season}` were
+                    # written once in a backfill and no future run will ever stamp them.
+                    # Calling them stale every night is a report nobody can act on.
+                    #
+                    # A partition that HAS a record is still checked, which is what keeps
+                    # "did the fetcher actually run?" answerable for the live season: it
+                    # was stamped yesterday, so a failure to write it today shows up as a
+                    # moved fingerprint rather than as silence.
+                    continue
                 reason = self.why_stale(inst, code, version, fingerprint)
                 if reason is not None:
                     return f"{inst}: {reason}"
