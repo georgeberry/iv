@@ -28,6 +28,7 @@ where a project already keeps its version.
 from __future__ import annotations
 
 import ast
+import atexit
 import functools
 import hashlib
 import inspect
@@ -124,6 +125,10 @@ class Invalidator:
         self.state = State(self)
         self._reads: dict[str, object] = {}          # rel -> fp strategy, this process
         self._writes: list[str] = []
+        # (input, artifact) pairs where the input was read after that artifact was
+        # written. Judged at EXIT, not here — see `_report_read_after_write`.
+        self._late_reads: list[tuple[str, str]] = []
+        self._late_hooked = False
         self._pending_fp: dict[str, str] = {}
         # Reads made before any step ran — a module-level `SRC = iv.reads(...)`. They
         # belong to EVERY step in the file, so a step inherits them rather than starting
@@ -198,6 +203,42 @@ class Invalidator:
         from . import record as _rec
         _rec.emit(self, kind, **fields)
 
+    # ── read-after-write, judged at the end ───────────────────────────────────
+
+    def _note_late_read(self, rel: str, after: str) -> None:
+        """Remember that `rel` was read after `after` was written. Do not judge yet.
+
+        Reading something new after a write is only a bug if that write was the LAST one.
+        An `iv.updates` artifact built incrementally — the rollforward fits one week,
+        saves, fits the next — writes many times, and every read in week two follows week
+        one's write. Warning there stated a falsehood: it named six inputs as "not among
+        that artifact's inputs" while all six were on the final stamp, because the next
+        write picked them up. A diagnostic that is usually wrong is worse than none; it
+        teaches you to skip the whole block.
+
+        So the question is deferred to exit, where the answer is a FACT — the stored
+        record either lists the input or it does not.
+        """
+        self._late_reads.append((rel, after))
+        if not self._late_hooked:
+            self._late_hooked = True
+            atexit.register(self._report_read_after_write)
+
+    def _report_read_after_write(self) -> None:
+        """At exit: report only the late reads the final stamp really did miss."""
+        seen, missed = set(), []
+        for rel, art in self._late_reads:
+            if (rel, art) in seen:
+                continue
+            seen.add((rel, art))
+            rec = self.state.record_of(art)
+            if rec is not None and rel not in (rec.get("in") or {}):
+                missed.append((rel, art))
+        for rel, art in missed:
+            print(f"  invalidator: {art} was written before {rel} was read, and its "
+                  f"stored inputs do not list {rel}. If it feeds that artifact, read it "
+                  f"first; if it does not, this stage writes two unrelated things.")
+
     # ── reads and writes ──────────────────────────────────────────────────────
 
     def reads(self, path: str, *, why: str,
@@ -228,12 +269,8 @@ class Invalidator:
             # where it came from.
             return p
 
-        # Reading something NEW after this process has already written is a smell: it
-        # cannot be among that artifact's inputs, so if it was meant to feed it, the code
-        # is in the wrong order. Reading back what this process itself wrote is not that.
         if self._writes and rel not in self._writes:
-            print(f"  invalidator: {rel} is read AFTER this process wrote "
-                  f"{self._writes[-1]} — it is not among that artifact's inputs.")
+            self._note_late_read(rel, self._writes[-1])
 
         if not p.exists() and not optional:
             raise FileNotFoundError(

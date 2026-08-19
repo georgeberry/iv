@@ -88,3 +88,54 @@ def test_tracing_never_takes_down_a_run(project, tmp_path):
     p = iv.reads("raw/d_{date}.parquet", why="one day",
                  part={"date": dt.date(2026, 8, 18)})
     assert p.exists()
+
+
+# ── read-after-write, judged at the end ───────────────────────────────────────
+
+def test_a_later_write_absolves_a_late_read(project, capsys):
+    """An incremental writer interleaves reads and writes; that is what `updates` means.
+
+    The rollforward fits one week, saves, fits the next — so every read in week two
+    follows week one's write. Warned at read time, that named six inputs as "not among
+    that artifact's inputs" while all six were on the final stamp. A diagnostic that is
+    usually wrong teaches you to skip the block it prints in.
+    """
+    import polars as pl
+    from invalidator import Invalidator
+
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project)
+    (project / "data" / "raw").mkdir(parents=True)
+    for n in ("week1", "week2"):
+        pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / f"{n}.parquet")
+
+    iv.reads("raw/week1.parquet", why="the first week")
+    with iv.updates("out/roll.parquet", why="one row per game") as p:
+        pl.DataFrame({"x": [1]}).write_parquet(p)
+    iv.reads("raw/week2.parquet", why="the second week")     # late, but...
+    with iv.updates("out/roll.parquet", why="one row per game") as p:
+        pl.DataFrame({"x": [1, 2]}).write_parquet(p)         # ...this picks it up
+
+    assert "raw/week2.parquet" in iv.record_of("out/roll.parquet")["in"]
+    iv._report_read_after_write()
+    assert "was written before" not in capsys.readouterr().out
+
+
+def test_a_genuinely_missed_late_read_is_reported(project, capsys):
+    """The other direction: nothing wrote again, so the input really is absent."""
+    import polars as pl
+    from invalidator import Invalidator
+
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project)
+    (project / "data" / "raw").mkdir(parents=True)
+    pl.DataFrame({"x": [1]}).write_parquet(project / "data" / "raw" / "late.parquet")
+
+    with iv.updates("out/roll.parquet", why="one row per game") as p:
+        pl.DataFrame({"x": [1]}).write_parquet(p)
+    iv.reads("raw/late.parquet", why="read too late to feed it")
+
+    assert "raw/late.parquet" not in iv.record_of("out/roll.parquet")["in"]
+    iv._report_read_after_write()
+    out = capsys.readouterr().out
+    assert "was written before" in out and "raw/late.parquet" in out
