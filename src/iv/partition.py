@@ -283,6 +283,35 @@ class PartitionCache:
         finally:
             self.iv._period_bound = outer
 
+    @contextmanager
+    def building_batch(self, partitions: list[str]):
+        """Build several partitions in ONE pass, under the newest of their bounds.
+
+        Some builders are inherently batched — a walk-forward eval fits every season in a
+        single sweep and cannot be called per season without refitting from scratch. For
+        those, per-partition `building()` does not fit.
+
+        WEAKER THAN `building`, and deliberately so rather than quietly: the read bound is
+        the MAXIMUM over the batch, so a stage could in principle read past an older
+        partition's own bound. What it still guarantees is that nothing in the batch sees
+        beyond the newest partition being built. Where the per-season restriction matters
+        it has to be enforced inside the builder — say where, at the call site.
+        """
+        parts = [str(p) for p in partitions]
+        self._entered.update(parts)
+        bounds = [self._upto[p] for p in parts if p in self._upto]
+        if not bounds and self.scoped():
+            raise InvalidatorError(
+                f"{self.template}: building {parts} with no bound. `plan(upto=...)` must "
+                f"name one for every partition it returns.")
+        outer = self.iv._period_bound
+        top = max(bounds) if bounds else None
+        self.iv._period_bound = {rel: (col, top) for rel, col in self.scoped().items()}
+        try:
+            yield top
+        finally:
+            self.iv._period_bound = outer
+
     def reused_rows(self, reuse: list[str]):
         import polars as pl
         df = self.existing()
