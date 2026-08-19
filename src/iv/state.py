@@ -69,7 +69,7 @@ LEGACY_VERSION = 2                   # the single `state.json`, migrated on firs
 
 # The closed vocabulary. Each entry changes what the id MEANS, not merely what is done
 # with it — which is why they live at the write site rather than in a list somewhere.
-POLICIES = ("tracked", "manual", "settled", "exempt", "clock")
+POLICIES = ("tracked", "manual", "settled", "clock")
 
 
 @dataclass(frozen=True)
@@ -95,6 +95,7 @@ class State:
         self._cache: dict | None = None
         self._collections: dict[tuple, str] = {}
         self._roots: dict[tuple, str] = {}
+        self._groups: dict[tuple, dict[str, str] | None] = {}
 
     @property
     def dir(self):
@@ -156,14 +157,18 @@ class State:
     def compute_id(fp_value: str, meta: str, inputs: dict[str, str], policy: str) -> str:
         """Fold the three terms into one id.
 
-        `exempt` drops the input term: a walk-forward artifact fit only on completed
-        periods has declared inputs that move nightly and cannot reach it. The metadata is
-        then the whole rule, which is exactly the trade — a new period needs a version
-        bump to appear.
+        NOTHING IS EXEMPT. There was a policy that dropped the input term for artifacts
+        fit only on completed periods, and it was the wrong answer to a real problem: it
+        could not tell "the live period moved" (irrelevant) from "an old period was
+        corrected" (very relevant), so it traded a false rebuild for a missed one, and a
+        new period needed a version bump to appear at all.
+
+        The right answer is that such an artifact does not depend on a whole file, it
+        depends on the PERIODS IT WAS BUILT FROM. That is `PartitionCache(scoped=...)`
+        with a bound per partition, which is precise in both directions.
         """
         body = [f"fp={fp_value}", f"meta={meta}"]
-        if policy != "exempt":
-            body += [f"{k}={inputs[k]}" for k in sorted(inputs)]
+        body += [f"{k}={inputs[k]}" for k in sorted(inputs)]
         return hashlib.sha256("|".join(body).encode()).hexdigest()[:_fp.DIGEST_LEN]
 
     # ── the stamps ────────────────────────────────────────────────────────────
@@ -385,6 +390,37 @@ class State:
             if not p.exists():
                 return _f.ABSENT
             return "slice:" + _f.frame_digest(pred(_f.read_frame(p)))
+
+    def group_ids(self, rel: str, by: str) -> dict[str, str]:
+        """`{period: digest}` for an artifact that holds many periods. Memoised.
+
+        The read is the expensive part — one round trip to a bucket — and a walk-forward
+        artifact asks about the same file once per partition. Twenty cohorts times a full
+        read of `box_features` on every staleness check is not affordable, so the whole map
+        is computed once per `(rel, by)` per process.
+        """
+        memo = self._groups.setdefault((rel, by), None)
+        if memo is not None:
+            return memo
+        from . import fingerprint as _f
+        p = self.iv.resolve(rel)
+        with self.iv.bookkeeping():
+            out = {} if not p.exists() else _f.group_digests(_f.read_frame(p), by)
+        self._groups[(rel, by)] = out
+        return out
+
+    def upto_id(self, rel: str, by: str, bound: str) -> str:
+        """The identity of everything in `rel` at or before `bound`.
+
+        This is what replaces a whole-file id for a reader that only sees the past. It
+        moves when a period AT OR BEFORE the bound changes, and does not move when a later
+        one does — which is the entire point.
+        """
+        g = self.group_ids(rel, by)
+        if not g:
+            return _fp.ABSENT
+        body = "|".join(f"{k}={g[k]}" for k in sorted(g) if k <= bound)
+        return "upto:" + _fp._short(body) if body else "upto:(empty)"
 
     def input_ids(self, inputs: dict[str, object],
                   assume_unchanged: dict[str, dict] | None = None,

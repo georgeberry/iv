@@ -49,6 +49,12 @@ _INVOKE = re.compile(r"(?:python[0-9.]*|uv run python|python -m)\s+(?:-\S+\s+)*"
                      r"([\w./-]+\.py)")
 
 
+def _pl_col(name: str):
+    """`pl.col(name)`, imported late — polars is an optional dependency of this package."""
+    import polars as pl
+    return pl.col(name)
+
+
 class Invalidator:
     """One pipeline: where its data lives, what version it is, and how to touch it.
 
@@ -134,6 +140,10 @@ class Invalidator:
         # also what two DIFFERENT slices of one artifact collapse to: together they are
         # not a slice of anything.
         self._read_slices: dict[str, str] = {}
+        # Set by `PartitionCache.building`: {input rel: (period column, bound)}. While it
+        # holds, `frame()` on one of those inputs returns only rows at or before the
+        # bound — the past-only invariant, enforced rather than intended.
+        self._period_bound: dict[str, tuple[str, str]] = {}
         self._late_reads: list[tuple[str, str]] = []
         self._late_hooked = False
         self._pending_fp: dict[str, str] = {}
@@ -329,6 +339,18 @@ class Invalidator:
                     f"define. Pass slices={{{slice!r}: <predicate>}} so the label filters "
                     f"rather than merely asserts. Known: {sorted(self.slices) or 'none'}")
             df = self.slices[slice](df)
+        # THE PAST-ONLY INVARIANT. Inside `PartitionCache.building(T)` a period-scoped
+        # input is cut to its bound, so a stage building period T physically cannot see
+        # a later one. Filtered, not asserted, for the same reason `slices` filters: a
+        # rule the caller has to remember is a rule that gets forgotten.
+        bound = self._period_bound.get(_paths.render(path, part))
+        if bound is not None:
+            col, upto = bound
+            if col not in df.columns:
+                raise DeclError(
+                    f"{path} is declared period-scoped on {col!r} and the frame has no "
+                    f"such column. Columns: {sorted(df.columns)[:8]}")
+            df = df.filter(_pl_col(col) <= upto)
         return df
 
     def collection(self, path: str, *, why: str, optional: bool = False,
@@ -388,7 +410,7 @@ class Invalidator:
 
         terminal  consumed outside this pipeline — an app, a human. Makes "nothing here
                   reads it" correct rather than an orphan.
-        policy    tracked | manual | settled | exempt | clock. See iv.state.
+        policy    tracked | manual | settled | clock. See iv.state.
         fp        how to fingerprint what you wrote. A coarse strategy on a DERIVED
                   artifact is a correctness hazard: if the id does not move, everything
                   downstream wrongly skips.

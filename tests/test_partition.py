@@ -419,17 +419,28 @@ WALK = '''
     from pipeline import iv
 
     COHORTS = ["2024", "2025", "2026"]
+    PREV = {"2024": "2023", "2025": "2024", "2026": "2025"}
+
+    # One file, many seasons — the shape `box_features` has. Declared so the cache can
+    # scope it; read inside `building()` so a cohort cannot see past its bound.
+    iv.reads("processed/features.parquet", why="per-season features, all seasons")
 
     # Cohort C is fit on data through C-1, so what can move it is stated per cohort.
     EXTRA = {c: os.environ.get("SRC_" + c, "v0") for c in COHORTS}
 
     cache = iv.partitions("processed/cohorts.parquet", "season",
-                          why="one row per cohort", policy="exempt")
-    reuse, rebuild = cache.plan(COHORTS, extra=EXTRA)
+                          why="one row per cohort",
+                          scoped={"processed/features.parquet": "season"})
+    reuse, rebuild = cache.plan(COHORTS, extra=EXTRA, upto=PREV)
     cache.report(reuse, rebuild)
 
-    fresh = pl.DataFrame({"season": rebuild, "v": [EXTRA[c] for c in rebuild]}) \\
-        if rebuild else None
+    rows = []
+    for c in rebuild:
+        with cache.building(c) as bound:
+            seen = iv.frame("processed/features.parquet",
+                            why="per-season features, all seasons")
+            rows.append({"season": c, "v": EXTRA[c], "n": seen.height, "bound": bound})
+    fresh = pl.DataFrame(rows) if rows else None
     old = cache.reused_rows(reuse) if reuse else None
     out = pl.concat([f for f in (old, fresh) if f is not None], how="vertical_relaxed") \\
         .sort("season")
@@ -450,22 +461,45 @@ def walk(project):
     return project
 
 
-def test_an_exempt_partition_ignores_the_inputs_that_cannot_reach_it(walk):
-    """A walk-forward artifact's declared inputs are whole files that move nightly. If
-    they enter the key, every completed cohort refits every run — 5m24s of frozen fits
-    in the pipeline this was built for."""
-    run(walk, "stages/totals.py")
-    assert "rebuild ( 3)" in run(walk, "stages/totals.py", force=True)
+def _features(project, rows):
+    """A period-partitioned input: one file, many seasons, like `box_features`."""
+    p = project / "data" / "processed" / "features.parquet"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(rows).write_parquet(p)
 
-    # A global input moves. Nothing should turn over.
-    pl.DataFrame({"pace": [101.0]}).write_parquet(
-        walk / "data" / "raw" / "league_rates.parquet")
-    box("2026", extra=9).write_parquet(walk / "data" / "raw" / "box" / "2026.parquet")
+
+def test_the_live_period_cannot_move_work_fit_on_completed_ones(walk):
+    """The whole point. A scoped input is period-partitioned, so cohort C depends on its
+    rows through C-1 — not on a file that happens to also contain the live season.
+
+    Keyed on the whole file, every completed cohort refits the moment tonight's games
+    land: 5m24s of frozen fits in the pipeline this was built for."""
+    _features(walk, {"season": ["2023", "2024", "2025"], "x": [1, 2, 3]})
+    run(walk, "stages/totals.py")
+
+    # The LIVE period arrives. No cohort is bounded at or past it, so nothing turns over.
+    _features(walk, {"season": ["2023", "2024", "2025", "2026"], "x": [1, 2, 3, 99]})
     out = run(walk, "stages/totals.py")
     assert "reuse   ( 3)" in out and "rebuild ( 0)" in out, out
 
 
+def test_a_correction_to_an_old_period_DOES_propagate(walk):
+    """The half `exempt` threw away. Dropping the input term entirely cannot tell the live
+    period moving from an old one being corrected, so it traded a false rebuild for a
+    missed one."""
+    _features(walk, {"season": ["2023", "2024", "2025"], "x": [1, 2, 3]})
+    run(walk, "stages/totals.py")
+
+    # 2024 is corrected. Cohorts bounded at 2024 or later must rebuild; 2024 (bound 2023)
+    # must not.
+    _features(walk, {"season": ["2023", "2024", "2025"], "x": [1, 77, 3]})
+    out = run(walk, "stages/totals.py")
+    assert "rebuild ( 2)" in out, out
+    assert "reuse   ( 1): 2024" in out, out
+
+
 def test_the_source_a_cohort_was_fit_on_is_what_rebuilds_it(walk):
+    _features(walk, {"season": ["2023", "2024", "2025"], "x": [1, 2, 3]})
     run(walk, "stages/totals.py")
     out = run(walk, "stages/totals.py", SRC_2025="v1")
     assert "rebuild ( 1): 2025" in out, out
@@ -534,3 +568,27 @@ def test_an_unstamped_partition_is_a_root_not_a_stale_output(project):
     reason = bumped.why_stale("raw/box_{season}.parquet")
     assert reason is not None and "box_2025" in reason, reason
     assert "box_2024" not in reason, "the unstamped archive partition stays quiet"
+
+
+def test_a_stage_building_a_period_cannot_see_the_future(walk):
+    """The invariant, enforced rather than intended.
+
+    Inside `building(C)` a period-scoped input is CUT to the bound, so a stage physically
+    cannot read forward. Filtered and not asserted, for the reason `slices` filters: a
+    rule the caller has to remember is a rule that gets forgotten.
+
+    Not theoretical. wvorp's `box_features` chose its clustering palette by counting nulls
+    over ALL seasons, so one null in a live-season row changed the centroids — and
+    therefore `cluster_id` and every `z_cl_*` — for rows six years earlier, inside the
+    block its own docs certified as safe. Under this scope the live rows are not there to
+    be counted.
+    """
+    _features(walk, {"season": ["2023", "2024", "2025", "2026"], "x": [1, 2, 3, 4]})
+    run(walk, "stages/totals.py")
+
+    got = pl.read_parquet(walk / "data" / "processed" / "cohorts.parquet").sort("season")
+    # Cohort 2024 is bounded at 2023 and must see ONE row; 2025 -> two; 2026 -> three.
+    # Four rows exist. No cohort sees the fourth.
+    assert dict(zip(got["season"], got["n"])) == {"2024": 1, "2025": 2, "2026": 3}, got
+    assert dict(zip(got["season"], got["bound"])) == {
+        "2024": "2023", "2025": "2024", "2026": "2025"}, got

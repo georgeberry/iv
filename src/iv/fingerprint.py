@@ -107,6 +107,21 @@ def frame_digest(frame) -> str:
     return _short(f"{frame.height}|{len(frame.columns)}|{frame.hash_rows(seed=0).sum()}")
 
 
+def group_digests(frame, by: str) -> dict[str, str]:
+    """`{group value: digest}` — one `frame_digest` per group of `by`.
+
+    The primitive behind a PERIOD-SCOPED dependency. A file holding many periods has one
+    whole-file digest, so touching the newest period moves it for every reader — including
+    readers that only ever look at completed ones. Digesting per period lets a reader
+    depend on the prefix it actually reads.
+
+    Built out of `frame_digest`, so a group's digest is what that group's rows would
+    fingerprint to on their own, and stays consistent with `_data`.
+    """
+    return {str(v): frame_digest(frame.filter(frame[by] == v))
+            for v in frame[by].unique().to_list()}
+
+
 def _data_order(path) -> str:
     """Order-SENSITIVE. For an artifact whose row order is itself an input downstream."""
     df = _frame(path)

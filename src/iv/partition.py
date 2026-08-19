@@ -30,6 +30,7 @@ data it describes cannot be believed.
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 
 from . import static as _static
 from .errors import InvalidatorError
@@ -47,6 +48,7 @@ class PartitionCache:
 
     def __init__(self, iv, output: str, key: str, *, why: str,
                  fp: str = "data", policy: str = "tracked", extra: str = "",
+                 scoped: dict[str, str] | None = None,
                  part: dict[str, str] | None = None) -> None:
         self.iv = iv
         # TWO names for one artifact, and both are needed. The TEMPLATE is the literal in
@@ -70,9 +72,17 @@ class PartitionCache:
         # flat panel and a nested one, and a caller that named no league reads the flat one.
         self._global = self._applicable({t: h for t, h in self._inputs.items()
                                          if key not in _template_fields(t)})
+        # {input rel: the column that periods it}. A whole-file input that is ITSELF
+        # period-partitioned. Partition T then depends on that input's rows at or before
+        # its bound, not on the whole file — which is what stops tonight's games moving
+        # work that was fit on completed periods, without losing the ability to notice a
+        # correction to an old one.
+        self.scoped = dict(scoped or {})
         self._existing = _MISSING
         self._plan_extra: dict[str, str] = {}
         self._fp_of: dict[str, str] = {}
+        self._upto: dict[str, str] = {}
+        self._building: str | None = None
 
     def _applicable(self, per: dict[str, str]) -> dict[str, str]:
         """Which per-partition templates this partition actually reads.
@@ -120,14 +130,23 @@ class PartitionCache:
         # An input template may carry the caller's OTHER fields too — a per-dataset,
         # per-season raw feed is `raw/{dataset}/{dataset}_{season}.parquet`, and only
         # `season` is the partition key.
-        # `exempt` drops the WHOLE-ARTIFACT inputs, and only those. A walk-forward
-        # artifact rates period C from data restricted to C-1, so `box_features` — one
-        # file covering every season, moving every night — cannot reach a completed
-        # cohort, and folding it in refits all of them for nothing. What CAN reach the
-        # row is per-partition by construction: the `{key}` templates below, and whatever
-        # the caller states through `extra=` on `plan`.
-        ids = {} if self.spec.policy == "exempt" else dict(self.iv.state.input_ids(
-            {self._fill(t): how for t, how in self._global.items()}))
+        #
+        # A walk-forward artifact rates period C from data restricted to C-1, so
+        # `box_features` — one file covering every season, moving every night — cannot
+        # reach a completed cohort. It does not follow that the input should be DROPPED:
+        # a correction to season 2019 must still reach cohort 2020. So a SCOPED global
+        # contributes the identity of its rows at or before this
+        # partition's bound; an unscoped one contributes its whole-file id.
+        plain, ids = {}, {}
+        for t, how in self._global.items():
+            rel = self._fill(t)
+            col = self.scoped.get(rel)
+            bound = self._upto.get(partition)
+            if col is not None and bound is not None:
+                ids[rel] = self.iv.state.upto_id(rel, col, bound)
+            else:
+                plain[rel] = how
+        ids.update(self.iv.state.input_ids(plain))
         for template, how in self._per.items():
             rel = self._fill(template, {self.key: source})
             ids[rel] = self.iv.state.id_of(rel, how)
@@ -178,6 +197,7 @@ class PartitionCache:
 
     def plan(self, want: list[str], *, extra: dict[str, str] | None = None,
              fp_of: dict[str, str] | None = None,
+             upto: dict[str, str] | None = None,
              force: bool | None = None) -> tuple[list[str], list[str]]:
         """Split `want` into (reuse, rebuild).
 
@@ -186,6 +206,14 @@ class PartitionCache:
         """
         self._plan_extra = dict(extra or {})
         self._fp_of = dict(fp_of or {})
+        # {partition: the newest period it is allowed to see}. Declared here rather than
+        # inferred, because "<= T" and "< T" are both real and only the stage knows which.
+        self._upto = {str(k): str(v) for k, v in (upto or {}).items()}
+        if self.scoped and not self._upto:
+            raise InvalidatorError(
+                f"{self.template} declares scoped inputs {sorted(self.scoped)} but plan() "
+                f"was given no `upto=`. A scoped input needs a bound per partition — "
+                f"without one there is nothing to scope it to.")
         want = [str(w) for w in want]
         if self.iv.force if force is None else force:
             # `--force` has to reach HERE, not only the guard above. Forcing an outer
@@ -201,6 +229,34 @@ class PartitionCache:
         self._warm([p for p in want if p in have])
         reuse = [p for p in want if p in have and stamps.get(p) == self._key(p)]
         return reuse, [p for p in want if p not in set(reuse)]
+
+    @contextmanager
+    def building(self, partition: str):
+        """Build one partition under its bound. Reads of scoped inputs are FILTERED.
+
+        This is the invariant, written in code rather than left to discipline: a partition
+        for period T is built from periods <= its bound and CANNOT SEE THE FUTURE. Inside
+        this scope `iv.frame` on a scoped input returns only rows at or before the bound,
+        so a stage physically cannot read forward — the same way `slices` filters rather
+        than merely asserting, so the declaration cannot drift from what happened.
+
+        It is not a theoretical hazard. `box_features` selected its clustering palette by
+        counting nulls over ALL seasons, so one null in a live-season row changed the
+        centroids and therefore `cluster_id` and every `z_cl_*` for 2019 — a live-season
+        row reaching back six years, inside the block the docs certified as safe. Under
+        this scope the live rows are not there to be counted.
+        """
+        bound = self._upto.get(str(partition))
+        if bound is None and self.scoped:
+            raise InvalidatorError(
+                f"{self.template}: building partition {partition!r} with no bound. "
+                f"`plan(upto=...)` must name one for every partition it returns.")
+        outer = self.iv._period_bound
+        self.iv._period_bound = {rel: (col, bound) for rel, col in self.scoped.items()}
+        try:
+            yield bound
+        finally:
+            self.iv._period_bound = outer
 
     def reused_rows(self, reuse: list[str]):
         import polars as pl
