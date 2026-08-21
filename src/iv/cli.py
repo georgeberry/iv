@@ -1,11 +1,3 @@
-"""The commands.
-
-Split by what they need. `graph`, `stage`, `check` and `export` read SOURCE, so they work
-on a fresh checkout with no data and nothing ever run. `status`, `why` and `plan` read the
-DATA TREE, so they describe what is actually on disk. `drift` needs both.
-
-None of them run anything. iv observes.
-"""
 from __future__ import annotations
 
 import importlib
@@ -49,7 +41,6 @@ def _find_root(start: Path) -> Path | None:
 
 
 def _load():
-    """The one piece of discovery in the package: which Pipeline to talk about."""
     spec = _INSTANCE
     root = _find_root(Path.cwd())
     if not spec:
@@ -77,16 +68,9 @@ def _graph_of():
         _die(e)
 
 
-# ── source ────────────────────────────────────────────────────────────────────
-
 @app.command()
 def graph(focus: str = typer.Option(None, "--focus", help="only this stage and its cone"),
           full: bool = typer.Option(False, "--full", help="every edge, not the reduction")):
-    """The DAG. Run order downward, dependencies as lanes.
-
-    An edge going UP is a stage reading something written later — a bug you can see rather
-    than one you have to query.
-    """
     g = _graph_of()
     order, parents = g.order(), g.parent_map()
     if not full:
@@ -98,7 +82,6 @@ def graph(focus: str = typer.Option(None, "--focus", help="only this stage and i
 
 @app.command()
 def stage(name: str):
-    """One stage: what it reads, what it writes, who is on each end, and the whys."""
     g = _graph_of()
     hits = [n for n in g.stages if name in n]
     if not hits:
@@ -109,7 +92,6 @@ def stage(name: str):
 
 @app.command()
 def check(trace: Path = typer.Option(None, "--trace", help="also diff against a run")):
-    """Every structural check. Exit 1 on any error."""
     g = _graph_of()
     errors, warns = _graph.check(g)
     if trace:
@@ -127,7 +109,6 @@ def check(trace: Path = typer.Option(None, "--trace", help="also diff against a 
 
 @app.command()
 def drift(trace: Path = typer.Option(None, "--trace")):
-    """What the code declares against what a run actually did."""
     iv = _load()
     path = trace or iv.trace_path
     if not path:
@@ -152,7 +133,6 @@ def drift(trace: Path = typer.Option(None, "--trace")):
 
 @app.command()
 def export(out: Path = typer.Option(None, "--out", help="write here instead of stdout")):
-    """`{nodes, parent_map, datasets}` as JSON."""
     import json
     body = json.dumps(_graph_of().export(), indent=1, sort_keys=True)
     if out:
@@ -164,15 +144,11 @@ def export(out: Path = typer.Option(None, "--out", help="write here instead of s
 
 @app.command()
 def viz(out: Path = typer.Option(Path("dag.png"), "--out")):
-    """Draw the dataset graph. Needs the [viz] extra."""
     from . import viz as _viz
     typer.echo(f"wrote {_viz.draw(_graph_of(), out)}")
 
 
-# ── the data tree ─────────────────────────────────────────────────────────────
-
 def _staleness(iv, g):
-    """`{dataset: reason or None}` in run order, plus the set that will rebuild."""
     out, stale = {}, set()
     for node in g.order():
         for site in g.stages[node].outputs:
@@ -194,7 +170,6 @@ def _staleness(iv, g):
 
 @app.command()
 def status():
-    """Current or stale, per dataset, in run order. Exit 1 if anything is stale."""
     iv = _load()
     g = _graph_of()
     reasons, stale = _staleness(iv, g)
@@ -211,7 +186,6 @@ def status():
 
 @app.command()
 def why(dataset: str):
-    """One dataset: every shard, what it holds, and what it was built from."""
     iv = _load()
     d = iv.resolve_out(dataset)
     try:
@@ -245,7 +219,6 @@ def why(dataset: str):
 
 @app.command()
 def plan():
-    """What would rebuild, and what might because it sits downstream of one."""
     iv = _load()
     g = _graph_of()
     reasons, stale = _staleness(iv, g)
@@ -270,7 +243,6 @@ def plan():
 
 @app.command()
 def gc(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
-    """Drop shards no longer current — what an interrupted commit leaves behind."""
     iv = _load()
     g = _graph_of()
     targets = [dataset] if dataset else g.produced

@@ -241,7 +241,7 @@ def test_commit_leaves_other_partitions_alone(tmp_path):
     assert set(sh.current_shards(d)) == {"season=2025", "season=2026"}
 
 
-def test_staging_is_local_and_outside_the_dataset(tmp_path):
+def test_staging_is_local_so_the_fingerprint_never_downloads_what_it_just_uploaded(tmp_path):
     p = sh.stage("1", tmp_path)
     assert p.parent.parent == tmp_path and "ds" not in str(p)
 

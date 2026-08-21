@@ -230,3 +230,42 @@ def test_an_undeclared_read_is_an_error_and_an_unseen_one_is_a_warning(project):
     errors, warns = _graph.drift(g_for(project), events)
     assert any("UNDECLARED READ" in e and "raw/secret/" in e for e in errors)
     assert any("raw/feed/" in w for w in warns)
+
+
+def test_a_prior_read_does_not_count_as_a_trigger(project):
+    """An accumulator whose only read is its own last copy runs once and never again.
+
+    `prior=` is excluded from the comparison by design, so it cannot be the thing that
+    makes a stage stale — and a stage with nothing else to read is the silent-failure case
+    this check exists for.
+    """
+    stage(project, "log", '''
+@iv.step(why="appends to its own last copy")
+def build():
+    iv.reads("raw/log/", why="yesterday's copy", prior=True, optional=True)
+    with iv.writes("raw/log/", why="a running log", terminal=True):
+        pass
+''')
+    errors, warns = _graph.check(g_for(project))
+    assert errors == [] and any("RUNS ONCE" in w and "prior=" in w for w in warns)
+
+
+def test_a_prior_read_is_not_a_dependency_edge(project):
+    """Its producer runs LATER; treating it as an edge would be a cycle on paper."""
+    stage(project, "draft", '''
+@iv.step(why="runs before the fetch, on last run's copy")
+def build():
+    iv.reads("raw/schedule/", why="the previous run's copy", prior=True)
+    with iv.writes("processed/draft/", why="the draft table", terminal=True):
+        pass
+''')
+    stage(project, "fetch", '''
+@iv.step(why="fetches the schedule, later in the same run")
+def build():
+    iv.reads("processed/draft/", why="which classes to fetch")
+    with iv.writes("raw/schedule/", why="the schedule"):
+        pass
+''')
+    errors, _ = _graph.check(g_for(project))
+    assert not any("CYCLE" in e for e in errors)
+    assert g_for(project).parent_map()["stages/draft.py"] == []

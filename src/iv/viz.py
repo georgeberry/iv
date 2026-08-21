@@ -1,31 +1,14 @@
-"""Draw the artifact graph to a PNG. Needs the `[viz]` extra.
-
-matplotlib rather than graphviz because it needs no system binary — `dot` is not installed
-on most machines and a picture that depends on one is a picture nobody looks at.
-
-Left to right is dependency order, so **an edge pointing LEFT is a bug** — the same
-invariant the terminal renderer states vertically. Layers come from longest-path depth
-rather than `multipartite_layout`, which keeps a chain on one line instead of fanning it.
-"""
 from __future__ import annotations
 
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")                       # no display; this runs in CI and over ssh
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt             # noqa: E402
 import networkx as nx                       # noqa: E402
 
 
-
 def to_networkx(g) -> nx.DiGraph:
-    """The DATASET graph: dataset -> dataset, with the stages collapsed onto edges.
-
-    Shorter than it used to be because there is less to say. There are no slices to split a
-    node on and no self-edges to skip: a dataset is written by exactly one stage, and a
-    stage that amends its own output declares that read as `prior=` — the previous run's
-    copy, which is lineage and not a dependency.
-    """
     d = nx.DiGraph()
     for ds in g.datasets:
         d.add_node(ds, kind="root" if not g.producers_of(ds)
@@ -40,7 +23,6 @@ def to_networkx(g) -> nx.DiGraph:
 
 
 def find_cycle(d: nx.DiGraph) -> list | None:
-    """The artifact cycle, as a list of paths, or None."""
     try:
         c = nx.find_cycle(d)
     except nx.NetworkXNoCycle:
@@ -68,11 +50,6 @@ def draw(g, out: Path, full: bool = False) -> Path:
             reduced.add_nodes_from(d.nodes(data=True))
             d = reduced
 
-    # A TEMPORAL loop is legal and has to be drawn as one. `build_preseason` reads
-    # `game_predictions` as `predict_games` left it and writes `preseason_team`;
-    # `predict_upcoming_games` then reads that and amends `game_predictions`. Over a run
-    # that is fine — the amendment comes after — but as a picture it is a ring. Break it
-    # at the LATEST stage's edge, which is the amendment, and say so on the figure.
     broken = []
     while (cycle := find_cycle(d)):
         pairs = [(cycle[i], cycle[i + 1]) for i in range(len(cycle) - 1)]
@@ -105,8 +82,6 @@ def draw(g, out: Path, full: bool = False) -> Path:
 
     title = "left to right is dependency order — an edge pointing LEFT is a bug"
     if broken:
-        # Named, not hidden. A ring the run order resolves is still a ring, and whoever
-        # reads this picture should know which edge was cut to draw it.
         title += "\n" + "\n".join(
             f"cut to lay out (amended later by {st}): {short(a)} -> {short(b)}"
             for a, b, st in broken)

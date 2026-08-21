@@ -113,7 +113,7 @@ def test_a_stage_with_several_outputs_is_checked_on_all_of_them(iv):
     assert iv.resolve_out("out/careers/").exists()
 
 
-def test_a_step_that_writes_nothing_never_skips(iv):
+def test_a_step_that_writes_nothing_never_skips_because_not_knowing_means_running(iv):
     """Not knowing what a stage produces means running it. The safe direction."""
     ran = []
 
@@ -408,7 +408,7 @@ def test_an_explicit_selection_is_a_coverage_claim(iv):
 
 # ── prior ─────────────────────────────────────────────────────────────────────
 
-def test_a_prior_read_is_lineage_not_a_trigger(iv):
+def test_a_prior_read_is_lineage_or_a_stage_is_stale_against_its_own_last_output(iv):
     """Read-modify-write: a stage must not be stale against its own last output."""
     seed(iv, "raw/feed/")
 
@@ -544,3 +544,41 @@ def test_unreadable_source_raises_rather_than_disabling_the_skip_check(iv):
     exec(compile("def build():\n    pass\n", "<string>", "exec"), ns)
     with pytest.raises(DeclError, match="cannot read the source"):
         iv.step(why="defined with exec, so it has no source")(ns["build"])
+
+
+def test_a_real_read_wins_over_a_prior_read_of_the_same_dataset(iv):
+    """Otherwise a stage that genuinely depends on X drops it because it also peeked."""
+    seed(iv, "raw/feed/")
+
+    @iv.step(why="reads one dataset both ways")
+    def build():
+        iv.reads("raw/feed/", why="a real upstream")
+        iv.reads("raw/feed/", why="...and the previous run's copy", prior=True)
+        with iv.writes("processed/out/", why="depends on the feed") as out:
+            pl.DataFrame({"a": [1]}).write_parquet(out)
+
+    build()
+    entry = _sh.read_index(iv.resolve_out("processed/out/"))["shards"][""]
+    assert sorted(entry["inputs"]) == ["raw/feed/"] and entry["prior"] == []
+    seed(iv, "raw/feed/", extra=99)
+    assert build() is True
+
+
+def test_a_stage_whose_only_read_is_its_own_prior_copy_runs_once(iv):
+    """Documented, not fixed: nothing can move it, so it never re-runs.
+
+    That is correct for fetch-once history and wrong for an accumulator, and the two are
+    indistinguishable from here — which is why `iv check` reports it rather than guessing.
+    """
+    calls = []
+
+    @iv.step(why="appends, but reads only its own last copy")
+    def build():
+        calls.append(1)
+        have = iv.reads("raw/solo/", why="yesterday's copy", prior=True, optional=True)
+        old = pl.read_parquet(have) if have else pl.DataFrame(schema={"n": pl.Int64})
+        with iv.writes("raw/solo/", why="a running log") as out:
+            pl.DataFrame({"n": list(range(len(old) + 1))}).write_parquet(out)
+
+    build(); build(); build()
+    assert len(calls) == 1 and iv.why_stale("raw/solo/") is None

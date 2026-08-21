@@ -1,17 +1,3 @@
-"""The DAG in the terminal: run order downward, dependencies as lanes.
-
-There is no layout search, because there is nothing to search for. A pipeline HAS an
-order — the script runs the stages in it — so rows are that order and the only question is
-how to route edges between them. That also makes the picture honest: **a line going UP is
-a stage reading something written later**, which is a bug you can see rather than one you
-have to go and query.
-
-Transitive reduction is on by default. Nearly every stage reads the same root feed, so the
-full graph is mostly edges that constrain nothing; drawing them all hides the handful that
-actually force the ordering. `--full` shows everything.
-
-Reads any `{nodes, parent_map}` JSON, which is dbt's `target/manifest.json` shape too.
-"""
 from __future__ import annotations
 
 import os
@@ -31,11 +17,8 @@ def use_color(flag: bool | None = None) -> bool:
     return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 
-# ── shaping ───────────────────────────────────────────────────────────────────
-
 def transitive_reduction(order: list[str], parents: dict[str, list[str]]
                          ) -> dict[str, list[str]]:
-    """Drop every edge implied by a longer path. Reachability is preserved exactly."""
     rank = {n: i for i, n in enumerate(order)}
     ancestors: dict[str, set[str]] = {}
     out: dict[str, list[str]] = {}
@@ -79,7 +62,6 @@ def descendants_of(node: str, parents: dict[str, list[str]]) -> set[str]:
 
 def focus(order: list[str], parents: dict[str, list[str]], needle: str
           ) -> tuple[list[str], dict[str, list[str]]]:
-    """One node's whole cone: everything that feeds it, everything it breaks."""
     hits = [n for n in order if needle in n]
     if not hits:
         raise KeyError(needle)
@@ -90,22 +72,17 @@ def focus(order: list[str], parents: dict[str, list[str]], needle: str
     return kept, {n: [p for p in parents.get(n, ()) if p in keep] for n in kept}
 
 
-# ── drawing ───────────────────────────────────────────────────────────────────
-
 def label(node: str) -> str:
-    """A stage is a file; show it without its directory and extension."""
     return node.rsplit("/", 1)[-1].removesuffix(".py")
 
 
 def render(order: list[str], parents: dict[str, list[str]],
            edge_artifacts: dict[str, list[str]] | None = None,
            color: bool | None = None, width: int | None = None) -> str:
-    """Rows in run order, one lane per open edge."""
     on = use_color(color)
     rank = {n: i for i, n in enumerate(order)}
     term = width or shutil.get_terminal_size((100, 24)).columns
 
-    # An edge occupies a lane from just after its parent's row through its child's row.
     edges = []
     for n in order:
         for p in parents.get(n, ()):
@@ -113,8 +90,6 @@ def render(order: list[str], parents: dict[str, list[str]],
                 edges.append((rank[p], rank[n], p, n))
     edges.sort(key=lambda e: (e[0], e[1]))
 
-    # A lane is free at `start` only if its last edge ENDED BEFORE that row. Reusing it on
-    # the same row puts a `╰` and a `╮` in one cell, and one silently overwrites the other.
     lanes: list[tuple[int, int, str, str]] = []
     placed: dict[tuple[str, str], int] = {}
     for e in edges:
@@ -154,7 +129,7 @@ def render(order: list[str], parents: dict[str, list[str]],
         has_parents = bool([p for p in parents.get(node, ()) if p in rank])
         marker = _c("36", "●", on) if has_parents else _c("32", "○", on)
         line = f"{gutter} {marker} {_c('1', label(node), on)}"
-        out.append(line[:term + 40])       # +40 for the invisible colour bytes
+        out.append(line[:term + 40])
 
         if edge_artifacts:
             for p in sorted(parents.get(node, ())):
@@ -164,7 +139,6 @@ def render(order: list[str], parents: dict[str, list[str]],
 
 
 def stage_card(node: str, g, color: bool | None = None) -> str:
-    """One stage: what it reads, what it writes, and who is on the far end of each."""
     on = use_color(color)
     stage = g.stages.get(node)
     if stage is None:

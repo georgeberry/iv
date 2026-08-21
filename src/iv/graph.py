@@ -1,20 +1,3 @@
-"""The declared graph, and every structural check over it.
-
-Stages are the nodes; a dataset written by one and read by another is the edge. Built from
-the static scan alone, so all of this works on a fresh checkout with no data and nothing
-ever run.
-
-WHAT THE CHECKS ARE FOR. Each one is a way a pipeline can be wrong that no single stage can
-notice about itself, which is exactly the class of bug that survives review: a read nothing
-produces, a write nothing consumes, two stages that both think they own a dataset, an
-ordering that runs a consumer before its producer, and a cycle.
-
-ONE WRITER PER DATASET, with no exception. A dataset is a directory, so a second producer
-that has something legitimate to add writes its own SHARD — a different partition. Two
-stages writing the same partition is unambiguously a bug, and an exemption for "the second
-one only amends the first" is how a stage that fully overwrites someone else's output hides
-indefinitely.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,7 +11,6 @@ class Graph:
     iv: object
     stages: dict[str, _static.Stage]
 
-    # ── the shape ─────────────────────────────────────────────────────────────
 
     @property
     def datasets(self) -> list[str]:
@@ -53,15 +35,13 @@ class Graph:
                    for st in self.stages.values() for s in st.outputs)
 
     def parent_map(self) -> dict[str, list[str]]:
-        """stage -> the stages that must run before it."""
         out: dict[str, list[str]] = {n: [] for n in self.stages}
         for node, st in self.stages.items():
-            for s in st.inputs:
+            for s in st.triggers:
                 out[node].extend(p for p in self.producers_of(s.dataset) if p != node)
         return {k: sorted(set(v)) for k, v in out.items()}
 
     def order(self) -> list[str]:
-        """A run order: declared if the pipeline names one, else a topological sort."""
         declared = declared_order(self.iv)
         if declared:
             return [n for n in declared if n in self.stages] + \
@@ -80,7 +60,6 @@ def build(iv) -> Graph:
 
 
 def declared_order(iv) -> list[str]:
-    """Run order scraped from the shell script the pipeline names, if it names one."""
     import re
     if not iv.order_from:
         return []
@@ -93,7 +72,7 @@ def declared_order(iv) -> list[str]:
     pat = re.compile(r"(?:python3?|uv run(?:\s+\S+)*?)\s+(\S+\.py)")
     for line in path.read_text().splitlines():
         if line.lstrip().startswith("#"):
-            continue                       # a commented-out stage is not in the order
+            continue
         m = pat.search(line)
         if m and m.group(1) not in seen:
             seen.add(m.group(1))
@@ -102,7 +81,6 @@ def declared_order(iv) -> list[str]:
 
 
 def toposort(parents: dict[str, list[str]]) -> list[list[str]]:
-    """Layers, each depending only on earlier ones. Raises on a cycle."""
     remaining = {k: set(v) & set(parents) for k, v in parents.items()}
     out = []
     while remaining:
@@ -122,10 +100,7 @@ def find_cycle(g: Graph) -> str | None:
     return None
 
 
-# ── the checks ────────────────────────────────────────────────────────────────
-
 def check(g: Graph) -> tuple[list[str], list[str]]:
-    """Every structural check. Returns (errors, warnings)."""
     errors: list[str] = []
     warns: list[str] = []
     roots = tuple(g.iv.roots)
@@ -161,18 +136,15 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     if cyc:
         errors.append(f"CYCLE  {cyc}")
 
-    # RUNS ONCE, NEVER AGAIN. A stage whose output has no id-bearing input has nothing that
-    # can move, so it is current forever the moment it is stamped — indistinguishable, from
-    # the outside, from the cache working perfectly. Correct for fetch-once history; a bug
-    # for anything polled, and the fix is to read the clock.
     for node, st in g.stages.items():
         real = [s for s in st.outputs if s.kind != "constant"]
-        if real and not st.inputs:
+        if real and not st.triggers:
             warns.append(
                 f"RUNS ONCE  {node} writes {sorted({s.dataset for s in real})} and "
-                f"reads no dataset, so nothing can ever make it stale. Right for a "
-                f"fetch-once archive. If it should re-run, give it something that moves — "
-                f'read a constants file such as "config/today/".')
+                f"reads nothing that can trigger it, so it runs once and never again. "
+                f"Right for a fetch-once archive. A prior= read does not count: it is the "
+                f"previous run's copy, excluded from the comparison by design. If this "
+                f'should re-run, read something that moves — "config/today/".')
 
     for node, st in g.stages.items():
         for fn in st.steps:
@@ -205,12 +177,6 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
 
 
 def drift(g: Graph, events: list[dict]) -> tuple[list[str], list[str]]:
-    """What a run actually touched, against what the code declares.
-
-    `recorded - declared` is an ERROR: the process really did open that dataset, so the
-    scan is wrong about the graph. `declared - recorded` is a WARN: an absent optional
-    input or a branch not taken produces it legitimately.
-    """
     errors, warns = [], []
     seen: dict[str, set[tuple[str, str]]] = {}
     for e in events:
