@@ -16,58 +16,26 @@ matplotlib.use("Agg")                       # no display; this runs in CI and ov
 import matplotlib.pyplot as plt             # noqa: E402
 import networkx as nx                       # noqa: E402
 
-from .static import slices_meet as _slices_meet  # noqa: E402
 
 
 def to_networkx(g) -> nx.DiGraph:
-    """The ARTIFACT graph: artifact -> artifact, with the stages collapsed onto edges.
+    """The DATASET graph: dataset -> dataset, with the stages collapsed onto edges.
 
-    A SLICED artifact is more than one node. `game_predictions.parquet` holds the seasons
-    that have been played and the one that has not, and drawn as a single node it is a
-    ring: the played rows feed `preseason_team`, which feeds the upcoming rows. Split by
-    slice it is a chain, which is what it actually is.
+    Shorter than it used to be because there is less to say. There are no slices to split a
+    node on and no self-edges to skip: a dataset is written by exactly one stage, and a
+    stage that amends its own output declares that read as `prior=` — the previous run's
+    copy, which is lineage and not a dependency.
     """
-    sliced = {}
-    for path, sites in g.sites.items():
-        labels = {s.slice for s in sites if s.slice}
-        if labels:
-            sliced[path] = labels
-
-    def nodes_for(site) -> list[str]:
-        """The node(s) a site touches. An UNLABELLED site on a sliced artifact means the
-        whole of it, so it touches every slice."""
-        labels = sliced.get(site.path)
-        if not labels:
-            return [site.path]
-        return [f"{site.path}#{site.slice}"] if site.slice else [
-            f"{site.path}#{l}" for l in sorted(labels)]
-
     d = nx.DiGraph()
-    for path in g.artifacts:
-        for n in ([f"{path}#{l}" for l in sorted(sliced[path])] if path in sliced
-                  else [path]):
-            d.add_node(n, kind="root" if not g.producers_of(path)
-                       else "terminal" if g.is_terminal(path) else "derived")
+    for ds in g.datasets:
+        d.add_node(ds, kind="root" if not g.producers_of(ds)
+                   else "terminal" if g.is_terminal(ds) else "derived")
     for node, stage in g.stages.items():
-        updated = {s.path for s in stage.sites if s.kind == "update"}
-        for out in stage.outputs():
-            for inp in stage.inputs():
-                if inp.path == out.path:
-                    continue                # an updates() self-edge is not a dependency
-                if inp.prior:
-                    # The PREVIOUS run's copy. `fetch_athletes` reads the draft table and
-                    # writes the bios; `build_draft_nba` reads the bios and writes the
-                    # draft table — a loop on paper, and neither waits for the other.
+        for out in stage.outputs:
+            for inp in stage.inputs:
+                if inp.dataset == out.dataset or inp.prior:
                     continue
-                if inp.path in updated and out.path in updated:
-                    # Two paths the SAME stage rewrites. Either alternative branches of
-                    # one declaration — the flat and the nested league spelling of a raw
-                    # feed — or simply independent. Neither is built FROM the other: both
-                    # already exist when the stage starts.
-                    continue
-                for a in nodes_for(inp):
-                    for b in nodes_for(out):
-                        d.add_edge(a, b, stage=node)
+                d.add_edge(inp.dataset, out.dataset, stage=node)
     return d
 
 
@@ -89,7 +57,7 @@ def _layers(d: nx.DiGraph) -> dict[str, int]:
 
 
 def short(node: str) -> str:
-    return node.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return node.rstrip("/").rsplit("/", 1)[-1]
 
 
 def draw(g, out: Path, full: bool = False) -> Path:
@@ -110,7 +78,7 @@ def draw(g, out: Path, full: bool = False) -> Path:
     broken = []
     while (cycle := find_cycle(d)):
         pairs = [(cycle[i], cycle[i + 1]) for i in range(len(cycle) - 1)]
-        order = g.order or {}
+        order = {n: i for i, n in enumerate(g.order())}
         a, b = max(pairs, key=lambda e: order.get(d.edges[e].get("stage"), 0))
         broken.append((a, b, d.edges[a, b].get("stage")))
         d.remove_edge(a, b)

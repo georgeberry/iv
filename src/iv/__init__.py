@@ -1,47 +1,46 @@
-"""iv — re-run a step only when something upstream actually changed.
+"""iv — re-run a stage only when the data it reads has changed.
 
-    from iv import Invalidator
+    from iv import Pipeline
     import polars as pl
 
-    iv = Invalidator(data_root="data", data_version="wnba-3.07")
+    pipe = Pipeline(root="gs://bucket/data", source_dirs=["scripts"])
 
-    @iv.step("processed/daily_revenue.parquet",
-             why="revenue per day; what the dashboard reads")
+    @pipe.step("processed/daily_revenue/", why="revenue per day; what the dashboard reads")
     def daily_revenue(out):
-        sales = pl.read_parquet(iv.reads("raw/sales.parquet",
-                                         why="one row per transaction"))
+        sales = pl.read_parquet(pipe.reads("raw/sales/", why="one row per transaction"))
         sales.group_by("day").agg(pl.col("amount").sum()).write_parquet(out)
 
     daily_revenue()      # runs, or skips because nothing upstream moved
 
-THE RULE, once:
+EVERYTHING IS A FILE.
 
-    id(A) = H( fingerprint(A's data), A's metadata, the ids of A's inputs )
-    stale(A) <=> recomputed id(A) != stored id(A)
+A dataset is a DIRECTORY of parquet shards, and a shard is named for its partition and a
+fingerprint of its own data:
 
-A root — a file nothing in the pipeline writes — has no inputs, so its id IS its data
-fingerprint. Rewrite it with identical rows and nothing downstream stirs; add a row and
-the whole chain moves. `data_version` sits in every id, so bumping it rebuilds the world —
-which is the one thing no fingerprint of the inputs can see.
+    processed/box_features/season=2026.7b09d4118ad10e77.parquet
 
-Everything else falls out of the same call sites: the DAG (`iv graph`), the
-structural checks (`iv check`), and documentation that cannot drift, because
-`why=` is a required argument and there is nowhere else for it to live.
+The data identifies the data. That is the whole rule, and the discipline is in what the
+name leaves out — no code hash, no version, no digest of what it was built from — because a
+dependant does not care how a shard came to exist, only what is in it. Rebuild it from
+different inputs and get identical rows, and nothing downstream stirs.
 
-iv observes; it does not run anything. Keep your bash, your Makefile, your
-scheduler.
+Model versions, hyperparameters and today's date are files too, written by `constants()`.
+A stage that answers to one reads it, so what depends on a value is something you can list,
+diff and draw — not a label on a call site that nothing can point at.
+
+A staleness check is a directory listing and ZERO file reads.
+
+iv observes; it does not run anything. Keep your bash, your Makefile, your scheduler.
 """
 from __future__ import annotations
 
-from .core import Invalidator, source_digest
-from .errors import (ConfigError, InvalidatorError, DeclError, FingerprintError,
-                     PolicyError, StateError)
-from .state import POLICIES, Spec
+from .core import Pipeline, source_digest
+from .errors import ConfigError, DeclError, IvError, StateError
+from .shards import Shard, fingerprint
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 
 __all__ = [
-    "Invalidator", "Spec", "POLICIES", "source_digest",
-    "InvalidatorError", "ConfigError", "DeclError", "FingerprintError", "PolicyError",
-    "StateError",
+    "Pipeline", "Shard", "fingerprint", "source_digest",
+    "IvError", "ConfigError", "DeclError", "StateError",
 ]

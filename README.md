@@ -1,25 +1,25 @@
 # iv
 
-**Re-run a step only when something upstream actually changed.**
+**Re-run a stage only when the data it reads has changed.**
 
 ```python
 # pipeline.py — once per project
-from iv import Invalidator
+from iv import Pipeline
 
-iv = Invalidator(data_root="data", data_version="sales-1.0", source_dirs=["stages"])
+pipe = Pipeline(root="gs://bucket/data", source_dirs=["stages"])
 ```
 
 ```python
 # stages/daily_revenue.py — read, transform, write
 import polars as pl
-from pipeline import iv
+from pipeline import pipe
 
 
-@iv.step("processed/daily_revenue.parquet",
-         why="revenue per day; what the dashboard reads")
+@pipe.step("processed/daily_revenue/",
+           why="revenue per day; what the dashboard reads")
 def daily_revenue(out):
-    sales = pl.read_parquet(iv.reads(
-        "raw/sales.parquet", why="one row per transaction; the only source of revenue"))
+    sales = pl.read_parquet(pipe.reads(
+        "raw/sales/", why="one row per transaction; the only source of revenue"))
 
     (sales.group_by("day", maintain_order=True)
           .agg(pl.col("amount").sum().alias("revenue"))
@@ -31,255 +31,181 @@ daily_revenue()
 
 ```
 $ python stages/daily_revenue.py
-  processed/daily_revenue.parquet: not on disk
+  processed/daily_revenue/: not on disk (the only shard)
 
 $ python stages/daily_revenue.py
-  processed/daily_revenue.parquet is current — skipping
+  processed/daily_revenue/ is current — skipping
 
-$ # ...rewrite raw/sales.parquet with the SAME rows but different bytes
+$ # ...rewrite raw/sales with the SAME rows but different bytes
 $ python stages/daily_revenue.py
-  processed/daily_revenue.parquet is current — skipping
+  processed/daily_revenue/ is current — skipping
 
 $ # ...add a transaction
 $ python stages/daily_revenue.py
-  processed/daily_revenue.parquet: input moved: raw/sales.parquet  5c834461… -> 1d87d86f…
+  processed/daily_revenue/: input moved: raw/sales/
 ```
 
-**The decorator is the output. The `iv.reads(...)` calls in the body are the inputs.**
+**The decorator is the output. The `pipe.reads(...)` calls in the body are the inputs.**
 Nothing else to declare.
 
-From those same call sites you also get **the DAG** (`iv graph`, `check`, `stage`)
-— read straight out of your source, so it works on a fresh checkout with no data and
-nothing ever run — and **documentation that cannot drift**, because `why=` is a required
-argument and there is nowhere else for it to live.
+From those same call sites you also get **the DAG** (`iv graph`, `check`, `stage`) — read
+straight out of your source, so it works on a fresh checkout with no data and nothing ever
+run — and **documentation that cannot drift**, because `why=` is a required argument and
+there is nowhere else for it to live.
 
-iv observes; it does not run anything. Keep your bash, your Makefile, your
-scheduler.
+iv observes; it does not run anything. Keep your bash, your Makefile, your scheduler.
 
-## The rule
+## Everything is a file
 
-```
-id(A) = H( fingerprint(A's data), A's metadata, the ids of A's inputs )
-
-stale(A)  <=>  recomputed id(A) != stored id(A)
-```
-
-A **root** — a file nothing in the pipeline writes — has no inputs, so its id is simply its
-data fingerprint. That is where the recursion bottoms out. Every derived artifact folds its
-inputs' ids into its own, so:
-
-- a root that moves moves the whole chain below it
-- a root **rewritten with identical data moves nothing** — the fingerprint is of the rows,
-  not of the bytes, so a no-op refetch invalidates nothing downstream. Never mtime.
-- `data_version` sits in every id, so bumping it rebuilds everything. That is what covers
-  the one thing no fingerprint of the inputs can see: a builder whose logic changed.
-
-The stamps are a **directory, one small JSON per artifact**, so stamping touches only the
-artifact it is about and parallel stages cannot erase each other's records. A pre-existing
-single `state.json` is migrated on first touch rather than thrown away.
-
-A staleness check is **O(number of root files)**, not O(data) and not O(depth). A derived
-input's id is a dict lookup in the state file; only roots are fingerprinted — and reading
-them is the *only* I/O a check ever does, which is why it is optional:
+A dataset is a **directory** of parquet shards. A shard is named for its partition and a
+fingerprint of its own data:
 
 ```
-iv status                 # roots taken on trust — code, versions, derived inputs
-iv status --fingerprint   # read the raw feeds too, as a live run does
+processed/box_features/
+    season=2025.a3f21c8e4f10bb92.parquet
+    season=2026.7b09d4118ad10e77.parquet
+    _index.json
 ```
 
-A live run always fingerprints; there is no point guessing when you are about to do the
-work anyway. Measured on one artifact with a single root input over a bucket: **0.22s
-cheap, 1.45s with `--fingerprint`** — and a 21-file collection costs 6.7s.
+**The data identifies the data.** That is the whole rule, and the discipline is in what the
+name leaves out — no code hash, no version, no digest of what it was built from — because a
+dependant does not care how a shard came to exist, only what is in it.
 
-Measured cold, one process per stage, against a real GCS bucket:
+- A shard rewritten with identical rows **moves nothing**: same data, same fingerprint, same
+  filename. Never mtime, never bytes.
+- A rebuild that produces identical output **stops there**. Editing a builder re-runs that
+  builder; if the numbers do not change, the 287-second fit downstream does not re-run.
+- A staleness check is **one directory listing and zero file reads**.
 
-```
-processed/possessions_with_lineups.parquet   current    0.09s   every input derived
-processed/xpm.parquet                        current    0.09s
-processed/box_features.parquet               current    0.82s   one root parquet
-processed/panel/player_box.parquet           stale      6.72s   a 21-file root collection
-```
-
-## Configuration is constructor arguments
-
-No TOML discovered by walking up from the working directory, no environment variables, no
-global singleton. Two pipelines are two `Invalidator`s; a test is one pointed at a temp
-directory.
+Model versions, hyperparameters and today's date are files too:
 
 ```python
-iv = Invalidator(
-    data_root="gs://bucket/data",     # a path, or a URI (needs cloudpathlib)
-    data_version="wnba-3.07",         # in EVERY id
-    source_dirs=["scripts", "src"],   # what the static scan walks
-    stages=[...],                     # or order_from="refresh.sh", for the ORDER check
-    trace=".iv/trace.ndjson",
-    out_root="/tmp/scratch",          # optional: writes go here, reads fall back
-    state_path="/tmp/shadow",         # optional: stamps somewhere other than out_root
-)
+pipe.constants("config/hyperparams/", why="the knobs the fit shape depends on",
+               half_life=4.0, epochs=300, seed=0)
 ```
 
-`out_root` is an **overlay**: writes land there and reads prefer it, falling back to
-`data_root`. So a local run can rebuild three stages, read its own outputs, and take
-everything else from the shared tree without touching it. The stamps follow the writes.
+A stage that answers to them reads them, and the ordinary machinery does the rest. What
+depends on a value is therefore something you can list, diff and draw — `iv graph` shows the
+edge — rather than a label on a call site that nothing can point at.
 
-The CLI needs one line to find it — the only discovery in the package:
+That means **there is no sledgehammer**: a version rebuilds exactly the stages that declared
+they read it. More honest, and more work to wield. It is the trade this makes on purpose.
 
-```toml
-[tool.iv]
-instance = "mypkg.pipeline:iv"
-```
-
-## Why a decorator, and why inputs are not in it
-
-A context manager **cannot decline to run its body** — [PEP 377](https://peps.python.org/pep-0377/)
-proposed exactly that and was rejected. A callable is the only thing you can choose not to
-call, which is why every system in this category (Dagster's `@asset`, Prefect's `@task`,
-redun's `@task`, R's `targets`) wraps the unit of work in a function.
-
-Inputs stay in the *body* rather than the decorator because iv never owns your
-storage — an input in the decorator could only hand you a path anyway, and then there would
-be two places to look. Keeping them in the body means an optional input, a branch, a loop
-over seasons, and a path that depends on a partition all work with no special syntax, and
-the AST scan still sees every one of them because the path is a literal.
-
-The body is also a natural scope, which is what makes the input set **per artifact** rather
-than per file: the decorator clears the read set on entry, so a step's inputs are exactly
-the reads inside it. The static scan follows same-file helpers and calls into other modules
-of the project, so a pipeline that reads through its own library still resolves.
-
-**Staleness is decided by the ids of the inputs the last build actually read**, not by the
-static scan. Treating the scan as authoritative produces a permanent rebuild on a real
-codebase — it cannot follow every call, so a run records an input the scan missed, the
-comparison fires, the rebuild records it again, and nothing settles. The cost is that
-*adding* a read does not by itself invalidate; `data_version`, `version=` or `code=True`
-is how you get that, and `iv drift` reports the gap against a real trace where it
-is measured rather than inferred.
-
-## Options
-
-At a read:
+## Two questions, kept apart
 
 | | |
 |---|---|
-| `why=` | **required.** What this input is for |
-| `optional=` | absent degrades a feature rather than failing the stage |
-| `prior=` | deliberately reads the previous run's copy |
-| `fp=` | how to fingerprint it, if it is a root |
-| `part=` | the partition values for a `{template}` path |
+| what a **dependant** sees | the fingerprints of the shards it read. Nothing else. |
+| whether a **stage** re-runs | have those fingerprints moved, or has its own source changed |
 
-At a step or a write, plus `terminal=` (consumed outside the pipeline), `code=` (fold the
-function's source into the id), `version=` and `allow_missing=`, and `policy=`:
+The first is in the filename. The second needs to compare against what the last build
+actually saw, and that is what `_index.json` holds: the input datasets, the partitions taken
+from each, and their ids.
 
-| `policy=` | |
-|---|---|
-| `tracked` | the default |
-| `manual` | never auto-deleted; a moved id is reported, not acted on |
-| `settled` | fetch-once history — the question is coverage, not staleness |
-| `exempt` | the input term is dropped from the id |
-| `clock` | today's date joins the metadata, so the id turns over daily |
-
-Fingerprint strategies: `data` (default, order-insensitive row hash), `data_order`, `rows`
-(parquet footer), `bytes`, `present`, or your own callable. **A coarse strategy on a
-derived artifact is a correctness hazard, not just imprecision** — if the id does not move,
-everything downstream wrongly skips.
-
-`version="model"` names one of the Invalidator's `versions={...}`, folded into that
-artifact's id on top of `data_version`. Only the artifacts that name it move when it
-changes — so a model bump does not rebuild a feature pipeline it cannot have affected. The
-name is a literal so the static scan can read it; the value lives on the instance.
-
-`allow_missing=True` says the builder may legitimately produce nothing — a projection with
-no season to project yet. Then there is nothing to stamp, the artifact stays stale, and the
-next run tries again. Without it, not writing is an error.
-
-`code` is **on by default**: a hash of the step function's own source goes into its id, so
-editing the transform rebuilds it with no version bump — and only that step, not its
-neighbours in the same file. The hash is over the *parsed* tree, so reformatting and
-comments are free. It is **shallow**: it sees that function, not the helpers it calls, and
-`data_version` remains the blunt instrument. `code=False` opts out; an unreadable source (a
-notebook, a REPL) degrades quietly rather than failing.
-
-## What the static scan is for
-
-**Information, not authority.** The scan answers *what is declared* — which artifacts
-exist, who produces each, and the metadata at each write site. Those are facts about the
-code as written, and `code=`, `version=` and `policy=` enter the id on that basis.
-
-It does **not** decide staleness. "Which reads will execute" is a claim about program
-execution, not a structural fact, and a scan can approximate it but never decide it.
-Treating an approximation as authoritative means comparing two sets derived by different
-mechanisms — and a rebuild cannot reconcile a disagreement about *derivation*, only about
-data, so any blind spot becomes an artifact that rebuilds forever with correct output and
-no error.
-
-So: the AST says what is declared; the filesystem and the state file say what moved. Only
-**roots** are ever fingerprinted. `iv check` and `iv drift` report the
-gaps, which is the useful thing to do with an approximation.
+The index is load-bearing, and it is worth being exact about how: **losing it causes a
+rebuild, never a false skip.** No record of what a shard was built from means the inputs
+cannot be compared, so the shard cannot be shown current, so it is rebuilt. Corrupt, raced,
+deleted — every failure lands on the safe side.
 
 ## For each season, do X
 
-Templates carry the partition, so the literal stays statically readable while the value is
-runtime — and the per-partition key falls straight out of the per-partition input:
-
 ```python
-def build_one(season):
-    box = pl.read_parquet(iv.reads(
-        "raw/box/{season}.parquet",
-        why="raw box scores for one season",
-        fp="rows",                          # 220 MiB a season; footer read only
-        part={"season": season}))
-    return ...
+def build_one(season, out):
+    box = pl.read_parquet(pipe.reads(
+        "raw/box/", why="raw box scores", where={"season": [season]}))
+    ...
 
-iv.for_each(SEASONS, build_one,
-            output="processed/box_features.parquet", key="season",
-            why="per-(season, player) box prior")
+pipe.for_each(SEASONS, build_one, dataset="processed/box_features/",
+              key="season", why="per-(season, player) box prior")
 ```
 
 ```
-  partitions [processed/box_features.parquet] by season
+  partitions [processed/box_features/] by season
     reuse   (20): 2006..2025
     rebuild ( 1): 2026
 ```
 
-Inputs *without* the partition key in their path affect every partition, so they enter
-every partition's key. `IV_FORCE=1` reaches both the outer guard and the inner
-cache, because forcing one while the other reuses everything is a rebuild that rebuilds
-nothing.
+**`where=` picks FILES, never rows.** So a walk-forward stage that must not see the future
+simply never opens it:
 
-**This is only sound if the loop is causally closed per partition** — every cross-partition
-term backward-looking. Test it: build incrementally and from scratch, and compare
-**unsorted**.
+```python
+pipe.reads("processed/possessions/", why="seasons strictly before this cohort",
+           where={"season": lambda s: s < cohort})
+```
+
+Past-only stops being enforced by a filter two layers down and becomes structural — visible
+at the call site, and impossible to get wrong. An explicit list (`["2019", "2020"]`) is a
+**coverage claim**: a missing value raises rather than silently returning a shorter read.
+
+## The primitives
+
+| | |
+|---|---|
+| `constants(dataset, *, why, **values)` | values from outside the data, as a shard |
+| `reads(dataset, *, why, where=, optional=, prior=)` | inputs; returns sorted shard paths |
+| `writes(dataset, *, why, part=, terminal=, allow_missing=)` | one shard, committed on clean exit |
+| `step(dataset, *, why, part=, code=, terminal=, allow_missing=)` | the guard |
+| `for_each(over, build_one, *, dataset, key, why)` | one shard per partition |
+| `external(name, *, why)` | provenance for a source outside the pipeline |
+
+`prior=True` reads what is on disk now and is excluded from the comparison — that is how a
+stage amends its own output without being permanently stale against itself.
+
+`code=` is the one thing that is not a file, and it earns it: a property of the *function*,
+not of the data, and with no version to bump it is what catches a builder edit. The hash is
+over the parsed tree, so reformatting and comments are free. It is **shallow** — this
+function, not the helpers it calls.
+
+## Guarantees worth knowing
+
+**Reads come back sorted, by parsed partition value.** `game_id=9` before `game_id=10`, with
+nobody remembering to zero-pad. Row order is an input to anything that slices or sums
+floats, so this is a guarantee rather than a convenience.
+
+**Anything unrecognised in a dataset directory is a hard error.** Skipping it would silently
+drop a partition and shorten every read downstream, which is indistinguishable from thin
+data after the fact. A shard is staged on local disk and moved in whole, so there is no
+in-flight file to make an exception for.
+
+**Staging is local even for a bucket.** Fingerprinting reads the rows, and reading a file
+that was just uploaded pays for the data twice. Write local, hash local, upload once,
+straight to the final name.
+
+**Two shards for one partition raise.** That means an interrupted commit, and picking the
+newer by mtime would be a silent, unreproducible answer. `iv gc` is the fix.
 
 ## Commands
 
 ```
-iv graph  [--focus X] [--artifacts] [--full]   # run order down, deps as lanes
-iv stage  <name>                               # one stage's I/O, both ends, the whys
-iv check                                       # every structural check; exit 1 on error
-iv drift  [--trace T]                          # what the code says vs what a run did
-iv status                                      # current / stale, with reasons
-iv why    <artifact>                           # the id, its components, what moved
-iv plan                                        # what would rebuild, and what might
-iv export [--out m.json]                       # {nodes, parent_map} — dbt's shape
-iv viz    [--out dag.png]                      # [viz] extra
+iv graph  [--focus X] [--full]   # run order down, dependencies as lanes
+iv stage  <name>                 # one stage's I/O, both ends, the whys
+iv check  [--trace T]            # every structural check; exit 1 on error
+iv drift  [--trace T]            # what the code says vs what a run did
+iv status                        # current / stale, with reasons
+iv why    <dataset>              # every shard, and what it was built from
+iv plan                          # what would rebuild, and what might
+iv export [--out m.json]         # {nodes, parent_map, datasets}
+iv gc     [dataset]              # drop what an interrupted commit left behind
+iv viz    [--out dag.png]        # [viz] extra
 ```
 
 ```
 $ iv graph
-╮  ○ fetch
-╰╮ ● totals
-╮╰ ● ratings
-╰─ ● publish
+╮  ○ config
+╰╮ ● fetch
+╮╰ ● features
+╰╮ ● fit
+ ╰ ● dump
 ```
 
 Rows are run order, so **an edge going up is a stage reading something written later** — a
 bug you can see rather than one you have to query.
 
 The checks: read with no producer · write with no consumer (legal iff `terminal=True`) ·
-ordering · two writers · writers disagreeing about what an artifact is · cycles (an
-`updates()` self-edge is excluded by construction) · and a **guarded fetch**, which is this
-package's own silent-failure mode — an artifact built from no declared input has nothing in
-its id that can move, so guarding its stage means it runs once and never again.
+**one writer per dataset**, no exceptions · ordering · cycles · and **runs once**, which is
+this package's own silent-failure mode — a stage that reads no dataset has nothing that can
+make it stale, so it runs once and never again. Right for a fetch-once archive; for anything
+polled, the fix is to read a clock file.
 
 ## Tracing
 
@@ -288,26 +214,36 @@ IV_TRACE=.iv/trace.ndjson ./refresh.sh
 iv drift
 ```
 
-`recorded − declared` is an **error** (the process really did open that file);
+`recorded − declared` is an **error** (the process really did open that dataset);
 `declared − recorded` is a **warning** (an absent optional input, a branch not taken).
+
+The scan is **information, not authority**. It answers what is declared. It does not decide
+staleness — "which reads will execute" is a claim about execution, not a structural fact,
+and treating an approximation as authoritative means any blind spot becomes a dataset that
+rebuilds forever with correct output and no error. What governs is what the last build
+actually read.
 
 ## Known limits
 
-**Fingerprinting a per-partition collection is O(files) round trips.** Measured against a
-real GCS bucket: 21 files at `fp="rows"` (footer only) took 7.1s. Fine when one stage reads
-the collection and everything downstream reads a single merged file; not fine if every
-stage reads the raw collection.
+**iv only knows about I/O routed through it.** A bare `pl.read_parquet(path)` is invisible:
+it will not appear in the graph and will not enter any id. Patching the primitives as a
+*detector* — so an untagged read raises rather than passing quietly — is the next thing.
 
-**iv only knows about I/O routed through it.** A bare `pl.read_parquet(path)` is
-A bare `pl.read_parquet(path)` is invisible: it will not appear in the graph and will not
-enter any id. Patching the primitives as a *detector* — so an untagged read raises rather
-than passing quietly — is the next thing.
+**Non-parquet outputs are outside the model.** A dataset is parquet shards, because the
+fingerprint is of rows. A stage that must emit JSON at a fixed path for something else to
+consume can do it, but iv cannot track that file.
+
+**`code=` is shallow.** It sees the decorated function, not the helpers it calls. Measured
+on a real repo, widening it to the call closure was worse in both directions at once: 84
+functions across 18 files for one stage, an edit to an import-time monkey-patch invalidating
+24 of 28 datasets, and the 1,350-line model module unreachable because it is re-exported
+through a computed binding.
 
 ## Install
 
 ```
 pip install iv            # core is stdlib only
-pip install 'iv[data]'    # polars, for the default fingerprint
+pip install 'iv[data]'    # polars, for fingerprints
 pip install 'iv[cli]'     # typer
 pip install 'iv[viz]'     # networkx + matplotlib
 ```

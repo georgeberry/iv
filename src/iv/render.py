@@ -170,25 +170,25 @@ def stage_card(node: str, g, color: bool | None = None) -> str:
     if stage is None:
         raise KeyError(node)
     lines = [_c("1", node, on)]
-    for s in stage.externals():
-        lines.append(f"  {_c('1', 'from', on)}  {s.path}")
+    for s in stage.externals:
+        lines.append(f"  {_c('1', 'from', on)}  {s.dataset}")
         lines.append(f"      {_c('90', s.why, on)}")
-    for kind, sites in (("reads", stage.inputs()),
-                        ("writes", stage.outputs())):
+    for kind, sites in (("reads", stage.inputs),
+                        ("writes", stage.outputs)):
         if not sites:
             continue
         lines.append(f"  {_c('1', kind, on)}")
-        for s in sorted(sites, key=lambda x: x.path):
+        for s in sorted(sites, key=lambda x: x.dataset):
             flags = "".join(f" {f}" for f, ok in
                             (("?", s.optional), ("!", s.terminal), ("~", s.prior)) if ok)
             if kind == "reads":
-                far = g.producers_of(s.path)
+                far = g.producers_of(s.dataset)
                 far_s = ("<- " + ", ".join(label(f) for f in far)) if far \
                     else _c("90", "(a root — fetched outside this pipeline)", on)
             else:
-                far = [c for c in g.consumers_of(s.path) if c != node]
+                far = [c for c in g.consumers_of(s.dataset) if c != node]
                 far_s = ("-> " + ", ".join(label(f) for f in far)) if far \
                     else _c("90", "(terminal — the app or a human)", on)
-            lines.append(f"    {s.path}{flags}  {far_s}")
+            lines.append(f"    {s.dataset}{flags}  {far_s}")
             lines.append(f"      {_c('90', s.why, on)}")
     return "\n".join(lines)

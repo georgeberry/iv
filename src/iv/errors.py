@@ -2,39 +2,30 @@
 
 One class per kind of mistake, because the recovery differs. A `ConfigError` means the
 project is not set up; a `DeclError` means a call site is wrong and names file:line; a
-`FingerprintError` means a strategy cannot be applied to that file and tells you which one
-to pick instead.
+`StateError` means the data tree says something impossible.
 
-Nothing here has a fallback. A default in place of an error is how an artifact ends up
-keyed on a constant and permanently, silently current.
+Nothing here has a fallback. A default in place of an error is how a dataset ends up keyed
+on a constant and permanently, silently current.
 """
 from __future__ import annotations
 
 
-class InvalidatorError(Exception):
+class IvError(Exception):
     """Base for everything iv raises."""
 
 
-class ConfigError(InvalidatorError):
-    """The project root, data root, or version axes could not be resolved."""
+class ConfigError(IvError):
+    """The project root or the data root could not be resolved."""
 
 
-class DeclError(InvalidatorError):
+class DeclError(IvError):
     """A call site is malformed. Always names the file and line where possible."""
 
 
-class FingerprintError(InvalidatorError):
-    """A fingerprint strategy cannot be applied to this file."""
+class StateError(IvError):
+    """The data tree is not what it claims to be.
 
-
-class PolicyError(InvalidatorError):
-    """Two writers of one artifact disagree about how it should be treated."""
-
-
-class StateError(InvalidatorError):
-    """A stamp is unreadable or malformed.
-
-    Deliberately fatal rather than an empty dict: an empty state makes invalidation a
-    no-op and every builder rebuild forever. A MISSING record directory is the only legal
-    empty state.
+    A file in a dataset directory that is not a shard, two shards for one partition, a
+    read that selected nothing. Deliberately fatal: each of these would otherwise shorten
+    a read silently, and a short read is indistinguishable from thin data after the fact.
     """

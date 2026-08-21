@@ -1,7 +1,7 @@
-"""`shards.py` alone: names, ordering, digests, selection, commit, gc, index.
+"""`shards.py` alone: names, ordering, fingerprints, selection, commit, gc, index.
 
-No Invalidator, no static scan, no bucket. A shard is a file in a temp directory and every
-question here is answerable from the directory listing, which is the point of the module.
+No Pipeline, no static scan, no bucket. A shard is a file in a temp directory, and every
+question here is answerable from the directory listing — which is the point of the module.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from iv.errors import DeclError, StateError
 
 
 def dg(tag: str) -> str:
-    """A stand-in digest of the real shape — 16 hex chars, which the names require."""
+    """A stand-in fingerprint of the real shape — 16 hex chars, which names require."""
     return hashlib.sha256(tag.encode()).hexdigest()[:sh.DIGEST_LEN]
 
 
@@ -30,48 +30,26 @@ def put(d, name, f=None):
     return d / name
 
 
-# ── names round-trip ──────────────────────────────────────────────────────────
+def shard(d, part, tag, f=None):
+    return put(d, sh.shard_name(part, dg(tag)), f)
 
-def test_name_round_trips_with_and_without_a_partition(tmp_path):
-    c, r = dg("c"), dg("r")
-    n = sh.shard_name({"season": 2026}, c, r)
-    assert n == f"season=2026.{c}.{r}.parquet"
+
+# ── names ─────────────────────────────────────────────────────────────────────
+
+def test_a_name_is_a_partition_and_a_fingerprint_and_nothing_else(tmp_path):
+    n = sh.shard_name({"season": 2026}, dg("c"))
+    assert n == f"season=2026.{dg('c')}.parquet"
     got = sh.parse_name(tmp_path / n)
-    assert (got.part_str, got.content, got.recipe) == ("season=2026", c, r)
-    assert got.part == {"season": "2026"}
+    assert (got.part_str, got.fp, got.part) == ("season=2026", dg("c"), {"season": "2026"})
 
-    got2 = sh.parse_name(tmp_path / sh.shard_name(None, c, r))
-    assert (got2.part_str, got2.content, got2.recipe, got2.part) == ("", c, r, {})
+    bare = sh.parse_name(tmp_path / sh.shard_name(None, dg("c")))
+    assert (bare.part_str, bare.fp, bare.part) == ("", dg("c"), {})
 
 
 def test_multi_key_part_preserves_declared_order(tmp_path):
-    n = sh.shard_name({"school": "duke", "season": 2019}, dg("c"), dg("r"))
+    n = sh.shard_name({"school": "duke", "season": 2019}, dg("c"))
     assert n.startswith("school=duke__season=2019.")
     assert sh.parse_name(tmp_path / n).part == {"school": "duke", "season": "2019"}
-
-
-def test_settled_names_carry_no_digests(tmp_path):
-    n = sh.shard_name({"season": 2019}, digested=False)
-    assert n == "season=2019.parquet"
-    got = sh.parse_name(tmp_path / n, digested=False)
-    assert got.part_str == "season=2019" and got.content == "" and got.recipe == ""
-
-    assert sh.shard_name(None, digested=False) == "_.parquet"
-    assert sh.parse_name(tmp_path / "_.parquet", digested=False).part == {}
-
-
-def test_policy_decides_how_a_name_parses_not_the_name(tmp_path):
-    """One filename, two datasets, two answers — and neither is a guess.
-
-    `<hex>.<hex>.parquet` is a content+recipe pair on a tracked dataset. On a settled one
-    it is not a shard at all, because a settled name is a partition and a partition is
-    always `key=value`. Deciding by the dataset's POLICY is what stops a name parsing two
-    ways, and a wrong guess here would be a wrong id rather than an error.
-    """
-    name = f"{dg('a')}.{dg('b')}.parquet"
-    tracked = sh.parse_name(tmp_path / name, digested=True)
-    assert (tracked.content, tracked.recipe) == (dg("a"), dg("b"))
-    assert sh.parse_name(tmp_path / name, digested=False) is None
 
 
 def test_a_separator_in_a_value_raises_rather_than_being_escaped():
@@ -80,26 +58,39 @@ def test_a_separator_in_a_value_raises_rather_than_being_escaped():
             sh.encode_part(bad)
 
 
-def test_a_digest_must_look_like_one():
+def test_an_underscore_in_a_value_is_fine(tmp_path):
+    """`_` is legal precisely because it is not the separator — `dataset=player_box` is real."""
+    n = sh.shard_name({"dataset": "player_box", "season": 2026}, dg("c"))
+    assert sh.parse_name(tmp_path / n).part == {"dataset": "player_box", "season": "2026"}
+
+
+def test_a_fingerprint_must_look_like_one():
     with pytest.raises(DeclError, match="hex"):
-        sh.shard_name({"season": 2026}, "short", dg("r"))
+        sh.shard_name({"season": 2026}, "short")
 
 
-def test_junk_in_a_dataset_directory_is_skipped_not_fatal(tmp_path):
-    """`list_shards` walks whatever is there, so "not ours" has to be an answer."""
+def test_non_shard_files_are_not_ours(tmp_path):
+    for name in (sh.INDEX_NAME, "notes.txt", ".parquet", "aaaa.parquet",
+                 "notes.backup.parquet", "season=2019.parquet"):
+        assert sh.parse_name(tmp_path / name) is None
+
+
+def test_a_stray_file_of_any_shape_stops_the_run(tmp_path):
+    """An unexpected file is a bug. Skipping it would silently drop a partition."""
     d = tmp_path / "ds"
-    keep = put(d, sh.shard_name({"season": 2026}, dg("a"), dg("r")))
-    put(d, "notes.backup.parquet")
-    put(d, "season=2019.parquet")             # settled-shaped, in a tracked dataset
-    (d / "README.md").write_text("hi")
+    shard(d, {"season": 2026}, "a")
+    for junk in ("notes.backup.parquet", "README.md", "_tmp-1.parquet", ".DS_Store"):
+        (d / junk).write_text("x")
+        with pytest.raises(StateError, match="not a shard"):
+            sh.list_shards(d)
+        (d / junk).unlink()
+
+
+def test_the_index_is_the_only_other_name_allowed(tmp_path):
+    d = tmp_path / "ds"
+    keep = shard(d, {"season": 2026}, "a")
     (d / sh.INDEX_NAME).write_text("{}")
-    assert [s.name for v in sh.list_shards(d).values() for s in v] == [keep.name]
-
-
-def test_non_shard_files_are_ignored(tmp_path):
-    assert sh.parse_name(tmp_path / "_index.json") is None
-    assert sh.parse_name(tmp_path / "notes.txt") is None
-    assert sh.parse_name(tmp_path / ".parquet") is None
+    assert [x.name for v in sh.list_shards(d).values() for x in v] == [keep.name]
 
 
 # ── ordering ──────────────────────────────────────────────────────────────────
@@ -107,7 +98,7 @@ def test_non_shard_files_are_ignored(tmp_path):
 def test_numeric_partitions_sort_numerically_not_lexically(tmp_path):
     d = tmp_path / "ds"
     for gid in (1, 2, 9, 10, 100):
-        put(d, sh.shard_name({"game_id": gid}, dg(str(gid)), dg("r")))
+        shard(d, {"game_id": gid}, str(gid))
     assert [s.part["game_id"] for s in sh.select(sh.current_shards(d))] == \
         ["1", "2", "9", "10", "100"]
 
@@ -116,9 +107,8 @@ def test_read_order_is_stable_across_repeated_listings(tmp_path):
     """Row order is a model input; a listing that reorders is the bug this rules out."""
     d = tmp_path / "ds"
     for s in (2011, 2006, 2026, 2019):
-        put(d, sh.shard_name({"season": s}, dg(str(s)), dg("r")))
-    orders = {tuple(x.name for x in sh.select(sh.current_shards(d))) for _ in range(6)}
-    assert len(orders) == 1
+        shard(d, {"season": s}, str(s))
+    assert len({tuple(x.name for x in sh.select(sh.current_shards(d))) for _ in range(6)}) == 1
     assert [x.part["season"] for x in sh.select(sh.current_shards(d))] == \
         ["2006", "2011", "2019", "2026"]
 
@@ -128,43 +118,42 @@ def test_sort_is_total_so_ties_cannot_reorder():
     assert a != b and (a < b or b < a)
 
 
-# ── digests ───────────────────────────────────────────────────────────────────
+# ── fingerprints ──────────────────────────────────────────────────────────────
 
-def test_content_digest_is_order_sensitive():
+def test_a_permutation_is_not_new_data():
     f = frame(5)
-    assert sh.content_digest(f) != sh.content_digest(f.reverse())
+    assert sh.fingerprint(f) == sh.fingerprint(f.reverse())
 
 
-def test_content_digest_moves_on_a_schema_change_alone():
+def test_the_fingerprint_moves_on_a_schema_change_alone():
     f = frame(3)
-    assert sh.content_digest(f) != sh.content_digest(f.rename({"b": "c"}))
-    assert sh.content_digest(f) != sh.content_digest(f.with_columns(pl.col("b").cast(pl.Float64)))
+    assert sh.fingerprint(f) != sh.fingerprint(f.rename({"b": "c"}))
+    assert sh.fingerprint(f) != sh.fingerprint(f.with_columns(pl.col("b").cast(pl.Float64)))
 
 
-def test_content_digest_is_stable_and_matches_the_on_disk_form(tmp_path):
+def test_the_fingerprint_sees_a_string_only_change():
+    """The hole in a moment summary: mean and std are undefined for a string column."""
+    a = pl.DataFrame({"n": [1, 2], "team": ["LAS", "NYL"]})
+    b = pl.DataFrame({"n": [1, 2], "team": ["SEA", "CHI"]})
+    assert sh.fingerprint(a) != sh.fingerprint(b)
+
+
+def test_the_fingerprint_is_stable_and_matches_the_on_disk_form(tmp_path):
     f = frame(4)
-    p = put(tmp_path / "ds", f"{dg('x')}.{dg('y')}.parquet", f)
-    assert sh.content_digest(f) == sh.content_digest(f)
-    assert sh.content_digest_of_file(p) == sh.content_digest(f)
+    p = put(tmp_path / "ds", f"{dg('x')}.parquet", f)
+    assert sh.fingerprint(f) == sh.fingerprint(f)
+    assert sh.fingerprint_of_file(p) == sh.fingerprint(f)
 
 
 def test_empty_frames_differ_by_schema():
-    a = pl.DataFrame(schema={"a": pl.Int64})
-    b = pl.DataFrame(schema={"a": pl.Utf8})
-    assert sh.content_digest(a) != sh.content_digest(b)
+    assert sh.fingerprint(pl.DataFrame(schema={"a": pl.Int64})) != \
+        sh.fingerprint(pl.DataFrame(schema={"a": pl.Utf8}))
 
 
-def test_recipe_is_insensitive_to_input_discovery_order():
-    x = sh.recipe_digest("meta", {"a/": "1", "b/": "2"})
-    assert x == sh.recipe_digest("meta", {"b/": "2", "a/": "1"})
-    assert x != sh.recipe_digest("meta", {"a/": "1", "b/": "3"})
-    assert x != sh.recipe_digest("other", {"a/": "1", "b/": "2"})
-
-
-def test_dataset_id_folds_content_and_ignores_file_order(tmp_path):
+def test_dataset_id_folds_fingerprints_and_ignores_file_order(tmp_path):
     d = tmp_path / "ds"
     for s in ("2025", "2026"):
-        put(d, sh.shard_name({"season": s}, dg(s), dg("r")))
+        shard(d, {"season": s}, s)
     sel = sh.select(sh.current_shards(d))
     assert sh.dataset_id(sel) == sh.dataset_id(list(reversed(sel)))
     assert sh.dataset_id([]) == "ds:(empty)"
@@ -173,21 +162,20 @@ def test_dataset_id_folds_content_and_ignores_file_order(tmp_path):
 def test_a_selection_has_its_own_id(tmp_path):
     d = tmp_path / "ds"
     for s in ("2024", "2025", "2026"):
-        put(d, sh.shard_name({"season": s}, dg(s), dg("r")))
+        shard(d, {"season": s}, s)
     all_ = sh.current_shards(d)
-    upto25 = sh.select(all_, {"season": lambda v: v <= "2025"})
-    assert len(upto25) == 2
-    assert sh.dataset_id(upto25) != sh.dataset_id(sh.select(all_))
+    upto = sh.select(all_, {"season": lambda v: v <= "2025"})
+    assert len(upto) == 2 and sh.dataset_id(upto) != sh.dataset_id(sh.select(all_))
 
 
 def test_a_later_shard_cannot_move_an_earlier_selection(tmp_path):
-    """The walk-forward guarantee, and the reason `fp_of=` is not needed."""
+    """The walk-forward guarantee, and the reason a per-row bound is not needed."""
     d = tmp_path / "ds"
     for s in ("2024", "2025"):
-        put(d, sh.shard_name({"season": s}, dg(s), dg("r")))
+        shard(d, {"season": s}, s)
     upto = {"season": lambda v: v <= "2025"}
     before = sh.dataset_id(sh.select(sh.current_shards(d), upto))
-    put(d, sh.shard_name({"season": "2026"}, dg("2026"), dg("r")))
+    shard(d, {"season": "2026"}, "2026")
     assert sh.dataset_id(sh.select(sh.current_shards(d), upto)) == before
 
 
@@ -196,87 +184,82 @@ def test_a_later_shard_cannot_move_an_earlier_selection(tmp_path):
 def test_an_explicit_list_is_a_coverage_claim(tmp_path):
     d = tmp_path / "ds"
     for s in ("2024", "2025"):
-        put(d, sh.shard_name({"season": s}, dg(s), dg("r")))
-    got = sh.select(sh.current_shards(d), {"season": ["2024", "2025"]})
-    assert [x.part["season"] for x in got] == ["2024", "2025"]
+        shard(d, {"season": s}, s)
+    assert [x.part["season"] for x in
+            sh.select(sh.current_shards(d), {"season": ["2024", "2025"]})] == ["2024", "2025"]
     with pytest.raises(StateError, match="2026"):
         sh.select(sh.current_shards(d), {"season": ["2025", "2026"]})
 
 
 def test_a_predicate_may_match_nothing(tmp_path):
     d = tmp_path / "ds"
-    put(d, sh.shard_name({"season": "2024"}, dg("c"), dg("r")))
+    shard(d, {"season": "2024"}, "c")
     assert sh.select(sh.current_shards(d), {"season": lambda v: v > "2100"}) == []
 
 
 def test_selection_on_a_missing_directory_is_empty(tmp_path):
-    assert sh.current_shards(tmp_path / "nope") == {}
-    assert sh.select({}, None) == []
+    assert sh.current_shards(tmp_path / "nope") == {} and sh.select({}, None) == []
 
 
 # ── commit ────────────────────────────────────────────────────────────────────
 
-def test_commit_names_by_digest_and_drops_what_it_replaced(tmp_path):
+def test_commit_names_by_fingerprint_and_drops_what_it_replaced(tmp_path):
     d = tmp_path / "ds"
-    d.mkdir()
     f = frame(3)
-    tmp = d / "tmp-1.parquet"
+    tmp = sh.stage("1", tmp_path)
     f.write_parquet(tmp)
-    final = sh.commit(tmp, d, part={"season": 2026},
-                      content=sh.content_digest(f), recipe=dg("r1"))
-    assert final.name == f"season=2026.{sh.content_digest(f)}.{dg('r1')}.parquet"
+    first = sh.commit(tmp, d, part={"season": 2026})
+    assert first.name == f"season=2026.{sh.fingerprint(f)}.parquet"
 
     f2 = frame(3, extra=100)
-    tmp2 = d / "tmp-2.parquet"
+    tmp2 = sh.stage("2", tmp_path)
     f2.write_parquet(tmp2)
-    final2 = sh.commit(tmp2, d, part={"season": 2026},
-                       content=sh.content_digest(f2), recipe=dg("r2"))
-    assert not final.exists()
-    assert [p.name for p in d.iterdir()] == [final2.name]
+    second = sh.commit(tmp2, d, part={"season": 2026})
+    assert not first.exists() and [p.name for p in d.iterdir()] == [second.name]
 
 
-def test_identical_content_under_a_new_recipe_keeps_the_content_segment(tmp_path):
-    """Early cutoff: the CONTENT segment does not move, so dependants see no change."""
+def test_identical_data_is_the_identical_file_and_touches_nothing(tmp_path):
+    """A rebuild that changed nothing must not rewrite the dataset."""
     d = tmp_path / "ds"
-    d.mkdir()
     f = frame(3)
-    c = sh.content_digest(f)
-    for recipe in ("r1", "r2"):
-        tmp = d / f"tmp-{recipe}.parquet"
-        f.write_parquet(tmp)
-        sh.commit(tmp, d, part={"season": 2026}, content=c, recipe=dg(recipe))
-    assert [p.name for p in d.iterdir()] == [f"season=2026.{c}.{dg('r2')}.parquet"]
-    assert sh.current_shards(d)["season=2026"].content == c
-
-
-def test_recommitting_the_identical_shard_is_a_no_op(tmp_path):
-    d = tmp_path / "ds"
-    d.mkdir()
-    f = frame(3)
-    c = sh.content_digest(f)
+    names = []
     for i in range(2):
-        tmp = d / f"tmp-{i}.parquet"
+        tmp = sh.stage(i, tmp_path)
         f.write_parquet(tmp)
-        sh.commit(tmp, d, part={"season": 2026}, content=c, recipe=dg("r"))
-    assert [p.name for p in d.iterdir()] == [f"season=2026.{c}.{dg('r')}.parquet"]
+        names.append(sh.commit(tmp, d, part={"season": 2026}).name)
+        assert not tmp.exists()
+    assert names[0] == names[1]
+    assert [p.name for p in d.iterdir()] == [f"season=2026.{sh.fingerprint(f)}.parquet"]
 
 
 def test_commit_leaves_other_partitions_alone(tmp_path):
     d = tmp_path / "ds"
-    d.mkdir()
-    put(d, sh.shard_name({"season": 2025}, dg("old"), dg("r")))
-    tmp = d / "tmp.parquet"
+    shard(d, {"season": 2025}, "old")
+    tmp = sh.stage("x", tmp_path)
     frame().write_parquet(tmp)
-    sh.commit(tmp, d, part={"season": 2026}, content=dg("new"), recipe=dg("r"))
+    sh.commit(tmp, d, part={"season": 2026})
     assert set(sh.current_shards(d)) == {"season=2025", "season=2026"}
+
+
+def test_staging_is_local_and_outside_the_dataset(tmp_path):
+    p = sh.stage("1", tmp_path)
+    assert p.parent.parent == tmp_path and "ds" not in str(p)
+
+
+def test_the_committed_fingerprint_is_what_a_READER_gets_back(tmp_path):
+    d = tmp_path / "ds"
+    tmp = sh.stage("x", tmp_path)
+    frame(4).write_parquet(tmp)
+    final = sh.commit(tmp, d, part={"season": 2026})
+    assert sh.parse_name(final).fp == sh.fingerprint(pl.read_parquet(final))
 
 
 # ── an interrupted commit ─────────────────────────────────────────────────────
 
 def test_two_shards_for_one_partition_raise_rather_than_being_guessed(tmp_path):
     d = tmp_path / "ds"
-    put(d, sh.shard_name({"season": 2026}, dg("a"), dg("r1")))
-    put(d, sh.shard_name({"season": 2026}, dg("b"), dg("r2")))
+    shard(d, {"season": 2026}, "a")
+    shard(d, {"season": 2026}, "b")
     assert len(sh.list_shards(d)["season=2026"]) == 2
     with pytest.raises(StateError, match="interrupted"):
         sh.current_shards(d)
@@ -284,31 +267,63 @@ def test_two_shards_for_one_partition_raise_rather_than_being_guessed(tmp_path):
 
 def test_gc_drops_what_is_not_kept(tmp_path):
     d = tmp_path / "ds"
-    keep = put(d, sh.shard_name({"season": 2026}, dg("a"), dg("r1")))
-    stale = put(d, sh.shard_name({"season": 2026}, dg("b"), dg("r2")))
+    keep = shard(d, {"season": 2026}, "a")
+    stale = shard(d, {"season": 2026}, "b")
     assert sh.gc(d, keep={keep.name}) == [stale.name]
     assert sh.current_shards(d)["season=2026"].name == keep.name
 
 
-# ── the index is advisory ─────────────────────────────────────────────────────
+# ── the index ─────────────────────────────────────────────────────────────────
 
 def test_index_round_trips(tmp_path):
     d = tmp_path / "ds"
     d.mkdir()
-    sh.write_entry(d, "season=2026", {"content": dg("c"), "seconds": 1.5})
+    sh.write_entry(d, "season=2026", {"fp": dg("c"), "seconds": 1.5})
     assert sh.read_index(d)["shards"]["season=2026"]["seconds"] == 1.5
 
 
-def test_a_corrupt_or_missing_index_costs_an_explanation_not_a_decision(tmp_path):
+def test_a_corrupt_index_never_makes_a_shard_unreadable(tmp_path):
     d = tmp_path / "ds"
-    put(d, sh.shard_name({"season": 2026}, dg("a"), dg("r1")))
+    shard(d, {"season": 2026}, "a")
     assert sh.read_index(d) == {}
     for junk in ("{not json", json.dumps({"v": 999, "shards": {}})):
         (d / sh.INDEX_NAME).write_text(junk)
         assert sh.read_index(d) == {}
-    # The decision is the filename, and it is unaffected by any of the above.
-    assert sh.current_shards(d)["season=2026"].recipe == dg("r1")
+    assert sh.current_shards(d)["season=2026"].fp == dg("a")
 
 
 def test_the_index_never_takes_down_a_build(tmp_path):
     sh.write_entry(tmp_path / "does" / "not" / "exist", "p", {"a": 1})
+
+
+# ── the whole point ───────────────────────────────────────────────────────────
+
+def test_every_comparison_is_answered_from_FILENAMES_alone(tmp_path):
+    """No question this module answers may open a parquet file.
+
+    Written as sabotage rather than as a mock, because that is the claim: replace every
+    shard's CONTENTS with bytes polars cannot parse, leave the names alone, and listing,
+    selection and dataset ids all still answer correctly. Anything reaching for the data
+    would raise. This is what buys a staleness sweep for one listing and zero reads.
+    """
+    d = tmp_path / "ds"
+    for s in ("2024", "2025", "2026"):
+        tmp = sh.stage(s, tmp_path)
+        frame(3, extra=int(s)).write_parquet(tmp)
+        sh.commit(tmp, d, part={"season": s})
+
+    upto = {"season": lambda v: v <= "2025"}
+    live = sh.select(sh.current_shards(d))
+    before = (
+        [x.name for x in live],
+        sh.dataset_id(live),
+        sh.dataset_id(sh.select(sh.current_shards(d), upto)),
+    )
+    for x in live:
+        x.path.write_bytes(b"not a parquet file")
+    with pytest.raises(Exception):
+        pl.read_parquet(live[0].path)
+
+    again = sh.select(sh.current_shards(d))
+    assert ([x.name for x in again], sh.dataset_id(again),
+            sh.dataset_id(sh.select(sh.current_shards(d), upto))) == before

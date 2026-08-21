@@ -1,51 +1,59 @@
 """One parquet file is the unit. A dataset is a directory of them.
 
     processed/box_features/               partitioned
-        season=2025.a3f21c8e.4f10bb92.parquet
-        season=2026.7b09d411.4f10bb92.parquet
+        season=2025.a3f21c8e4f10bb92.parquet
+        season=2026.7b09d4118ad10e77.parquet
         _index.json
     processed/xpm/                        one shard, so no partition segment
-        9c1f2a03.8ad10e77.parquet
-    raw/sr_college/                       policy="settled": no digests at all
-        school=duke__season=2019.parquet
+        9c1f2a0322ab61de.parquet
 
-A shard's name carries everything a decision needs, and that is the whole design:
+A shard's name is its partition and a fingerprint OF ITS DATA, and nothing else:
 
-    <part> . <content> . <recipe> . parquet
+    <part> . <fingerprint> . parquet
 
-`content` is a digest of the rows. It is what DEPENDANTS fold, so a rebuild that produces
-identical rows produces an identical name and nothing downstream stirs — early cutoff,
-for free, with no comparison to make.
+THE DATA IDENTIFIES THE DATA. That is the whole design, and the discipline is in what the
+name leaves out. No code hash, no version, no digest of what it was built from — because
+a dependant does not care how a shard came to exist, only what is in it. A version bump
+that changes no numbers changes no filename, so nothing downstream stirs and nothing on
+disk is rewritten. Rebuild an artifact from different inputs and get identical rows, and
+the same is true.
 
-`recipe` is a digest of the metadata and the input ids this shard was built from. It is
-what THIS shard's staleness is decided by: recompute the recipe from the inputs as they
-stand, and ask whether a file with that recipe is on disk. So `is_current` over a whole
-pipeline is one directory listing per dataset and ZERO file reads.
+What decides whether a stage RE-RUNS is a different question with a different answer, and
+it lives in `core2.py`: a stage compares its inputs' fingerprints now against the ones it
+recorded last time. Keeping that out of the filename is what stops a code change from
+propagating past the one stage it actually affects.
 
-Two consequences worth stating, because they are why the name carries both:
+A staleness check is therefore a directory listing and ZERO file reads. A fingerprint is
+computed exactly once per shard, at the moment it is written, from a LOCAL staged file.
 
-**Nothing load-bearing is shared between writers.** `_index.json` holds lineage, timings
-and the `by`/`at` provenance that makes `iv why` readable — and it is ADVISORY. If it is
-lost, raced, or stale, the pipeline still decides correctly, because the decision is the
-filename. The previous design kept one small state file per artifact precisely because a
-shared file is where parallel runs go wrong; here there is no shared file on the path that
-matters.
-
-**Sub-file reads stop existing.** "Seasons up to T" is a choice of filenames, not a filter
-over rows, so a stage that must not see the future physically cannot open it. The bound is
-visible at the call site instead of applied two layers down.
+THE DIRECTORY IS OURS, SO ANYTHING UNRECOGNISED IN IT IS A HARD ERROR. `list_shards`
+raises rather than skipping a file it cannot parse. Skipping would mean a shard whose name
+got mangled quietly drops out of the dataset and every read downstream is silently SHORT —
+the same failure as a join that lands empty and falls back, and the one that costs a season
+of predictions before anyone notices. `_index.json` is the only other name that may appear;
+a shard being written is staged on local disk and moved in whole, so there is no in-flight
+file to make an exception for.
 
 ORDERING IS BY PARSED VALUE, NEVER BY FILENAME STRING. `game_id=9` sorts before
-`game_id=10`, with nobody having to remember to zero-pad. Row order is a model input in
-the pipelines this serves, so `select()` returning a stable, semantic order is a guarantee
+`game_id=10`, with nobody having to remember to zero-pad. Row order is a model input in the
+pipelines this serves, so `select()` returning a stable, semantic order is a guarantee
 rather than a convenience.
+
+THE SEPARATOR IS `.` AND NOT `_`, which is the one place this deviates from how it was
+sketched: `_` appears inside real partition values (`dataset=player_box`) and doubled it is
+what joins a multi-key part, so a name split on it would parse two ways. `.` is already
+forbidden inside a value.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable
 
 from .errors import DeclError, StateError
@@ -53,31 +61,27 @@ from .errors import DeclError, StateError
 DIGEST_LEN = 16                  # hex chars; an equality check, not a signature
 PART_SEP = "__"                  # between key=value pairs within one part
 INDEX_NAME = "_index.json"
+STAGE_ENV = "IV_STAGE_DIR"       # override where shards are staged before committing
 INDEX_VERSION = 1
 EXT = ".parquet"
-NO_PART = "_"                    # the part string of a settled dataset with no partition
 
 # A part value has to survive being a filename segment and being parsed back out, so the
-# separators are forbidden inside it. Raising here is the point: the alternative is an
-# escaping scheme, and a name you cannot read by eye stops being worth putting on disk.
+# separators are forbidden inside it. Raising is the point: the alternative is an escaping
+# scheme, and a name you cannot read by eye stops being worth putting on disk.
 _BAD_IN_VALUE = (".", "=", "/", "\\", PART_SEP)
 
 _NUM = re.compile(r"(\d+)")
 
-# A digest segment is exactly this, which is what makes a shard name SELF-IDENTIFYING: a
-# dataset directory can hold a README, an `_index.json` or a hand-made `.bak` without any
-# of them parsing as an unpartitioned shard. Without it, every two-segment filename does.
+# A fingerprint segment is exactly this, which is what makes a shard name SELF-IDENTIFYING:
+# a dataset directory can hold a README or a hand-made `.bak` and neither can be mistaken
+# for an unpartitioned shard. Without it, every one-segment filename could be.
 _HEX = re.compile(rf"^[0-9a-f]{{{DIGEST_LEN}}}$")
 
 
 # ── parts ─────────────────────────────────────────────────────────────────────
 
 def encode_part(part: dict[str, object] | None) -> str:
-    """`{"season": 2026}` -> `"season=2026"`. Key ORDER is preserved and is significant.
-
-    The caller's dict order is the declared key order, so a two-key part reads the way it
-    was written (`school=duke__season=2019`) rather than in whatever order a set produced.
-    """
+    """`{"season": 2026}` -> `"season=2026"`. Key ORDER is preserved and is significant."""
     if not part:
         return ""
     out = []
@@ -105,11 +109,10 @@ def decode_part(part_str: str) -> dict[str, str]:
 def _decode(part_str: str) -> dict[str, str] | None:
     """`decode_part`, but `None` instead of raising.
 
-    `parse_name` walks whatever happens to be in a directory, so "this is not a partition
-    string" has to be an answer rather than an exception — a stray `notes.backup.parquet`
-    alongside the shards must not take down a listing.
+    `parse_name` is asked about whatever is in a directory, so "this is not a partition
+    string" has to be an answer it can give rather than an exception it throws.
     """
-    if not part_str or part_str == NO_PART:
+    if not part_str:
         return {}
     out: dict[str, str] = {}
     for chunk in part_str.split(PART_SEP):
@@ -147,8 +150,7 @@ class Shard:
     """One file, and everything its name says about it."""
     path: object                       # Path or CloudPath
     part_str: str
-    content: str = ""                  # "" for a settled shard: existence is the identity
-    recipe: str = ""
+    fp: str
     part: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -156,120 +158,87 @@ class Shard:
         return self.path.name
 
 
-def shard_name(part: dict[str, object] | None, content: str = "",
-               recipe: str = "", *, digested: bool = True) -> str:
-    """Build the filename. `digested=False` is a settled dataset: the part, and nothing else."""
+def shard_name(part: dict[str, object] | None, fp: str) -> str:
+    """Build the filename: which partition, and what is in it."""
+    if not _HEX.match(fp or ""):
+        raise DeclError(
+            f"a fingerprint must be {DIGEST_LEN} hex chars, got {fp!r}. The shape is what "
+            f"makes a shard name distinguishable from any other file in the directory.")
     part_str = encode_part(part)
-    if not digested:
-        return f"{part_str or NO_PART}{EXT}"
-    for label, d in (("content", content), ("recipe", recipe)):
-        if not _HEX.match(d or ""):
-            raise DeclError(
-                f"a tracked shard's {label} must be {DIGEST_LEN} hex chars, got {d!r}. "
-                f"The shape is what makes a shard name distinguishable from any other "
-                f"file that happens to sit in the directory.")
-    return f"{part_str}.{content}.{recipe}{EXT}" if part_str else f"{content}.{recipe}{EXT}"
+    return f"{part_str}.{fp}{EXT}" if part_str else f"{fp}{EXT}"
 
 
-def parse_name(path, *, digested: bool = True) -> Shard | None:
-    """Read a shard's name back. `None` if the file is not one of ours.
-
-    `digested` comes from the DATASET's policy, not from the name, and that is deliberate:
-    `9c1f2a03.parquet` is a settled part on one dataset and would be an unpartitioned
-    tracked shard on another. Deciding by policy means there is no name that parses two
-    ways, so there is no case where a wrong guess quietly becomes a wrong id.
-    """
+def parse_name(path) -> Shard | None:
+    """Read a shard's name back. `None` if the file is not one of ours."""
     name = path.name
     if not name.endswith(EXT) or name == INDEX_NAME:
         return None
-    stem = name[: -len(EXT)]
-    if not stem:
+    segs = name[: -len(EXT)].split(".")
+    if len(segs) not in (1, 2) or not _HEX.match(segs[-1]):
         return None
-    if not digested:
-        part = _decode(stem)
-        return None if part is None else Shard(
-            path=path, part_str="" if stem == NO_PART else stem, part=part)
-    segs = stem.split(".")
-    if len(segs) not in (2, 3) or not all(_HEX.match(x) for x in segs[-2:]):
-        return None
-    if len(segs) == 2:                       # <content>.<recipe> — no partition
-        return Shard(path=path, part_str="", content=segs[0], recipe=segs[1], part={})
-    part = _decode(segs[0])                  # <part>.<content>.<recipe>
+    if len(segs) == 1:
+        return Shard(path=path, part_str="", fp=segs[0], part={})
+    part = _decode(segs[0])
     return None if part is None else Shard(
-        path=path, part_str=segs[0], content=segs[1], recipe=segs[2], part=part)
+        path=path, part_str=segs[0], fp=segs[1], part=part)
 
 
-# ── digests ───────────────────────────────────────────────────────────────────
+# ── fingerprints ──────────────────────────────────────────────────────────────
 
 def _short(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:DIGEST_LEN]
 
 
-def content_digest(frame) -> str:
-    """A digest of the rows, ORDER-SENSITIVE, with the schema folded in.
+def fingerprint(frame) -> str:
+    """A digest of the DATA: its height, its schema, and every value in it.
 
-    Order-sensitive because row order is an input downstream — minibatches are contiguous
-    slices of a file, and an order-insensitive digest would let a reorder pass as no
-    change at all. Schema included because a rename or a dtype change is a change even
-    when every value survives it.
+    Order-INSENSITIVE. polars sums UInt64 with wraparound, so the sum of the per-row hashes
+    is a commutative digest mod 2**64: rewriting the same rows in a different order lands on
+    the same value. That is the right default because a reordered rewrite is not new data,
+    and a fetcher that reorders on every run would otherwise invalidate the world nightly.
 
-    Not the file's bytes: parquet is not reproducible across writes (compression and
-    footer metadata move on their own), so a byte digest would report a change on every
-    rebuild and defeat the early cutoff this exists to provide.
+    NOT a moment summary. `H(n, mean, std)` was measured against this and costs the same to
+    within 3ms on a 614 MB frame — the read dominates both, and parquet footers carry
+    min/max/nulls, never moments, so neither can skip it. What it buys for that is a hole:
+    mean and std are undefined for a string column, so `team: LAS,NYL -> SEA,CHI` reads as
+    no change at all. `position` and `team` are model inputs here.
+
+    Schema is in the digest because a rename or a dtype change is a change even when every
+    value survives it.
     """
     schema = "|".join(f"{c}:{t}" for c, t in frame.schema.items())
-    h = hashlib.sha256()
-    h.update(f"{frame.height}|{schema}|".encode())
-    if frame.height:
-        rows = frame.hash_rows(seed=0)
-        try:
-            h.update(rows.to_numpy().tobytes())
-        except (ImportError, ModuleNotFoundError):
-            for v in rows.to_list():
-                h.update(str(v).encode())
-    return h.hexdigest()[:DIGEST_LEN]
+    if frame.height == 0:
+        return _short(f"empty|{schema}")
+    return _short(f"{frame.height}|{schema}|{frame.hash_rows(seed=0).sum()}")
 
 
-def content_digest_of_file(path) -> str:
-    """`content_digest` of a file on disk. MUST agree with the in-memory form.
+def fingerprint_of_file(path) -> str:
+    """`fingerprint` of a file on disk, which is what a READER would get back.
 
-    The caller decides which to use, and it is a real cost decision rather than a detail:
-    over a bucket this is a download of something that was just uploaded. A caller holding
-    the frame should hash the frame.
+    The committed digest is taken from the staged file rather than the frame in memory, so
+    it describes what comes back out of parquet — round-trip and all — and not what the
+    writer happened to be holding. Those differ for any dtype parquet does not preserve
+    exactly, and it is the reader's answer that downstream correctness rests on.
     """
     import polars as pl
-    return content_digest(pl.read_parquet(str(path)))
-
-
-def recipe_digest(meta: str, inputs: dict[str, str]) -> str:
-    """What this shard was BUILT FROM, as one string: the metadata and the input ids.
-
-    Sorted by input name so two runs that discovered the same inputs in different orders
-    agree. This is the value that decides whether the shard rebuilds; `content` is the
-    value that decides whether anything downstream does.
-    """
-    body = "|".join([f"meta={meta}"] + [f"{k}={inputs[k]}" for k in sorted(inputs)])
-    return _short(body)
+    return fingerprint(pl.read_parquet(str(path)))
 
 
 def dataset_id(shards: Iterable[Shard]) -> str:
     """The id of a dataset, or of a SELECTION of it, as its dependants see it.
 
     A selection has the digest of just the shards selected, which is what makes a
-    walk-forward stage precise: a cohort fit on seasons up to T folds exactly those
-    seasons, so next year's data cannot move it and a correction to an old one still does.
-
-    A settled shard contributes its part name and no content, because the question a
-    fetch-once archive answers is coverage, not change.
+    walk-forward stage precise: a cohort fit on seasons up to T folds exactly those seasons,
+    so next year's data cannot move it and a correction to an old one still does.
     """
-    body = "|".join(f"{s.part_str}:{s.content}"
+    body = "|".join(f"{s.part_str}:{s.fp}"
                     for s in sorted(shards, key=lambda s: s.part_str))
     return "ds:" + _short(body) if body else "ds:(empty)"
 
 
 # ── listing and selection ─────────────────────────────────────────────────────
 
-def list_shards(dataset_dir, *, digested: bool = True) -> dict[str, list[Shard]]:
+def list_shards(dataset_dir) -> dict[str, list[Shard]]:
     """Every shard on disk, grouped by part. A LIST per part, because duplicates are real.
 
     A crash between writing a new shard and dropping the one it replaced leaves two files
@@ -280,30 +249,35 @@ def list_shards(dataset_dir, *, digested: bool = True) -> dict[str, list[Shard]]
     if not dataset_dir.exists():
         return out
     for p in dataset_dir.iterdir():
-        sh = parse_name(p, digested=digested)
-        if sh is not None:
-            out.setdefault(sh.part_str, []).append(sh)
+        if p.name == INDEX_NAME:
+            continue
+        got = parse_name(p)
+        if got is None:
+            raise StateError(
+                f"{p} is in a dataset directory but is not a shard of it. Expected "
+                f"<part>.<fingerprint>{EXT} or {INDEX_NAME}, and nothing else — a shard is "
+                f"staged on local disk and moved in whole, so there is no in-flight file to "
+                f"allow for. A name this cannot read would silently drop a partition and "
+                f"every read of {dataset_dir.name} would come back short, so it stops here.")
+        out.setdefault(got.part_str, []).append(got)
     return out
 
 
-def current_shards(dataset_dir, *, digested: bool = True) -> dict[str, Shard]:
+def current_shards(dataset_dir) -> dict[str, Shard]:
     """One shard per part, or an error naming the ambiguity.
 
     RAISES rather than picking. Two shards for one partition means an interrupted commit,
-    and the two differ in content by definition — choosing the newer one by mtime would be
-    a silent, unreproducible answer to a question the directory cannot actually answer.
-    `gc()` is the fix, and it should be run knowingly.
+    and the two differ in content by definition — choosing the newer by mtime would be a
+    silent, unreproducible answer to a question the directory cannot actually answer.
     """
-    found = list_shards(dataset_dir, digested=digested)
     out: dict[str, Shard] = {}
-    for part_str, shards in found.items():
+    for part_str, shards in list_shards(dataset_dir).items():
         if len(shards) > 1:
             names = ", ".join(sorted(s.name for s in shards))
             raise StateError(
                 f"{dataset_dir} holds {len(shards)} shards for partition "
-                f"{part_str or '(none)'}: {names}. A commit was interrupted. Run `iv gc` "
-                f"to drop the superseded one, or delete it by hand — this cannot be "
-                f"resolved by guessing which is current.")
+                f"{part_str or '(none)'}: {names}. A commit was interrupted. Run `iv gc` to "
+                f"drop the superseded one — this cannot be resolved by guessing.")
         out[part_str] = shards[0]
     return out
 
@@ -312,14 +286,12 @@ def select(shards: dict[str, Shard], where: dict[str, object] | None = None,
            *, dataset: str = "") -> list[Shard]:
     """The shards a `where=` names, SORTED BY PARSED PARTITION VALUE.
 
-    `where={"season": ["2019", "2020"]}` — an explicit list, and every value must be
-    present or it raises. That is the coverage check, and it belongs here: a stage that
-    asked for twenty seasons and silently got nineteen is the failure this repo keeps
-    finding, and an empty join is indistinguishable from a thin one after the fact.
+    `where={"season": ["2019", "2020"]}` — an explicit list, and every value must be present
+    or it raises. That is the coverage check and it belongs here: a stage that asked for
+    twenty seasons and silently got nineteen is the failure this repo keeps finding.
 
-    `where={"season": fn}` — a predicate over the parsed value. A predicate is allowed to
-    match nothing; the caller decides whether that is legal, because "no season qualifies
-    yet" is a real state early in a walk-forward loop.
+    `where={"season": fn}` — a predicate over the parsed value, allowed to match nothing,
+    because "no season qualifies yet" is a real state early in a walk-forward loop.
     """
     picked = list(shards.values())
     for key, want in (where or {}).items():
@@ -331,53 +303,80 @@ def select(shards: dict[str, Shard], where: dict[str, object] | None = None,
         missing = [v for v in want_list if v not in have]
         if missing:
             raise StateError(
-                f"{dataset or 'dataset'} has no shard for {key}="
-                f"{', '.join(missing)}. Present: {', '.join(sorted(have)) or 'none'}. "
-                f"An explicit list is a coverage claim, so this is an error rather than a "
-                f"quietly shorter read.")
+                f"{dataset or 'dataset'} has no shard for {key}={', '.join(missing)}. "
+                f"Present: {', '.join(sorted(have)) or 'none'}. An explicit list is a "
+                f"coverage claim, so this is an error rather than a quietly shorter read.")
         picked = [s for s in picked if key in s.part and s.part[key] in set(want_list)]
     return sorted(picked, key=lambda s: sort_key(s.part_str))
 
 
 # ── committing ────────────────────────────────────────────────────────────────
 
-def commit(tmp_path, dataset_dir, *, part: dict[str, object] | None,
-           content: str, recipe: str, digested: bool = True) -> object:
-    """Move a just-written temp file into its final name and drop what it replaced.
+def stage(tag: object = "", stage_dir=None) -> Path:
+    """A LOCAL path to write a shard to before committing it.
 
-    NEW FIRST, THEN THE OLD ONE. The window in between holds two shards for the partition,
-    which `current_shards` reports loudly; the other order holds ZERO, which reads as "the
-    data is gone". Neither is atomic over a bucket — object stores have no rename — so the
-    choice is which failure a crash leaves behind, and a duplicate is recoverable where an
-    absence is not.
+    Local always, even for a dataset that lives in a bucket. The fingerprint has to read the
+    rows, and reading a file that was just uploaded means paying for the data twice; staged
+    locally the sequence is write local, hash local, upload ONCE straight to the final name.
+    Outside any dataset directory, so "a dataset holds shards and its index, full stop" is an
+    enforced invariant with no exception carved out of it.
     """
-    name = shard_name(part, content, recipe, digested=digested)
-    final = dataset_dir / name
+    d = Path(stage_dir or os.environ.get(STAGE_ENV) or tempfile.gettempdir()) / "iv-stage"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{os.getpid()}-{tag}{EXT}"
+
+
+def commit(staged, dataset_dir, *, part: dict[str, object] | None) -> object:
+    """Fingerprint the staged file, move it in under its name, drop what it replaced.
+
+    THE FINGERPRINT IS COMPUTED HERE and is not a parameter, so the caller cannot get it
+    wrong and it always describes the bytes that actually landed.
+
+    Identical data means an identical name, so a rebuild that changed nothing finds its own
+    shard already in place, drops the staged copy and touches the dataset not at all. Over a
+    bucket that is the difference between a no-op and a copy per file.
+
+    NEW FIRST, THEN THE OLD ONE. The window between holds two shards for the partition, which
+    `current_shards` reports loudly; the other order holds ZERO, which reads as "the data is
+    gone". Neither is atomic over an object store, so the choice is which failure a crash
+    leaves behind, and a duplicate is recoverable where an absence is not. A PARTIAL file is
+    not among the options either way: what lands is a complete local file, moved whole.
+    """
+    fp = fingerprint_of_file(staged)
+    final = dataset_dir / shard_name(part, fp)
     part_str = encode_part(part)
-    superseded = [s for s in list_shards(dataset_dir, digested=digested).get(part_str, [])
-                  if s.name != name]
+    superseded = [s for s in list_shards(dataset_dir).get(part_str, [])
+                  if s.name != final.name]
     dataset_dir.mkdir(parents=True, exist_ok=True)
-    if str(tmp_path) != str(final):
-        if final.exists():
-            # The identical shard is already here: same part, same content, same recipe.
-            # Nothing to do but drop the copy we just made.
-            tmp_path.unlink()
-        else:
-            tmp_path.rename(final)
+    if final.exists():
+        staged.unlink()
+    else:
+        _move(staged, final)
     for s in superseded:
         s.path.unlink()
     return final
 
 
-def gc(dataset_dir, *, digested: bool = True, keep: set[str] | None = None) -> list[str]:
-    """Drop shards no longer referenced. Returns the names removed.
+def _move(src: Path, dst) -> None:
+    """Local file -> wherever the dataset lives, in one operation.
 
-    `keep` names the shard filenames that are current. Anything else in the directory that
-    parses as one of ours is a leftover from an interrupted commit.
+    `upload_from` is cloudpathlib's, and its absence is what says the destination is an
+    ordinary directory. `shutil.move` rather than `rename` for the local case, because the
+    staging directory is frequently on another filesystem and `rename` cannot cross one.
     """
+    upload = getattr(dst, "upload_from", None)
+    if upload is None:
+        shutil.move(str(src), str(dst))
+        return
+    upload(src)
+    src.unlink()
+
+
+def gc(dataset_dir, *, keep: set[str] | None = None) -> list[str]:
+    """Drop shards not named in `keep`. Returns what was removed."""
     keep = keep or set()
     removed = []
-    for shards in list_shards(dataset_dir, digested=digested).values():
+    for shards in list_shards(dataset_dir).values():
         for s in shards:
             if s.name not in keep:
                 s.path.unlink()
@@ -385,15 +384,14 @@ def gc(dataset_dir, *, digested: bool = True, keep: set[str] | None = None) -> l
     return sorted(removed)
 
 
-# ── the index: advisory, never load-bearing ───────────────────────────────────
+# ── the index ─────────────────────────────────────────────────────────────────
 
 def read_index(dataset_dir) -> dict:
-    """Lineage and timings for `iv why`. NEVER consulted to decide staleness.
+    """What each shard was built FROM. See `core2` for why losing it is safe.
 
-    Returns `{}` on anything unreadable, and that is safe here in a way it would not be
-    for state: a decision made from an empty index would be a decision made from the
-    filenames, which is the decision anyway. Nothing here can make a stale shard look
-    current.
+    `{}` on anything unreadable, which is safe here in a way it would not be for state: no
+    record means the inputs cannot be compared, which means the shard cannot be shown
+    current, which means it rebuilds. Every failure lands on the rebuild side.
     """
     p = dataset_dir / INDEX_NAME
     if not p.exists():
@@ -409,7 +407,7 @@ def write_entry(dataset_dir, part_str: str, entry: dict) -> None:
     """Record what a shard was built from. Best effort; a failure never fails the build."""
     try:
         got = read_index(dataset_dir) or {"v": INDEX_VERSION, "shards": {}}
-        got.setdefault("shards", {})[part_str or NO_PART] = entry
+        got.setdefault("shards", {})[part_str] = entry
         (dataset_dir / INDEX_NAME).write_text(json.dumps(got, indent=1, sort_keys=True))
     except OSError:
         pass

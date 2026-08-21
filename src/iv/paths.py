@@ -1,107 +1,36 @@
-"""Rel path in, concrete path out.
+"""A data-root spec in, a concrete path out.
 
-Artifacts are named by their path relative to the data root — `processed/xpm.parquet`,
-never an absolute path or a bucket URI. That is what makes a trace from one tree and a
-trace from another talk about the same artifact, and what lets an id survive moving the
+Datasets are named by their path relative to the root — `processed/box_features/`, never
+an absolute path and never a bucket URI. That is what lets a trace from one tree and a
+trace from another talk about the same dataset, and what lets an id survive moving the
 data somewhere else.
 
-A partitioned artifact is named by a TEMPLATE:
-
-    iv.reads("raw/box/{season}.parquet", why="...", part={"season": "2026"})
-
-The template is the literal, so the static scan can still read it without running
-anything; the value is runtime. `{season}` is the partition key, and it is also how the
-graph knows twenty-one files are one node.
+There is nothing here about templates or partitions. A partition is a segment of a SHARD
+name inside a dataset directory, never a placeholder in the dataset's path, so nothing here
+ever renders a path from a dict. See `iv.shards`.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
-from .errors import ConfigError, DeclError
-
-_FIELD = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+from .errors import ConfigError
 
 
-def mkpath(spec, project_root: Path):
-    """A data_root spec -> Path, or a CloudPath when it names a bucket.
+def mkpath(spec, project_root: Path | None):
+    """A root spec -> Path, or a CloudPath when it names a bucket.
 
     cloudpathlib is not a dependency. A URI without it is a clear error rather than a Path
-    that silently means something else on disk.
+    that silently means something else on local disk.
     """
     if not isinstance(spec, str):
         return spec
     if "://" not in spec:
         p = Path(spec)
-        return p if p.is_absolute() else project_root / p
+        return p if p.is_absolute() or project_root is None else project_root / p
     try:
         from cloudpathlib import AnyPath
     except ImportError as e:
         raise ConfigError(
-            f"data_root {spec!r} is a URI, which needs cloudpathlib installed "
+            f"root {spec!r} is a URI, which needs cloudpathlib installed "
             f"(pip install 'cloudpathlib[gs]')") from e
     return AnyPath(spec)
-
-
-def fields(template: str) -> tuple[str, ...]:
-    """The partition keys a template names, in order."""
-    return tuple(_FIELD.findall(template))
-
-
-def render(template: str, part: dict[str, str] | None) -> str:
-    """Substitute the partition values. Every mismatch is an error, never a silent pass.
-
-    A missing key would produce a path with a literal `{season}` in it, which then reads
-    or writes a file nobody meant; an extra key means the caller believes it is
-    partitioning something that is not partitioned.
-    """
-    needed = set(fields(template))
-    given = dict(part or {})
-    missing = sorted(needed - set(given))
-    extra = sorted(set(given) - needed)
-    if missing:
-        raise DeclError(
-            f"{template!r} needs part={{{', '.join(repr(m) for m in missing)}: ...}}")
-    if extra:
-        raise DeclError(
-            f"{template!r} has no placeholder for part key(s) {extra}; "
-            f"it names {sorted(needed) or 'none'}")
-    return template.format(**{k: str(v) for k, v in given.items()})
-
-
-def render_partial(template: str, part: dict[str, str] | None) -> str:
-    """Substitute what the caller knows and LEAVE the rest as placeholders.
-
-    A collection is named by the fields it does not fix: `raw/{league}/box_{season}.parquet`
-    with a league but no season is one feed, every season of it. `render` is the wrong tool
-    there — it treats a free field as the caller forgetting something, which is right for a
-    path you are about to open and wrong for a set you are about to glob.
-    """
-    given = dict(part or {})
-    extra = sorted(set(given) - set(fields(template)))
-    if extra:
-        raise DeclError(
-            f"{template!r} has no placeholder for part key(s) {extra}; "
-            f"it names {sorted(set(fields(template))) or 'none'}")
-    for k, v in given.items():
-        template = template.replace("{" + k + "}", str(v))
-    return template
-
-
-def resolve_under(root, rel: str):
-    """A rendered rel path -> the concrete path under `root`."""
-    if _FIELD.search(rel):
-        raise DeclError(
-            f"{rel!r} still has an unrendered placeholder; pass part= at the call site")
-    return root / rel
-
-
-def to_rel(iv, path) -> str | None:
-    """A concrete path -> its rel string, or None if it is outside either data tree."""
-    s = str(path)
-    for root in (str(iv.out_root).rstrip("/"), str(iv.data_root).rstrip("/")):
-        if s == root:
-            return ""
-        if s.startswith(root + "/"):
-            return s[len(root) + 1:]
-    return None
