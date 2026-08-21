@@ -40,47 +40,39 @@ import os
 import time
 from pathlib import Path
 
+from .errors import StateError
+
 RECORDER_VERSION = 2
 
 
 def emit(iv, kind: str, **fields) -> None:
     """Append one event, unless tracing is off or we are inside `bookkeeping()`.
 
-    NEVER RAISES. The trace is observability: it describes the run, it is not part of
-    it, and a pipeline that dies because its logging could not serialise a value has its
-    priorities backwards. A `datetime.date` in a `part=` did exactly that — 102 seconds
-    into a stage, after the fits.
+    RAISES. It used to swallow everything, on the grounds that a pipeline should not die
+    because its logging could not serialise a value — which is true, and it was the wrong
+    fix. A trace that quietly stops being written produces an `iv drift` report that is
+    confidently wrong about the graph, and nothing anywhere says so.
 
-    `default=str` handles the ordinary case, which is a `part=` value that is not a
-    string; `render` already stringifies those for the PATH, so nothing required them to
-    be strings in the first place. Anything stranger is reported once and dropped.
+    The right fix is that serialising cannot fail: `default=str` handles the case that
+    actually occurred, a `part=` value that is not a string. Anything else is a bug in this
+    function and should be seen.
     """
     if iv.trace_path is None or iv._depth:
         return
-    try:
-        if iv._trace_fh is None:
-            iv.trace_path.parent.mkdir(parents=True, exist_ok=True)
-            # Line-buffered: many stage processes append to one file concurrently, and
-            # the flush-on-newline keeps one event to one write. See the module docstring.
-            iv._trace_fh = iv.trace_path.open("a", buffering=1)
-        iv._trace_fh.write(json.dumps({
-            "v": RECORDER_VERSION,
-            "kind": kind,
-            "node": iv.node(),
-            "pid": os.getpid(),
-            "t": round(time.time(), 3),
-            **fields,
-        }, default=str) + "\n")
-    except Exception as e:                  # noqa: BLE001 — see the docstring
-        global _WARNED
-        if not _WARNED:
-            _WARNED = True
-            print(f"  iv: trace disabled — {type(e).__name__}: {e}. "
-                  f"The run continues; `iv drift` will have nothing to read.")
-        iv.trace_path = None
+    if iv._trace_fh is None:
+        iv.trace_path.parent.mkdir(parents=True, exist_ok=True)
+        # Line-buffered: many stage processes append to one file concurrently, and the
+        # flush-on-newline keeps one event to one write. See the module docstring.
+        iv._trace_fh = iv.trace_path.open("a", buffering=1)
+    iv._trace_fh.write(json.dumps({
+        "v": RECORDER_VERSION,
+        "kind": kind,
+        "node": iv.node(),
+        "pid": os.getpid(),
+        "t": round(time.time(), 3),
+        **fields,
+    }, default=str) + "\n")
 
-
-_WARNED = False
 
 
 def age_of(events: list[dict]) -> float | None:
@@ -95,24 +87,24 @@ def load(path: Path) -> list[dict]:
     """Every event in a trace, dropping any written by an older recorder."""
     if not path.exists():
         return []
-    out, stale, torn = [], 0, 0
-    for line in path.read_text().splitlines():
+    out, stale = [], 0
+    for n, line in enumerate(path.read_text().splitlines(), 1):
         if not line.strip():
             continue
         try:
             ev = json.loads(line)
-        except json.JSONDecodeError:
-            # A line that does not parse is a line two writers interleaved, or one a kill
-            # cut in half. Dropping it costs one event out of a union; raising costs
-            # `iv drift` entirely, over a file that is advisory to begin with.
-            torn += 1
-            continue
+        except json.JSONDecodeError as e:
+            # Two writers interleaved, or a kill cut one in half. Dropping it silently
+            # would make `iv drift` report on a graph it only partly saw, and report it
+            # with confidence — so the file is unusable and says so.
+            raise StateError(
+                f"{path}:{n} is not parseable ({e}). A torn line means the trace was cut "
+                f"mid-write, so it no longer describes the run. Delete it and re-run with "
+                f"IV_TRACE set.") from e
         if ev.get("v") != RECORDER_VERSION:
             stale += 1
             continue
         out.append(ev)
     if stale:
         print(f"  (dropped {stale} event(s) from an older recorder version)")
-    if torn:
-        print(f"  (dropped {torn} unparseable line(s) — a torn concurrent append)")
     return out

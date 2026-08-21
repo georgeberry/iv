@@ -233,7 +233,7 @@ def dataset_id(shards: Iterable[Shard]) -> str:
     """
     body = "|".join(f"{s.part_str}:{s.fp}"
                     for s in sorted(shards, key=lambda s: s.part_str))
-    return "ds:" + _short(body) if body else "ds:(empty)"
+    return "data:" + _short(body) if body else "data:(empty)"
 
 
 # ── listing and selection ─────────────────────────────────────────────────────
@@ -282,31 +282,65 @@ def current_shards(dataset_dir) -> dict[str, Shard]:
     return out
 
 
+# The comparisons a range selector may use. Ordered by PARSED value, so `game_id` 9 comes
+# before 10 and a season compares as a number rather than as text.
+OPS = {"lt": lambda a, b: a < b, "le": lambda a, b: a <= b,
+       "gt": lambda a, b: a > b, "ge": lambda a, b: a >= b}
+
+
+def matches(value: str, rule: object) -> bool:
+    """Does one partition value satisfy a selector?
+
+    A selector is DATA, never a callable, and that is the whole point of it. A lambda
+    cannot be replayed — it is a closure in the stage's body, and the staleness check runs
+    from another process — so a selection made with one could only ever be remembered as
+    the shards it happened to match. A partition appearing later inside the same range
+    would then go unnoticed, and the stage would sit there built from less than it should
+    be, reporting itself current. Written as data, the rule goes into the record and is
+    re-evaluated exactly.
+    """
+    if isinstance(rule, dict):
+        for op, bound in rule.items():
+            if op not in OPS:
+                raise DeclError(
+                    f"unknown range operator {op!r}; expected one of {sorted(OPS)}. "
+                    f'A selector is data: where={{"season": {{"lt": "2021"}}}}.')
+            if not OPS[op](_nat(value), _nat(str(bound))):
+                return False
+        return True
+    values = rule if isinstance(rule, (list, tuple, set)) else [rule]
+    return value in {str(v) for v in values}
+
+
 def select(shards: dict[str, Shard], where: dict[str, object] | None = None,
            *, dataset: str = "") -> list[Shard]:
     """The shards a `where=` names, SORTED BY PARSED PARTITION VALUE.
 
-    `where={"season": ["2019", "2020"]}` — an explicit list, and every value must be present
-    or it raises. That is the coverage check and it belongs here: a stage that asked for
-    twenty seasons and silently got nineteen is the failure this repo keeps finding.
+    `where={"season": ["2019", "2020"]}` — an explicit list. Every value must be present or
+    it raises: a stage that asked for twenty seasons and silently got nineteen is the
+    failure this exists to prevent, and an empty read is indistinguishable from thin data
+    after the fact.
 
-    `where={"season": fn}` — a predicate over the parsed value, allowed to match nothing,
+    `where={"season": {"lt": "2021"}}` — a range, which may legitimately match nothing,
     because "no season qualifies yet" is a real state early in a walk-forward loop.
     """
     picked = list(shards.values())
-    for key, want in (where or {}).items():
-        if callable(want):
-            picked = [s for s in picked if key in s.part and want(s.part[key])]
-            continue
-        want_list = [str(v) for v in (want if isinstance(want, (list, tuple, set)) else [want])]
-        have = {s.part[key] for s in picked if key in s.part}
-        missing = [v for v in want_list if v not in have]
-        if missing:
-            raise StateError(
-                f"{dataset or 'dataset'} has no shard for {key}={', '.join(missing)}. "
-                f"Present: {', '.join(sorted(have)) or 'none'}. An explicit list is a "
-                f"coverage claim, so this is an error rather than a quietly shorter read.")
-        picked = [s for s in picked if key in s.part and s.part[key] in set(want_list)]
+    for key, rule in (where or {}).items():
+        if callable(rule):
+            raise DeclError(
+                f"where={{{key!r}: <function>}} is not allowed. A selector has to be data "
+                f'so it can be re-evaluated later: {{"lt": "2021"}}, or an explicit list. '
+                f"See iv.shards.matches for why.")
+        if not isinstance(rule, dict):
+            want = [str(v) for v in (rule if isinstance(rule, (list, tuple, set)) else [rule])]
+            have = {s.part[key] for s in picked if key in s.part}
+            missing = [v for v in want if v not in have]
+            if missing:
+                raise StateError(
+                    f"{dataset or 'dataset'} has no shard for {key}={', '.join(missing)}. "
+                    f"Present: {', '.join(sorted(have)) or 'none'}. An explicit list is a "
+                    f"coverage claim, so this is an error rather than a shorter read.")
+        picked = [s for s in picked if key in s.part and matches(s.part[key], rule)]
     return sorted(picked, key=lambda s: sort_key(s.part_str))
 
 
@@ -389,25 +423,38 @@ def gc(dataset_dir, *, keep: set[str] | None = None) -> list[str]:
 def read_index(dataset_dir) -> dict:
     """What each shard was built FROM. See `core2` for why losing it is safe.
 
-    `{}` on anything unreadable, which is safe here in a way it would not be for state: no
-    record means the inputs cannot be compared, which means the shard cannot be shown
-    current, which means it rebuilds. Every failure lands on the rebuild side.
+    MISSING is normal and returns `{}` — a dataset that has never been built has no record,
+    and the shard rebuilds. CORRUPT is not normal and raises. The two used to be the same
+    answer, which meant a truncated write or a half-synced file read as "never built" and
+    quietly rebuilt the world with no sign anything was wrong.
+
+    A record written by an older layout also raises rather than being ignored, because the
+    fix is a migration, not a silent full rebuild.
     """
     p = dataset_dir / INDEX_NAME
     if not p.exists():
         return {}
     try:
         got = json.loads(p.read_text())
-    except (ValueError, OSError):
-        return {}
-    return got if isinstance(got, dict) and got.get("v") == INDEX_VERSION else {}
+    except (ValueError, OSError) as e:
+        raise StateError(
+            f"{p} is unreadable: {e}. It records what each shard was built from, so a "
+            f"damaged one cannot be told apart from a dataset that was never built. "
+            f"Delete it to force a rebuild of this dataset, knowingly.") from e
+    if not isinstance(got, dict) or got.get("v") != INDEX_VERSION:
+        raise StateError(
+            f"{p} is version {got.get('v') if isinstance(got, dict) else '?'}, and this is "
+            f"version {INDEX_VERSION}. Delete it to rebuild this dataset.")
+    return got
 
 
 def write_entry(dataset_dir, part_str: str, entry: dict) -> None:
-    """Record what a shard was built from. Best effort; a failure never fails the build."""
-    try:
-        got = read_index(dataset_dir) or {"v": INDEX_VERSION, "shards": {}}
-        got.setdefault("shards", {})[part_str] = entry
-        (dataset_dir / INDEX_NAME).write_text(json.dumps(got, indent=1, sort_keys=True))
-    except OSError:
-        pass
+    """Record what a shard was built from.
+
+    RAISES on failure. This is not logging: without the record the shard cannot be shown
+    current, so a silent failure here means the stage rebuilds every run forever with
+    nothing to explain it.
+    """
+    got = read_index(dataset_dir) or {"v": INDEX_VERSION, "shards": {}}
+    got.setdefault("shards", {})[part_str] = entry
+    (dataset_dir / INDEX_NAME).write_text(json.dumps(got, indent=1, sort_keys=True))

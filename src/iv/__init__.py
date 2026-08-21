@@ -3,12 +3,13 @@
     from iv import Pipeline
     import polars as pl
 
-    pipe = Pipeline(root="gs://bucket/data", source_dirs=["scripts"])
+    iv = Pipeline(root="gs://bucket/data", source_dirs=["scripts"])
 
-    @pipe.step("processed/daily_revenue/", why="revenue per day; what the dashboard reads")
-    def daily_revenue(out):
-        sales = pl.read_parquet(pipe.reads("raw/sales/", why="one row per transaction"))
-        sales.group_by("day").agg(pl.col("amount").sum()).write_parquet(out)
+    @iv.step(why="revenue per day; what the dashboard reads")
+    def daily_revenue():
+        sales = pl.read_parquet(iv.reads("raw/sales/", why="one row per transaction"))
+        with iv.writes("processed/daily_revenue/", why="revenue per day") as out:
+            sales.group_by("day").agg(pl.col("amount").sum()).write_parquet(out)
 
     daily_revenue()      # runs, or skips because nothing upstream moved
 

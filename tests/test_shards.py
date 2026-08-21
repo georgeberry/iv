@@ -156,7 +156,7 @@ def test_dataset_id_folds_fingerprints_and_ignores_file_order(tmp_path):
         shard(d, {"season": s}, s)
     sel = sh.select(sh.current_shards(d))
     assert sh.dataset_id(sel) == sh.dataset_id(list(reversed(sel)))
-    assert sh.dataset_id([]) == "ds:(empty)"
+    assert sh.dataset_id([]) == "data:(empty)"
 
 
 def test_a_selection_has_its_own_id(tmp_path):
@@ -164,7 +164,7 @@ def test_a_selection_has_its_own_id(tmp_path):
     for s in ("2024", "2025", "2026"):
         shard(d, {"season": s}, s)
     all_ = sh.current_shards(d)
-    upto = sh.select(all_, {"season": lambda v: v <= "2025"})
+    upto = sh.select(all_, {"season": {"le": "2025"}})
     assert len(upto) == 2 and sh.dataset_id(upto) != sh.dataset_id(sh.select(all_))
 
 
@@ -173,7 +173,7 @@ def test_a_later_shard_cannot_move_an_earlier_selection(tmp_path):
     d = tmp_path / "ds"
     for s in ("2024", "2025"):
         shard(d, {"season": s}, s)
-    upto = {"season": lambda v: v <= "2025"}
+    upto = {"season": {"le": "2025"}}
     before = sh.dataset_id(sh.select(sh.current_shards(d), upto))
     shard(d, {"season": "2026"}, "2026")
     assert sh.dataset_id(sh.select(sh.current_shards(d), upto)) == before
@@ -194,7 +194,7 @@ def test_an_explicit_list_is_a_coverage_claim(tmp_path):
 def test_a_predicate_may_match_nothing(tmp_path):
     d = tmp_path / "ds"
     shard(d, {"season": "2024"}, "c")
-    assert sh.select(sh.current_shards(d), {"season": lambda v: v > "2100"}) == []
+    assert sh.select(sh.current_shards(d), {"season": {"gt": "2100"}}) == []
 
 
 def test_selection_on_a_missing_directory_is_empty(tmp_path):
@@ -282,18 +282,28 @@ def test_index_round_trips(tmp_path):
     assert sh.read_index(d)["shards"]["season=2026"]["seconds"] == 1.5
 
 
-def test_a_corrupt_index_never_makes_a_shard_unreadable(tmp_path):
+def test_a_missing_index_is_normal_and_a_corrupt_one_is_not(tmp_path):
+    """The two used to be the same answer, so a truncated write read as "never built"."""
     d = tmp_path / "ds"
     shard(d, {"season": 2026}, "a")
-    assert sh.read_index(d) == {}
-    for junk in ("{not json", json.dumps({"v": 999, "shards": {}})):
-        (d / sh.INDEX_NAME).write_text(junk)
-        assert sh.read_index(d) == {}
+    assert sh.read_index(d) == {}, "never built is a legitimate empty record"
+
+    (d / sh.INDEX_NAME).write_text("{not json")
+    with pytest.raises(StateError, match="unreadable"):
+        sh.read_index(d)
+
+    (d / sh.INDEX_NAME).write_text(json.dumps({"v": 999, "shards": {}}))
+    with pytest.raises(StateError, match="version"):
+        sh.read_index(d)
+
+    # The shard itself is still readable from its name either way.
     assert sh.current_shards(d)["season=2026"].fp == dg("a")
 
 
-def test_the_index_never_takes_down_a_build(tmp_path):
-    sh.write_entry(tmp_path / "does" / "not" / "exist", "p", {"a": 1})
+def test_failing_to_write_the_index_is_an_error(tmp_path):
+    """Silently losing it means the stage rebuilds forever with nothing to explain it."""
+    with pytest.raises(OSError):
+        sh.write_entry(tmp_path / "does" / "not" / "exist", "p", {"a": 1})
 
 
 # ── the whole point ───────────────────────────────────────────────────────────
@@ -312,7 +322,7 @@ def test_every_comparison_is_answered_from_FILENAMES_alone(tmp_path):
         frame(3, extra=int(s)).write_parquet(tmp)
         sh.commit(tmp, d, part={"season": s})
 
-    upto = {"season": lambda v: v <= "2025"}
+    upto = {"season": {"le": "2025"}}
     live = sh.select(sh.current_shards(d))
     before = (
         [x.name for x in live],

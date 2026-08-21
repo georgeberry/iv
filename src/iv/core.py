@@ -1,13 +1,13 @@
 """The pipeline, and the six things a stage says.
 
-    pipe = Pipeline(root="gs://bucket/data", source_dirs=["scripts", "src"])
+    iv = Pipeline(root="gs://bucket/data", source_dirs=["scripts", "src"])
 
-    pipe.constants("config/model/", why="what the fits answer to", version="w-v3.100")
+    iv.constants("config/model/", why="what the fits answer to", version="w-v3.100")
 
-    @pipe.step("processed/box_features/", why="the per-(season, player) box matrix")
+    @iv.step("processed/box_features/", why="the per-(season, player) box matrix")
     def build(out):
-        pipe.reads("config/model/", why="a model change must rebuild this")
-        poss = pl.read_parquet(pipe.reads(
+        iv.reads("config/model/", why="a model change must rebuild this")
+        poss = pl.read_parquet(iv.reads(
             "processed/possessions/", why="one row per possession, with lineups"))
         features(poss).write_parquet(out)
 
@@ -113,11 +113,16 @@ class Pipeline:
         self.trace_path = _abs_trace(trace)
         self._trace_fh = None
         self._local = threading.local()
-        # dataset -> {"parts": [...], "id": "ds:..."} for the scope being built. Cleared on
+        # dataset -> {"parts": [...], "id": "name:..."} for the scope being built. Cleared on
         # entering a step, so a stage's inputs are exactly the reads inside its body.
         self._reads: dict[str, dict] = {}
         self._prior: set[str] = set()
         self._externals: list[str] = []
+        # Set by `step` for the duration of its body, so a `writes` inside inherits the
+        # stage's partition and code hash instead of repeating them at every output.
+        self._part: dict | None = None
+        self._code: str = ""
+        self._in_step = False
 
     def __repr__(self) -> str:
         return f"<Pipeline {self.root}>"
@@ -173,7 +178,7 @@ class Pipeline:
 
         THE CLOCK IS ONE OF THESE, and there is deliberately no `today()` shortcut for it:
 
-            pipe.constants("config/today/", why="poll once a day",
+            iv.constants("config/today/", why="poll once a day",
                            date=date.today().isoformat())
 
         A helper with a default path and a default `why=` would be a call the static scan
@@ -204,23 +209,31 @@ class Pipeline:
         excluded from the comparison: its producer runs later, so comparing it would make
         this artifact permanently stale one step behind itself.
         """
-        ds = _canon(dataset)
-        _why(why, ds)
+        name = _canon(dataset)
+        _why(why, name)
         with self.bookkeeping():
-            present = _sh.current_shards(self.resolve(ds))
-        sel = _sh.select(present, where, dataset=ds)
+            present = _sh.current_shards(self.resolve(name))
+        sel = _sh.select(present, where, dataset=name)
         if not sel and not optional:
             raise StateError(
-                f"{ds} selected no shards"
+                f"{name} selected no shards"
                 + (f" out of {len(present)} present" if present else " and is empty")
                 + f". Read here because: {why}. Pass optional=True if producing nothing "
                 f"here is legitimate.")
         if not self._depth:
-            self._reads[ds] = {"parts": [s.part_str for s in sel],
-                               "id": _sh.dataset_id(sel)}
+            # THE RULE GOES IN THE RECORD, not the shards it happened to match. That is
+            # what makes the check exact rather than a guess: `_replay` re-runs the same
+            # selection against the dataset as it stands now, so a partition that appears
+            # later inside the same range is picked up, and one outside it is not.
+            # `parts` rides along for `iv why` to print; nothing decides on it.
+            self._reads[name] = {
+                "where": where,
+                "parts": [s.part_str for s in sel],
+                "id": _sh.dataset_id(sel),
+            }
             if prior:
-                self._prior.add(ds)
-            self.record("io", op="read", rel=ds, why=why, n=len(sel), prior=prior)
+                self._prior.add(name)
+            self.record("io", op="read", rel=name, why=why, n=len(sel), prior=prior)
         return [s.path for s in sel]
 
     def external(self, name: str, *, why: str) -> None:
@@ -237,13 +250,14 @@ class Pipeline:
 
     def _inputs_now(self) -> dict[str, dict]:
         """`{dataset: {parts, id}}` for the reads in this scope, minus the prior ones."""
-        return {ds: dict(v) for ds, v in self._reads.items() if ds not in self._prior}
+        return {name: dict(v) for name, v in self._reads.items() if name not in self._prior}
 
     # ── writes ────────────────────────────────────────────────────────────────
 
     @contextmanager
     def writes(self, dataset: str, *, why: str, part: dict | None = None,
-               terminal: bool = False, code: str = "", allow_missing: bool = False):
+               terminal: bool = False, code: str | None = None,
+               allow_missing: bool = False):
         """Yield a LOCAL path to write one shard to. Commit it on a clean exit.
 
         Staged locally even when the dataset is a bucket, so fingerprinting the rows costs a
@@ -253,8 +267,10 @@ class Pipeline:
         Nothing is recorded if the body raises. A record that did not depend on the build
         succeeding is how a shell `|| echo` once turned a failure into "current".
         """
-        ds = _canon(dataset)
-        _why(why, ds)
+        name = _canon(dataset)
+        _why(why, name)
+        part = self._part if part is None else part
+        code = self._code if code is None else code
         staged = _sh.stage(f"{_sh.encode_part(part) or 'all'}-{time.time_ns()}",
                            self.stage_dir)
         started = time.time()
@@ -267,13 +283,13 @@ class Pipeline:
             raise
         if not staged.exists():
             if allow_missing:
-                self.record("io", op="skip-empty", rel=ds, why=why)
+                self.record("io", op="skip-empty", rel=name, why=why)
                 return
             raise DeclError(
-                f"{ds} was declared written but nothing was written to {staged}. Pass "
+                f"{name} was declared written but nothing was written to {staged}. Pass "
                 f"allow_missing=True if producing nothing is a legitimate outcome — then "
                 f"the shard stays absent and the next run tries again.")
-        out_dir = self.resolve_out(ds)
+        out_dir = self.resolve_out(name)
         with self.bookkeeping():
             final = _sh.commit(staged, out_dir, part=part)
             _sh.write_entry(out_dir, _sh.encode_part(part), {
@@ -288,8 +304,16 @@ class Pipeline:
                 "at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
                 "seconds": round(time.time() - started, 2),
             })
-        self.record("io", op="write", rel=ds, why=why, part=_sh.encode_part(part),
+        self.record("io", op="write", rel=name, why=why, part=_sh.encode_part(part),
                     seconds=round(time.time() - started, 2))
+        if not self._in_step:
+            # A WRITE OUTSIDE A STEP CONSUMES THE SCOPE. Inside a step the scope is the
+            # body — cleared on entry, shared by every output, which is what makes several
+            # outputs of one computation record the same inputs. Outside one there is no
+            # body to bound it, so without this a bare `writes` inherits whatever the last
+            # stage happened to read and records it as its own upstream. Seen in the wild:
+            # a raw season shard came out claiming the dataset it belongs to as an input.
+            self._fresh_scope()
 
     # ── is it current ─────────────────────────────────────────────────────────
 
@@ -306,9 +330,9 @@ class Pipeline:
         parameter because the recorded hash is the OLD one: detecting an edit needs the
         function as it stands now, and only the caller holds that.
         """
-        ds = _canon(dataset)
+        name = _canon(dataset)
         part_str = _sh.encode_part(part)
-        d = self.resolve_out(ds)
+        d = self.resolve_out(name)
         with self.bookkeeping():
             got = _sh.current_shards(d).get(part_str)
             if got is None:
@@ -320,30 +344,33 @@ class Pipeline:
             was_code = entry.get("code", "")
             if code is not None and code != was_code:
                 return f"code changed: {was_code or '(none)'} -> {code or '(none)'}"
-            ids_now, gone = self._replay(entry["inputs"])
-            if gone:
-                return f"input shard vanished: {gone}"
+            ids_now, problem = self._replay(entry["inputs"])
+            if problem:
+                return problem
             moved = [k for k, v in entry["inputs"].items() if ids_now.get(k) != v["id"]]
             if moved:
                 return f"input moved: {', '.join(moved)}"
         return None
 
     def _replay(self, recorded: dict) -> tuple[dict[str, str], str]:
-        """Recompute each input's id from the SAME partitions the last build selected.
+        """Re-run each recorded selection against the dataset as it stands now.
 
-        Storing the parts rather than re-running the `where=` is what makes this possible
-        without executing the stage: a predicate is a runtime thing, but "which partitions
-        did it choose" is a fact, and the shards at those partitions are named by their data.
+        EXACT, because the selection is data. `where=None` is every shard, so a joint fit
+        notices a season that did not exist at build time. `where={"season": {"lt": T}}` is
+        re-evaluated, so a season backfilled BELOW the bound is picked up and one added
+        above it is not — which is what makes a walk-forward stage both correct and
+        precise. Remembering the shards a rule matched, rather than the rule, could do only
+        one of those.
         """
         out: dict[str, str] = {}
-        for ds, was in recorded.items():
-            live = _sh.current_shards(self.resolve(ds))
-            picked = []
-            for p in was.get("parts", []):
-                if p not in live:
-                    return out, f"{ds}{p or '(only shard)'}"
-                picked.append(live[p])
-            out[ds] = _sh.dataset_id(picked)
+        for name, was in recorded.items():
+            live = _sh.current_shards(self.resolve(name))
+            try:
+                sel = _sh.select(live, was.get("where"), dataset=name)
+            except StateError as e:
+                # A named partition is gone. That is a fact about the tree, not a crash.
+                return out, f"{name}: {e}"
+            out[name] = _sh.dataset_id(sel)
         return out, ""
 
     def is_current(self, dataset: str, part: dict | None = None, **kw) -> bool:
@@ -351,43 +378,63 @@ class Pipeline:
 
     # ── step ──────────────────────────────────────────────────────────────────
 
-    def step(self, dataset: str, *, why: str, part: dict | None = None,
-             terminal: bool = False, code: bool | None = None,
-             allow_missing: bool = False, if_needed: bool = True) -> Callable:
-        """Guard a builder on its own output. The body is the scope of its inputs.
+    def step(self, *, why: str, part: dict | None = None,
+             code: bool | None = None, if_needed: bool = True) -> Callable:
+        """Mark a function as a stage. Skip it when everything it writes is up to date.
 
-        A DECORATOR rather than a `with` block because a context manager cannot decline to
-        run its body — PEP 377 proposed exactly that and was rejected. A callable is the only
-        thing you can choose not to call.
+        IT NAMES NOTHING. `writes` is the only place an output is declared, so there is one
+        declaration per output and no way for the two to disagree. What this adds is the one
+        thing a context manager structurally cannot do: DECLINE TO RUN THE BODY. `__enter__`
+        has already been entered by the time it gets control, so `writes` can never skip the
+        expensive work that precedes it — a callable is the only thing you can choose not to
+        call. PEP 377 proposed letting a context manager skip its body and was rejected.
 
-        `code=` is the one thing left that is not a file, and it earns that: it is a property
-        of the FUNCTION, not of the data, and it is what catches a builder edit now that
-        there is no version to bump. The hash is over the parsed tree, so reformatting and
-        comments are free. It is SHALLOW — this function, not the helpers it calls.
+        The outputs are read out of THIS FUNCTION'S OWN SOURCE at decoration time, not out
+        of the project scan. Local, exact, and it needs no configuration — it works from a
+        REPL, a test file, or a script that is not under `source_dirs`. The cost is that it
+        sees `iv.writes(...)` in the body and not in a helper the body calls; `iv check`
+        uses the project-wide scan to catch that case, where it is a warning about the code
+        rather than a silent hole in the skip check.
+
+        `part=` and `code=` are AMBIENT for the body: a `writes` inside inherits them unless
+        it passes its own. That keeps one declaration of each rather than repeating the
+        partition at every output of a stage that writes several.
         """
-        ds = _canon(dataset)
-        _why(why, ds)
+        _why(why, "step")
 
         def decorate(fn: Callable) -> Callable:
             code_hash = "" if code is False else source_digest(fn)
+            outputs = writes_in(fn)
 
             def wrapper(*args, **kwargs):
-                if if_needed and not self.force:
-                    reason = self.why_stale(ds, part, code=code_hash)
-                    if reason is None:
-                        print(f"  {ds} is current — skipping")
-                        self.record("skip", rel=ds, part=_sh.encode_part(part))
+                # THE SKIP CHECK. Every output, not just one — a stage that writes three
+                # datasets and is missing the third has work to do.
+                if if_needed and not self.force and outputs:
+                    reasons = {o: self.why_stale(o, part, code=code_hash) for o in outputs}
+                    if not any(reasons.values()):
+                        print(f"  {', '.join(outputs)} — up to date, skipping")
+                        for o in outputs:
+                            self.record("skip", rel=o, part=_sh.encode_part(part))
                         return False
-                    print(f"  {ds}: {reason}")
+                    for o, r in reasons.items():
+                        if r:
+                            print(f"  {o}: {r}")
                 self._fresh_scope()
-                with self.writes(ds, why=why, part=part, terminal=terminal,
-                                 code=code_hash, allow_missing=allow_missing) as out:
-                    fn(out, *args, **kwargs)
-                return True
+                prev = (self._part, self._code, self._in_step)
+                self._part, self._code, self._in_step = part, code_hash, True
+                try:
+                    fn(*args, **kwargs)
+                    return True
+                finally:
+                    self._part, self._code, self._in_step = prev
+                    # ON THE WAY OUT TOO. The body's reads belong to the body; leaving them
+                    # in scope means the next bare `writes` records them as its own.
+                    self._fresh_scope()
 
             wrapper.__name__ = getattr(fn, "__name__", "step")
             wrapper.__doc__ = fn.__doc__
             wrapper.run = fn
+            wrapper.outputs = outputs
             return wrapper
         return decorate
 
@@ -401,22 +448,22 @@ class Pipeline:
         directory is both. A partition is current when its shard is there and its inputs
         have not moved — the same question asked of a whole dataset, asked once per file.
         """
-        ds = _canon(dataset)
-        _why(why, ds)
+        name = _canon(dataset)
+        _why(why, name)
         code_hash = "" if code is False else source_digest(build_one)
         want = [str(p) for p in over]
         reuse, rebuild = [], []
         for p in want:
             current = (not self.force
-                       and self.why_stale(ds, {key: p}, code=code_hash) is None)
+                       and self.why_stale(name, {key: p}, code=code_hash) is None)
             (reuse if current else rebuild).append(p)
         if not quiet:
-            print(f"  partitions [{ds}] by {key}")
+            print(f"  partitions [{name}] by {key}")
             print(f"    reuse   ({len(reuse):>2}): {_span(reuse)}")
             print(f"    rebuild ({len(rebuild):>2}): {_span(rebuild)}")
         for p in rebuild:
             self._fresh_scope()
-            with self.writes(ds, why=why, part={key: p}, code=code_hash) as out:
+            with self.writes(name, why=why, part={key: p}, code=code_hash) as out:
                 build_one(p, out)
         return rebuild
 
@@ -438,6 +485,53 @@ class Pipeline:
         self._fresh_scope()
 
 
+def writes_in(fn: Callable) -> tuple[str, ...]:
+    """The datasets a function's own body writes, read out of its source.
+
+    Only `iv.writes(...)` and `iv.constants(...)` with a literal dataset and a literal
+    `why=` — the same rule the project scan applies, for the same reason: a computed name
+    cannot be read without running the code.
+
+    UNREADABLE SOURCE IS AN ERROR. It used to degrade to `()`, which meant a step with no
+    known outputs and therefore no skip check — every stage running every time, silently,
+    with nothing to see. Safe in the sense that it never skips wrongly, and useless in the
+    sense that nobody would notice the cache had stopped working.
+    """
+    try:
+        src = inspect.getsource(fn)
+    except (OSError, TypeError) as e:
+        raise DeclError(
+            f"cannot read the source of {getattr(fn, '__name__', fn)!r}, so there is no "
+            f"way to know what it writes and no way to decide whether to skip it. This "
+            f"happens in a REPL, a notebook, or a script piped in on stdin. Run it from a "
+            f"file, or pass if_needed=False to say the stage should always run.") from e
+    out = []
+    for node in ast.walk(ast.parse(textwrap.dedent(src))):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in ("writes", "constants"):
+            continue
+        kw = {k.arg: k.value for k in node.keywords if k.arg}
+        if not isinstance(kw.get("why"), ast.Constant):
+            continue
+        target = node.args[0] if node.args else kw.get("dataset")
+        if not (isinstance(target, ast.Constant) and isinstance(target.value, str)):
+            # A COMPUTED DATASET NAME IS AN ERROR, not something to skip past. Skipping it
+            # would leave the step with an incomplete list of outputs and no sign of it —
+            # the stage would go on being "up to date" while one of its outputs was
+            # missing, which is the exact failure the skip check exists to prevent.
+            shown = ast.dump(target, annotate_fields=False)[:60] if target else "missing"
+            raise DeclError(
+                f"{getattr(fn, '__name__', fn)!r} writes a dataset this cannot read: "
+                f"{shown}. Inside an @iv.step the dataset must be a string LITERAL, "
+                f"because that is how the skip check learns what the stage produces. "
+                f"A partition goes in part=, not in the name.")
+        name = _canon(target.value)
+        if name not in out:
+            out.append(name)
+    return tuple(out)
+
+
 def source_digest(fn: Callable) -> str:
     """A hash of what a function DOES, insensitive to how it is spelled.
 
@@ -445,14 +539,17 @@ def source_digest(fn: Callable) -> str:
     are stripped — so reformatting, or editing a `why=`, does not invalidate data, while a
     real change to the logic does. Raw-source hashing churns on all three.
 
-    SHALLOW: it sees this function, not the helpers it calls. Unreadable source — a REPL, a
-    notebook, a C function — degrades to "" rather than raising, which stops keying on the
-    code rather than invalidating everything that cannot be read.
+    SHALLOW: it sees this function, not the helpers it calls.
+
+    Unreadable source raises, for the same reason `writes_in` does — quietly returning ""
+    would stop keying on the code with nothing to show for it.
     """
     try:
         src = inspect.getsource(fn)
-    except (OSError, TypeError):
-        return ""
+    except (OSError, TypeError) as e:
+        raise DeclError(
+            f"cannot read the source of {getattr(fn, '__name__', fn)!r} to hash it. "
+            f"Run the stage from a file, or pass code=False to stop keying on it.") from e
     node = ast.parse(textwrap.dedent(src)).body[0]
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         node.decorator_list = []

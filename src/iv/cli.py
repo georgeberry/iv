@@ -60,7 +60,7 @@ def _load():
         if not spec:
             _die(ConfigError(
                 'no [tool.iv] instance in pyproject.toml. Add:\n\n'
-                '    [tool.iv]\n    instance = "mypkg.pipeline:pipe"\n'))
+                '    [tool.iv]\n    instance = "mypkg.pipeline:iv"\n'))
     if root and str(root) not in sys.path:
         sys.path.insert(0, str(root))
     mod, _, attr = spec.partition(":")
@@ -128,8 +128,8 @@ def check(trace: Path = typer.Option(None, "--trace", help="also diff against a 
 @app.command()
 def drift(trace: Path = typer.Option(None, "--trace")):
     """What the code declares against what a run actually did."""
-    pipe = _load()
-    path = trace or pipe.trace_path
+    iv = _load()
+    path = trace or iv.trace_path
     if not path:
         _die(ConfigError("no trace. Set IV_TRACE=... on the run, or pass --trace."))
     events = _rec.load(Path(path))
@@ -140,7 +140,7 @@ def drift(trace: Path = typer.Option(None, "--trace")):
         _die(ConfigError(
             f"{path} is {age / 3600:.0f}h old. Every line would be fiction about code "
             f"that has since changed — re-run with IV_TRACE set."))
-    errors, warns = _graph.drift(_graph.build(pipe), events)
+    errors, warns = _graph.drift(_graph.build(iv), events)
     for w in warns:
         typer.secho(f"warn  {w}", fg="yellow")
     for e in errors:
@@ -171,44 +171,39 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out")):
 
 # ── the data tree ─────────────────────────────────────────────────────────────
 
-def _staleness(pipe, g):
+def _staleness(iv, g):
     """`{dataset: reason or None}` in run order, plus the set that will rebuild."""
     out, stale = {}, set()
     for node in g.order():
         for site in g.stages[node].outputs:
-            ds = site.dataset
-            if ds in out:
+            name = site.dataset
+            if name in out:
                 continue
-            try:
-                d = pipe.resolve_out(ds)
-                parts = sorted(_sh.current_shards(d)) or [""]
-                reasons = [(p, pipe.why_stale(ds, _sh.decode_part(p) or None))
-                           for p in parts]
-            except IvError as e:
-                out[ds] = str(e)
-                stale.add(ds)
-                continue
+            d = iv.resolve_out(name)
+            parts = sorted(_sh.current_shards(d)) or [""]
+            reasons = [(p, iv.why_stale(name, _sh.decode_part(p) or None))
+                       for p in parts]
             bad = [(p, r) for p, r in reasons if r]
-            out[ds] = None if not bad else (
+            out[name] = None if not bad else (
                 f"{bad[0][1]}" if len(bad) == 1 and not bad[0][0]
                 else f"{len(bad)}/{len(reasons)} shards: {bad[0][1]}")
             if bad:
-                stale.add(ds)
+                stale.add(name)
     return out, stale
 
 
 @app.command()
 def status():
     """Current or stale, per dataset, in run order. Exit 1 if anything is stale."""
-    pipe = _load()
+    iv = _load()
     g = _graph_of()
-    reasons, stale = _staleness(pipe, g)
-    for ds, why in reasons.items():
-        n = len(_sh.current_shards(pipe.resolve_out(ds))) if not why else 0
+    reasons, stale = _staleness(iv, g)
+    for name, why in reasons.items():
+        n = len(_sh.current_shards(iv.resolve_out(name))) if not why else 0
         if why:
-            typer.secho(f"  stale    {ds:<44} {why}", fg="yellow")
+            typer.secho(f"  stale    {name:<44} {why}", fg="yellow")
         else:
-            typer.secho(f"  current  {ds:<44} {n} shard(s)", fg="green")
+            typer.secho(f"  current  {name:<44} {n} shard(s)", fg="green")
     typer.echo(f"\n{len(reasons) - len(stale)}/{len(reasons)} current")
     if stale:
         raise typer.Exit(1)
@@ -217,8 +212,8 @@ def status():
 @app.command()
 def why(dataset: str):
     """One dataset: every shard, what it holds, and what it was built from."""
-    pipe = _load()
-    d = pipe.resolve_out(dataset)
+    iv = _load()
+    d = iv.resolve_out(dataset)
     try:
         present = _sh.current_shards(d)
     except IvError as e:
@@ -229,17 +224,17 @@ def why(dataset: str):
     index = (_sh.read_index(d).get("shards") or {})
     for part in sorted(present, key=_sh.sort_key):
         sh = present[part]
-        reason = pipe.why_stale(dataset, _sh.decode_part(part) or None)
+        reason = iv.why_stale(dataset, _sh.decode_part(part) or None)
         typer.echo(f"\n{dataset}{part or '(one shard)'}")
         typer.echo(f"  fp      {sh.fp}")
         entry = index.get(part, {})
         for k in ("by", "at", "seconds", "why"):
             if entry.get(k) not in (None, ""):
                 typer.echo(f"  {k:<7} {entry[k]}")
-        for ds, was in sorted((entry.get("inputs") or {}).items()):
-            typer.echo(f"  in      {ds:<40} {was.get('id')} ({len(was.get('parts', []))})")
-        for ds in entry.get("prior") or ():
-            typer.echo(f"  prior   {ds}")
+        for name, was in sorted((entry.get("inputs") or {}).items()):
+            typer.echo(f"  in      {name:<40} {was.get('id')} ({len(was.get('parts', []))})")
+        for name in entry.get("prior") or ():
+            typer.echo(f"  prior   {name}")
         for ext in entry.get("external") or ():
             typer.echo(f"  from    {ext}")
         if reason:
@@ -251,9 +246,9 @@ def why(dataset: str):
 @app.command()
 def plan():
     """What would rebuild, and what might because it sits downstream of one."""
-    pipe = _load()
+    iv = _load()
     g = _graph_of()
-    reasons, stale = _staleness(pipe, g)
+    reasons, stale = _staleness(iv, g)
     if not stale:
         typer.echo("nothing to do")
         return
@@ -262,30 +257,30 @@ def plan():
     downstream = set()
     for node in g.order():
         ps = parents.get(node, [])
-        if any(writers.get(ds) in ps for ds in stale if writers.get(ds)):
+        if any(writers.get(name) in ps for name in stale if writers.get(name)):
             for s in g.stages[node].outputs:
                 if s.dataset not in stale:
                     downstream.add(s.dataset)
-    for ds, r in reasons.items():
+    for name, r in reasons.items():
         if r:
-            typer.secho(f"  rebuild  {ds:<44} {r}", fg="yellow")
-    for ds in sorted(downstream):
-        typer.secho(f"  maybe    {ds:<44} (downstream of a rebuild)", fg="cyan")
+            typer.secho(f"  rebuild  {name:<44} {r}", fg="yellow")
+    for name in sorted(downstream):
+        typer.secho(f"  maybe    {name:<44} (downstream of a rebuild)", fg="cyan")
 
 
 @app.command()
 def gc(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
     """Drop shards no longer current — what an interrupted commit leaves behind."""
-    pipe = _load()
+    iv = _load()
     g = _graph_of()
     targets = [dataset] if dataset else g.produced
     total = 0
-    for ds in targets:
-        d = pipe.resolve_out(ds)
+    for name in targets:
+        d = iv.resolve_out(name)
         found = _sh.list_shards(d) if d.exists() else {}
         keep = {sorted(v, key=lambda s: s.name)[0].name for v in found.values()}
         removed = _sh.gc(d, keep=keep) if any(len(v) > 1 for v in found.values()) else []
         for name in removed:
-            typer.echo(f"  dropped {ds}{name}")
+            typer.echo(f"  dropped {name}{name}")
         total += len(removed)
     typer.echo(f"{total} shard(s) dropped")

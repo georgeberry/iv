@@ -1,6 +1,6 @@
 """The DAG, read out of the source without running anything.
 
-`pipe.reads(...)` and `pipe.writes(...)` are ordinary calls, so the graph is already in the
+`iv.reads(...)` and `iv.writes(...)` are ordinary calls, so the graph is already in the
 code — this reads it back out with `ast`, which means `iv graph` and `iv check` work on a
 fresh checkout with no data and nothing ever run. The trace (`iv drift`) is the cross-check,
 not the source.
@@ -8,6 +8,12 @@ not the source.
 A call counts when its method name is one of ours AND it carries a `why=` string literal.
 Both halves matter: the name alone would claim any `x.reads(...)` in the project, and the
 `why=` is what makes a match deliberate.
+
+`step` is not in that table, because it names nothing. It MARKS a function as a stage; the
+outputs are the `writes` calls inside it. So the scan records which functions are steps and
+which function each site sits in, and the two together say what a stage produces — which is
+how `iv check` catches a `writes` hidden in a helper, where the runtime skip check (which
+reads only the decorated function's own source) cannot see it.
 
 THE DATASET AND THE `why=` MUST BE LITERALS. A computed dataset name cannot be read without
 running the code, which is the whole thing this exists to avoid. Everything else about a
@@ -35,7 +41,6 @@ from .errors import DeclError
 METHODS: dict[str, tuple[str, object, str]] = {
     "reads": ("read", 0, "dataset"),
     "writes": ("write", 0, "dataset"),
-    "step": ("write", 0, "dataset"),
     "constants": ("constant", 0, "dataset"),
     "for_each": ("write", None, "dataset"),
     "external": ("external", 0, "name"),
@@ -78,6 +83,7 @@ class Stage:
     defines: tuple[str, ...] = ()
     imports: tuple[tuple[str, str, str], ...] = ()
     aliases: tuple[tuple[str, str], ...] = ()
+    steps: tuple[str, ...] = ()          # functions marked with @iv.step
 
     def of(self, *kinds: str) -> tuple[Site, ...]:
         return tuple(s for s in self.sites if s.kind in kinds)
@@ -90,6 +96,27 @@ class Stage:
     def outputs(self) -> tuple[Site, ...]:
         """Everything this stage leaves behind, constants included."""
         return self.of("write", "constant")
+
+    def reachable_from(self, fn: str) -> set[str]:
+        """`fn` and every function in this file it transitively calls."""
+        calls = dict(self.calls)
+        seen, stack = {fn}, [fn]
+        while stack:
+            for c in calls.get(stack.pop(), ()):
+                if c not in seen and c in self.defines:
+                    seen.add(c)
+                    stack.append(c)
+        return seen
+
+    def outputs_of(self, fn: str) -> tuple[Site, ...]:
+        """What a step writes, INCLUDING from a helper it calls.
+
+        The runtime skip check reads only the decorated function's own source, so anything
+        written from a helper is invisible to it. This is what `iv check` compares against
+        to say so.
+        """
+        scope = self.reachable_from(fn)
+        return tuple(s for s in self.outputs if s.owner in scope)
 
     @property
     def constants(self) -> tuple[Site, ...]:
@@ -158,17 +185,22 @@ class _Visitor(ast.NodeVisitor):
         self.aliases: dict[str, str] = {}
         self._owner = ""
         self._seen: set[int] = set()
+        self.steps: set[str] = set()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self.defines.add(node.name)
-        # A `@pipe.step(...)` decorator is handled here rather than in visit_Call, because
-        # only from the FunctionDef can we see the body it guards.
+        # `@iv.step(...)` MARKS a stage. It names no dataset, so it is not a site — the
+        # `writes` calls inside it are. Handled here rather than in visit_Call because only
+        # from the FunctionDef can we see which function it marks.
         for dec in node.decorator_list:
-            if isinstance(dec, ast.Call) and _method_name(dec.func) == "step" \
-                    and any(k.arg == "why" for k in dec.keywords):
+            if isinstance(dec, ast.Call) and _method_name(dec.func) == "step":
                 self._seen.add(id(dec))
-                self.sites.append(_site(dec, "write", METHODS["step"][1:],
-                                        self.rel_file, node.name))
+                if not any(k.arg == "why" and isinstance(k.value, ast.Constant)
+                           for k in dec.keywords):
+                    raise DeclError(
+                        f"{self.rel_file}:{dec.lineno}: why= is required on @iv.step and "
+                        f"must be a string literal saying what the stage is for.")
+                self.steps.add(node.name)
         prev, self._owner = self._owner, node.name
         self.generic_visit(node)
         self._owner = prev
@@ -216,27 +248,29 @@ def scan_file(path: Path, root: Path) -> Stage | None:
     rel = str(path.relative_to(root))
     try:
         tree = ast.parse(path.read_text())
-    except (SyntaxError, UnicodeDecodeError):
-        return None
+    except (SyntaxError, UnicodeDecodeError) as e:
+        # Skipping it would drop the stage out of the graph entirely, and every check that
+        # depends on knowing what it writes would then pass by omission.
+        raise DeclError(f"{rel} does not parse, so its I/O cannot be read: {e}") from e
     v = _Visitor(rel)
     v.visit(tree)
     if not v.sites:
         return None
-    return Stage(node=rel, sites=tuple(v.sites),
+    return Stage(node=rel, sites=tuple(v.sites), steps=tuple(sorted(v.steps)),
                  calls=tuple((k, tuple(sorted(vs))) for k, vs in sorted(v.calls.items())),
                  defines=tuple(sorted(v.defines)),
                  imports=tuple((k, m, a) for k, (m, a) in sorted(v.imports.items())),
                  aliases=tuple(sorted(v.aliases.items())))
 
 
-def scan(pipe) -> dict[str, Stage]:
+def scan(iv) -> dict[str, Stage]:
     """Every declaring file under the pipeline's source dirs, by node name. Memoised."""
-    root = Path(pipe.project_root or Path.cwd())
-    key = (str(root), tuple(pipe.source_dirs))
+    root = Path(iv.project_root or Path.cwd())
+    key = (str(root), tuple(iv.source_dirs))
     if key in _cache:
         return _cache[key]
     out: dict[str, Stage] = {}
-    for d in pipe.source_dirs:
+    for d in iv.source_dirs:
         base = root / d
         if not base.exists():
             continue
@@ -250,8 +284,8 @@ def scan(pipe) -> dict[str, Stage]:
     return out
 
 
-def writers_of(pipe, dataset: str) -> list[str]:
+def writers_of(iv, dataset: str) -> list[str]:
     """Which stages write a dataset. More than one is an error the graph reports."""
     ds = _canon(dataset)
-    return sorted({n for n, st in scan(pipe).items()
+    return sorted({n for n, st in scan(iv).items()
                    if any(s.dataset == ds for s in st.outputs)})

@@ -6,24 +6,24 @@
 # pipeline.py — once per project
 from iv import Pipeline
 
-pipe = Pipeline(root="gs://bucket/data", source_dirs=["stages"])
+iv = Pipeline(root="gs://bucket/data", source_dirs=["stages"])
 ```
 
 ```python
 # stages/daily_revenue.py — read, transform, write
 import polars as pl
-from pipeline import pipe
+from pipeline import iv
 
 
-@pipe.step("processed/daily_revenue/",
-           why="revenue per day; what the dashboard reads")
-def daily_revenue(out):
-    sales = pl.read_parquet(pipe.reads(
+@iv.step(why="revenue per day; what the dashboard reads")
+def daily_revenue():
+    sales = pl.read_parquet(iv.reads(
         "raw/sales/", why="one row per transaction; the only source of revenue"))
 
-    (sales.group_by("day", maintain_order=True)
-          .agg(pl.col("amount").sum().alias("revenue"))
-          .write_parquet(out))
+    with iv.writes("processed/daily_revenue/", why="revenue per day") as out:
+        (sales.group_by("day", maintain_order=True)
+              .agg(pl.col("amount").sum().alias("revenue"))
+              .write_parquet(out))
 
 
 daily_revenue()
@@ -45,8 +45,9 @@ $ python stages/daily_revenue.py
   processed/daily_revenue/: input moved: raw/sales/
 ```
 
-**The decorator is the output. The `pipe.reads(...)` calls in the body are the inputs.**
-Nothing else to declare.
+**`writes` is the output, `reads` is the input, and `step` names neither.** It marks a
+stage and does the one thing a context manager structurally cannot: decline to run the body
+when everything the stage writes is already up to date.
 
 From those same call sites you also get **the DAG** (`iv graph`, `check`, `stage`) — read
 straight out of your source, so it works on a fresh checkout with no data and nothing ever
@@ -80,7 +81,7 @@ dependant does not care how a shard came to exist, only what is in it.
 Model versions, hyperparameters and today's date are files too:
 
 ```python
-pipe.constants("config/hyperparams/", why="the knobs the fit shape depends on",
+iv.constants("config/hyperparams/", why="the knobs the fit shape depends on",
                half_life=4.0, epochs=300, seed=0)
 ```
 
@@ -111,11 +112,11 @@ deleted — every failure lands on the safe side.
 
 ```python
 def build_one(season, out):
-    box = pl.read_parquet(pipe.reads(
+    box = pl.read_parquet(iv.reads(
         "raw/box/", why="raw box scores", where={"season": [season]}))
     ...
 
-pipe.for_each(SEASONS, build_one, dataset="processed/box_features/",
+iv.for_each(SEASONS, build_one, dataset="processed/box_features/",
               key="season", why="per-(season, player) box prior")
 ```
 
@@ -129,7 +130,7 @@ pipe.for_each(SEASONS, build_one, dataset="processed/box_features/",
 simply never opens it:
 
 ```python
-pipe.reads("processed/possessions/", why="seasons strictly before this cohort",
+iv.reads("processed/possessions/", why="seasons strictly before this cohort",
            where={"season": lambda s: s < cohort})
 ```
 
@@ -144,7 +145,7 @@ at the call site, and impossible to get wrong. An explicit list (`["2019", "2020
 | `constants(dataset, *, why, **values)` | values from outside the data, as a shard |
 | `reads(dataset, *, why, where=, optional=, prior=)` | inputs; returns sorted shard paths |
 | `writes(dataset, *, why, part=, terminal=, allow_missing=)` | one shard, committed on clean exit |
-| `step(dataset, *, why, part=, code=, terminal=, allow_missing=)` | the guard |
+| `step(*, why, part=, code=, if_needed=)` | marks a stage; skips when all its outputs are current |
 | `for_each(over, build_one, *, dataset, key, why)` | one shard per partition |
 | `external(name, *, why)` | provenance for a source outside the pipeline |
 

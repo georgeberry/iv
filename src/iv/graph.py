@@ -25,7 +25,7 @@ from .errors import IvError
 
 @dataclass(frozen=True)
 class Graph:
-    pipe: object
+    iv: object
     stages: dict[str, _static.Stage]
 
     # ── the shape ─────────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ class Graph:
 
     def order(self) -> list[str]:
         """A run order: declared if the pipeline names one, else a topological sort."""
-        declared = declared_order(self.pipe)
+        declared = declared_order(self.iv)
         if declared:
             return [n for n in declared if n in self.stages] + \
                    sorted(n for n in self.stages if n not in declared)
@@ -75,18 +75,18 @@ class Graph:
                                  "readers": self.consumers_of(d)} for d in self.produced}}
 
 
-def build(pipe) -> Graph:
-    return Graph(pipe=pipe, stages=_static.scan(pipe))
+def build(iv) -> Graph:
+    return Graph(iv=iv, stages=_static.scan(iv))
 
 
-def declared_order(pipe) -> list[str]:
+def declared_order(iv) -> list[str]:
     """Run order scraped from the shell script the pipeline names, if it names one."""
     import re
-    if not pipe.order_from:
+    if not iv.order_from:
         return []
-    p = pipe.order_from
+    p = iv.order_from
     from pathlib import Path
-    path = Path(p) if Path(p).is_absolute() else Path(pipe.project_root or ".") / p
+    path = Path(p) if Path(p).is_absolute() else Path(iv.project_root or ".") / p
     if not path.exists():
         return []
     out, seen = [], set()
@@ -128,32 +128,32 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     """Every structural check. Returns (errors, warnings)."""
     errors: list[str] = []
     warns: list[str] = []
-    roots = tuple(g.pipe.roots)
+    roots = tuple(g.iv.roots)
 
-    for ds in sorted({s.dataset for st in g.stages.values() for s in st.inputs}):
-        if g.producers_of(ds) or ds.startswith(roots):
+    for name in sorted({s.dataset for st in g.stages.values() for s in st.inputs}):
+        if g.producers_of(name) or name.startswith(roots):
             continue
-        site = next(s for st in g.stages.values() for s in st.inputs if s.dataset == ds)
-        msg = (f"READ WITH NO PRODUCER  {ds}\n"
+        site = next(s for st in g.stages.values() for s in st.inputs if s.dataset == name)
+        msg = (f"READ WITH NO PRODUCER  {name}\n"
                f"    read at {site.location} but nothing writes it. Either a stage is "
                f"missing, or it arrives out of band — put it under one of {list(roots)} "
                f"or add that prefix to the Pipeline's roots=.")
         (warns if site.optional else errors).append(msg)
 
-    for ds in g.produced:
-        if g.consumers_of(ds) or g.is_terminal(ds):
+    for name in g.produced:
+        if g.consumers_of(name) or g.is_terminal(name):
             continue
-        site = next(s for st in g.stages.values() for s in st.outputs if s.dataset == ds)
+        site = next(s for st in g.stages.values() for s in st.outputs if s.dataset == name)
         errors.append(
-            f"WRITE WITH NO CONSUMER  {ds}\n"
+            f"WRITE WITH NO CONSUMER  {name}\n"
             f"    written at {site.location} and read by nothing. Delete the stage, or "
             f"pass terminal=True if it is consumed outside this pipeline.")
 
-    for ds in g.produced:
-        writers = g.producers_of(ds)
+    for name in g.produced:
+        writers = g.producers_of(name)
         if len(writers) > 1:
             errors.append(
-                f"TWO WRITERS  {ds}\n"
+                f"TWO WRITERS  {name}\n"
                 f"    written by {writers}. One writer per dataset — a second producer "
                 f"should write its own PARTITION of it, or its own dataset.")
 
@@ -174,7 +174,20 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                 f"fetch-once archive. If it should re-run, give it something that moves — "
                 f'read a constants file such as "config/today/".')
 
-    declared = declared_order(g.pipe)
+    for node, st in g.stages.items():
+        for fn in st.steps:
+            seen_by_scan = {s.dataset for s in st.outputs_of(fn)}
+            in_own_body = {s.dataset for s in st.outputs if s.owner == fn}
+            hidden = seen_by_scan - in_own_body
+            if hidden:
+                errors.append(
+                    f"WRITE OUTSIDE THE STEP  {node}:{fn}\n"
+                    f"    writes {sorted(hidden)} from a helper, not from its own body. "
+                    f"The skip check reads the decorated function's source, so it cannot "
+                    f"see those and will skip the stage while they are missing. Move the "
+                    f"iv.writes(...) into the step body.")
+
+    declared = declared_order(g.iv)
     if declared:
         pos = {n: i for i, n in enumerate(declared)}
         for node, ps in g.parent_map().items():
@@ -182,9 +195,9 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                 if node in pos and p in pos and pos[p] > pos[node]:
                     errors.append(
                         f"ORDER  {node} runs before {p}, but reads something {p} writes.")
-    elif g.pipe.order_from:
+    elif g.iv.order_from:
         warns.append(
-            f"no stage invocations found in {g.pipe.order_from}, so run ORDER was not "
+            f"no stage invocations found in {g.iv.order_from}, so run ORDER was not "
             f"checked. A stage launched via a shell function or a variable is invisible "
             f"to the scrape.")
 
@@ -209,8 +222,8 @@ def drift(g: Graph, events: list[dict]) -> tuple[list[str], list[str]]:
         st = g.stages.get(node)
         declared = {("read", s.dataset) for s in (st.inputs if st else ())} | \
                    {("write", s.dataset) for s in (st.outputs if st else ())}
-        for op, ds in sorted(pairs - declared):
-            errors.append(f"UNDECLARED {op.upper()}  {node} -> {ds}")
-        for op, ds in sorted(declared - pairs):
-            warns.append(f"declared but not seen  {node} -> {ds} ({op})")
+        for op, name in sorted(pairs - declared):
+            errors.append(f"UNDECLARED {op.upper()}  {node} -> {name}")
+        for op, name in sorted(declared - pairs):
+            warns.append(f"declared but not seen  {node} -> {name} ({op})")
     return errors, warns

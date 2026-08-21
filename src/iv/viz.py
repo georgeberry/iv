@@ -63,12 +63,10 @@ def short(node: str) -> str:
 def draw(g, out: Path, full: bool = False) -> Path:
     d = to_networkx(g)
     if not full:
-        try:
+        if find_cycle(d) is None:
             reduced = nx.transitive_reduction(d)
             reduced.add_nodes_from(d.nodes(data=True))
             d = reduced
-        except nx.NetworkXError:
-            pass                            # a cycle; refused just below
 
     # A TEMPORAL loop is legal and has to be drawn as one. `build_preseason` reads
     # `game_predictions` as `predict_games` left it and writes `preseason_team`;
