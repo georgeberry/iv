@@ -32,3 +32,8 @@ packages = ["src/iv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Five tests reuse `run` from `tests.test_partition` rather than copying a helper that
+# would then drift. That import needs the project root importable, which pytest does not
+# do on its own once `tests/` has no `__init__.py` — and it should not have one, because a
+# package there changes how conftest is resolved.
+pythonpath = ["."]

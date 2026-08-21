@@ -150,6 +150,19 @@ class State:
         behind after every bump, permanently: the fetcher is conditional and correctly
         will not re-download bytes that have not changed, so nothing ever clears it. That
         is a staleness no action can resolve, which is the one kind that must not exist.
+
+        AND IT DOES NOT CARRY THE DATE. `clock` means "re-run once a day", and the date
+        used to be appended here — but this term is folded into the artifact's ID, and the
+        id is exactly what every dependant records as the identity of its input. So the
+        whole graph below a fetched feed turned over at midnight, every night, on a
+        string. Measured: `raw/nba/schedule/schedule_2027.parquet` held fingerprint
+        `5092d47d4dd814ae` for days while its id moved daily, `raw/crosswalk/games.parquet`
+        folded the moved id, and both leagues rebuilt themselves end to end every morning
+        — the NBA one in an off-season with no game played.
+
+        The date is a fact about the FETCH, not about the DATA. So it decides one thing
+        only: whether the fetcher runs again today. It lives beside the id, in the
+        record's `fetched`, and `why_stale` is the only place that reads it.
         """
         term = (f"policy={policy}" if policy == "clock"
                 else f"v={self.iv.data_version}|policy={policy}")
@@ -157,9 +170,6 @@ class State:
             term += f"|version={version}"
         if code:
             term += f"|code={code}"
-        if policy == "clock":
-            # The clock is the input. Nothing upstream can express "rebuild once a day".
-            term += f"|date={_dt.date.today().isoformat()}"
         return term
 
     @staticmethod
@@ -640,6 +650,10 @@ class State:
             "by": by,
             "at": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
         }
+        if spec.policy == "clock":
+            # The clock is THIS artifact's input and nothing else's, so it is recorded
+            # next to the id rather than inside it. See `metadata_term`.
+            entry["fetched"] = _dt.date.today().isoformat()
         if parts is not None:
             entry["parts"] = parts
         self._write_record(rel, entry)
@@ -737,6 +751,13 @@ class State:
             # only thing that differs is a term this policy no longer has — so accept it,
             # and let the next real fetch write the new shape.
             return None
+        if policy == "clock":
+            # A NEW DAY IS THE INPUT, and this is the only place that says so. The date is
+            # not in the id, so it re-runs the fetcher and moves nothing below it.
+            today = _dt.date.today().isoformat()
+            fetched = entry.get("fetched") or _part_of(entry.get("meta", ""), "date")
+            if fetched and fetched != today:
+                return f"a new day: last fetched {fetched}, today is {today}"
 
         stored_inputs = entry.get("in") or {}
         # A `prior=True` input is lineage, not a trigger. Its producer runs LATER in the
@@ -784,13 +805,23 @@ class State:
         code_now = _part_of(stored_meta, "code") if code is None else code
         version_now = _part_of(stored_meta, "version") if version is None else version
         meta_now = self.metadata_term(policy, code_now, version_now)
+        if policy == "clock":
+            # Written while the date was still part of the id. Compare it back in, so the
+            # change of rule is not itself a rebuild; the next fetch writes the new shape.
+            stored_date = _part_of(stored_meta, "date")
+            if stored_date:
+                meta_now += f"|date={stored_date}"
         id_now = self.compute_id(entry["fp"], meta_now, ids_now, policy)
         if id_now == entry["id"]:
             return None
 
         # The id moved. Say WHICH component, because "the id changed" is not actionable.
         if meta_now != stored_meta:
-            was_v, now_v = _part_of(stored_meta, "v"), self.iv.data_version
+            # BOTH SIDES COME OUT OF THE META TERMS. Reading `now` off the Invalidator
+            # instead reported "data_version bumped:  -> wnba-w-v3.126" on every `clock`
+            # artifact — a policy whose term has no version at all, so the two could never
+            # be equal and the real difference was never named.
+            was_v, now_v = _part_of(stored_meta, "v"), _part_of(meta_now, "v")
             if was_v != now_v:
                 return f"data_version bumped: {was_v} -> {now_v}"
             was_v2 = _part_of(stored_meta, "version")

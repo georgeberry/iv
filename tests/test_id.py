@@ -337,3 +337,51 @@ def test_a_clock_artifact_does_not_answer_to_the_global_version(project):
     with iv.writes("processed/derived.parquet", why="something we compute") as p:
         pl.DataFrame({"x": [1]}).write_parquet(p)
     assert make("v2").why_stale("processed/derived.parquet") is not None
+
+
+def test_a_new_day_re_runs_the_fetcher_and_moves_nothing_below_it(project, monkeypatch):
+    """The date is a fact about the FETCH, not about the data.
+
+    It used to sit in the `clock` artifact's metadata term, which is folded into its id —
+    and the id is what every dependant records as the identity of its input. So the whole
+    graph below a fetched feed went stale at midnight, every night, on a string. In wvorp
+    both leagues rebuilt themselves end to end every morning, the NBA one in an off-season
+    with no game played: `raw/nba/schedule/schedule_2027.parquet` held fingerprint
+    `5092d47d4dd814ae` for days while its id moved daily.
+
+    Both halves are the contract. A new day makes the FETCHER stale, and it leaves
+    everything downstream of unchanged bytes current.
+    """
+    import datetime as _dt
+
+    import polars as pl
+    from iv import state as _state
+    from iv import Invalidator
+
+    def on(day: str):
+        class _Date(_dt.date):
+            @classmethod
+            def today(cls):
+                return _dt.date.fromisoformat(day)
+        return monkeypatch.setattr(_state._dt, "date", _Date)
+
+    iv = Invalidator(data_root=project / "data", data_version="v1",
+                     source_dirs=["stages"], project_root=project)
+
+    on("2026-08-20")
+    with iv.writes("raw/feed.parquet", why="one day of the feed", policy="clock") as p:
+        pl.DataFrame({"x": [1]}).write_parquet(p)
+    with iv.writes("processed/derived.parquet", why="what we compute from it") as p:
+        feed = pl.read_parquet(iv.reads("raw/feed.parquet", why="the feed"))
+        feed.select(pl.col("x") * 2).write_parquet(p)
+    feed_id = iv.state.record_of("raw/feed.parquet")["id"]
+    assert iv.why_stale("raw/feed.parquet") is None
+    assert iv.why_stale("processed/derived.parquet") is None
+
+    on("2026-08-21")
+    # The fetcher runs again — that is what `clock` is for.
+    why = iv.why_stale("raw/feed.parquet")
+    assert why is not None and "a new day" in why, why
+    # And nothing below it moved, because the date was never in the id.
+    assert iv.state.record_of("raw/feed.parquet")["id"] == feed_id
+    assert iv.why_stale("processed/derived.parquet") is None

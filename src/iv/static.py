@@ -33,7 +33,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .errors import DeclError
+from .errors import ConfigError, DeclError
 from .fingerprint import DIGEST_LEN
 from .paths import fields as _template_fields
 
@@ -895,17 +895,71 @@ def inputs_for_artifact(iv, rel: str) -> dict[str, object] | None:
 
 
 def version_for_artifact(iv, rel: str) -> str | None:
-    """The extra version NAME its write site declares, or None if it declares none."""
+    """The extra version NAME its write site declares, or None if it declares none.
+
+    SEVERAL WRITE SITES THAT AGREE ARE STILL AN ANSWER. This used to return None for any
+    artifact with more than one site, and `why_stale` reads None as "use the version in
+    the record" — which compares the stored version against itself, so the artifact could
+    never go stale no matter how far the version moved. An artifact written by two
+    branches of the same pipeline (one per league, one per variant) silently opted out of
+    version invalidation altogether, and nothing said so: `iv status` printed it as
+    current with the OLD version plainly visible in its own metadata.
+
+    Sites that DISAGREE are a real ambiguity and still return None — there is no honest
+    single answer — but that case now says so out loud rather than being folded in with
+    "no sites found".
+    """
     sites = [s for st in scan(iv).values() for s in st.outputs() if matches(s.path, rel)]
-    if len(sites) != 1:
+    if not sites:
         return None
-    return sites[0].version or ""
+    declared = {s.version or "" for s in sites}
+    if len(declared) > 1:
+        raise ConfigError(
+            f"{rel} is written by {len(sites)} sites declaring different versions "
+            f"({sorted(declared)}). One artifact answers to one version — make the write "
+            f"sites agree, or give them separate paths.")
+    return declared.pop()
 
 
 def code_hash_for_artifact(iv, rel: str) -> str | None:
-    """The current source hash of the `step(code=True)` function producing `rel`."""
+    """The current source hash of the `step(code=True)` function(s) producing `rel`.
+
+    SEVERAL WRITE SITES ARE NOT AN ABSENCE OF ONE. This used to return None unless there
+    was exactly one site, and `why_stale` reads None as "use the hash in the record" —
+    comparing the stored hash against itself, so editing the builder could never rebuild
+    the artifact. Anything written by two branches of a pipeline silently opted out of
+    code invalidation, which is precisely the case a multi-league or multi-variant
+    project is made of.
+
+    Unlike a version, two sites need not AGREE: they are different functions and their
+    hashes differ legitimately. What matters is which of them this pipeline runs.
+
+      * exactly one site runs  -> its hash
+      * several sites run      -> all of them, combined; either changing must invalidate,
+                                  which is right when they write different SLICES of one
+                                  artifact (played vs upcoming, say)
+      * no site runs           -> this pipeline does not build it; fall back to every
+                                  declared site so a single-site artifact off the run
+                                  list behaves as it always did
+
+    `declared_order()` is what separates them, and it is already how `iv` knows which
+    stages a pipeline actually executes.
+    """
     sites = [s for st in scan(iv).values() for s in st.outputs() if matches(s.path, rel)]
-    return sites[0].code if len(sites) == 1 and sites[0].code else None
+    if not sites:
+        return None
+    order = iv.declared_order()
+    if order:
+        running = [s for s in sites if s.file in set(order)]
+        if running:
+            sites = running
+    hashes = sorted({s.code for s in sites if s.code})
+    if not hashes:
+        return None
+    if len(hashes) == 1:
+        return hashes[0]
+    # Sorted, so the combined hash is a function of the set and not of scan order.
+    return hashlib.sha256("|".join(hashes).encode()).hexdigest()[:DIGEST_LEN]
 
 
 def branch_siblings(iv, rel: str) -> list[str]:

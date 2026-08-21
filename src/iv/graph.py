@@ -344,7 +344,7 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     #
     # Three policies say "yes, that is the intent": `settled` (fetch-once history, where
     # the question is coverage rather than staleness), `manual` (rebuilt on demand), and
-    # `clock` (the date is in the metadata, so the id turns over daily).
+    # `clock` (a new day is the input, checked against the record's `fetched`).
     for path in g.produced:
         site = next(s for s in g.sites[path] if s.kind in ("write", "update"))
         if site.policy in ("settled", "manual", "clock"):

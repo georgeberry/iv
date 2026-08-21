@@ -333,11 +333,47 @@ def _ago(at: str) -> str:
     return f"{int(sec // 86400)}d ago"
 
 
+def _staleness(iv, g, fingerprint: bool) -> tuple[dict[str, str | None], set[str]]:
+    """`({artifact: why_stale or None}, downstream-of-something-stale)`.
+
+    ONE WALK, BOTH COMMANDS. `status` and `plan` answer the same question and differed
+    only in how expensive an answer you asked for — but they used to compute it twice, and
+    the copies disagreed: `plan` propagated staleness down the graph and `status` did not,
+    so on one tree in one second `plan` called `rookie_projections` a rebuild while
+    `status` called it current.
+
+    A node's own verdict is computed against what is ON DISK NOW, so a node whose parent
+    has not rebuilt YET reads as current — it really does match the parent it was built
+    from. The propagation is what turns that into the useful answer: an artifact's
+    identity, as its dependants see it, includes its tag, so a version bump upstream
+    necessarily reaches everything below it.
+
+    The two sets stay separate because they are different claims. A rebuild that happens
+    to produce identical bytes leaves its dependants alone, so `downstream` is a statement
+    about the run you are about to do, not about the tree as it stands.
+    """
+    parents = g.parent_map()
+    reasons = {p: iv.why_stale(p, fingerprint=fingerprint) for p in g.produced}
+    definite = {p for p, why in reasons.items() if why is not None}
+    downstream: set[str] = set()
+    frontier = set(definite)
+    while frontier:
+        nxt = {p for p in g.produced
+               if p not in definite and p not in downstream
+               and any(a in frontier for a in _render.ancestors_of(p, parents))}
+        downstream |= nxt
+        frontier = nxt
+    return reasons, downstream
+
+
 @app.command()
 def status(
     fingerprint: bool = typer.Option(
         False, "--fingerprint/--no-fingerprint",
         help="also read the raw feeds; off by default because that is the only I/O"),
+    ancestors: bool = typer.Option(
+        True, "--ancestors/--no-ancestors",
+        help="under each artifact, the inputs it was built from"),
 ) -> None:
     """Every declared artifact: current, stale, or missing.
 
@@ -351,20 +387,50 @@ def status(
     except InvalidatorError as e:
         _die(e)
     typer.secho(f"  {iv!r}\n", fg=typer.colors.BRIGHT_BLACK)
-    rows, stale = [], 0
-    for path in g.produced:
-        reason = iv.why_stale(path, fingerprint=fingerprint)
-        stale += reason is not None
-        rows.append((path, reason, _facts(iv, path)))
+    parents = g.parent_map()
+    reasons, downstream = _staleness(iv, g, fingerprint)
+    rows = [(p, reasons[p], _facts(iv, p)) for p in g.produced]
+    stale = sum(r is not None for _, r, _ in rows)
+    stale_set = {p for p, r, _ in rows if r is not None}
     width = max((len(p) for p, _, f in rows if f), default=0)
-    for path, reason, facts in sorted(rows):
-        label, colour = (("current", typer.colors.GREEN) if reason is None
-                         else ("stale  ", typer.colors.YELLOW))
+
+    # IN RUN ORDER, not alphabetical. `g.order` ranks the stages by where the refresh
+    # script actually names them, so an artifact sorts by the stage that writes it: raw
+    # feeds first, then what is built from them, then the dumps. Alphabetical put
+    # `dump/wvorp.json` above `processed/panel/…` and made a chain impossible to read as a
+    # chain — which matters most here, where the question is usually "how far down did
+    # this reach".
+    def _rank(path: str) -> tuple[int, str]:
+        stages = g.writers.get(path) or g.updaters.get(path) or []
+        return (min((g.order.get(st, 10 ** 9) for st in stages), default=10 ** 9), path)
+
+    for path, reason, facts in sorted(rows, key=lambda r: _rank(r[0])):
+        if reason is not None:
+            label, colour = "stale  ", typer.colors.YELLOW
+        elif path in downstream:
+            label, colour = "downstr", typer.colors.CYAN
+        else:
+            label, colour = "current", typer.colors.GREEN
         if facts:
             typer.secho(f"  {label}  {path.ljust(width)}", fg=colour, nl=False)
             typer.secho(f"  {facts}", fg=typer.colors.BRIGHT_BLACK)
         else:
             typer.secho(f"  {label}  {path}", fg=colour)
+        if ancestors:
+            # `parent_map` is BIPARTITE — an artifact's parent is the stage that writes
+            # it, and that stage's parents are the artifacts it reads. One hop through
+            # the stage turns "which file builds this" into "what was this built FROM",
+            # which is the question being asked.
+            # An artifact can legitimately be its own parent — a stage that reads one
+            # declared SLICE and writes another (played vs upcoming) is a real edge, not
+            # a cycle. It is still not an ANCESTOR of itself, so it is dropped here
+            # rather than printed as one.
+            for parent in sorted({a for st in parents.get(path, ())
+                                  for a in parents.get(st, ())} - {path}):
+                bad = parent in stale_set
+                typer.secho(f"             {'stale' if bad else '     '}  <- {parent}",
+                            fg=(typer.colors.YELLOW if bad
+                                else typer.colors.BRIGHT_BLACK))
         if reason is not None:
             typer.secho(f"             {reason}", fg=typer.colors.YELLOW)
     typer.echo(f"\n{len(rows) - stale}/{len(rows)} current")
@@ -417,19 +483,8 @@ def plan(
         iv, g = _graph_of()
     except InvalidatorError as e:
         _die(e)
-    definite = {p for p in g.produced
-                if iv.why_stale(p, fingerprint=fingerprint) is not None}
-    parents = g.parent_map()
-    maybe, frontier = set(), set(definite)
-    while frontier:
-        nxt = set()
-        for path in g.produced:
-            if path in definite or path in maybe:
-                continue
-            if any(a in frontier for a in _render.ancestors_of(path, parents)):
-                nxt.add(path)
-        maybe |= nxt
-        frontier = nxt
+    reasons, maybe = _staleness(iv, g, fingerprint)
+    definite = {p for p, why in reasons.items() if why is not None}
     for p in sorted(definite):
         typer.secho(f"  rebuild  {p}", fg=typer.colors.YELLOW)
     for p in sorted(maybe):
