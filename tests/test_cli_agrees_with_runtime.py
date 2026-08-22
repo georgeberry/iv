@@ -56,10 +56,10 @@ def project(tmp_path, monkeypatch):
     for m in ("p", "mid", "end"):
         sys.modules.pop(m, None)
     import p
-    # A declared stage registers itself on IMPORT. The project scan used to find stages by
-    # reading files; the registry needs them imported, which is what `iv.include(...)` is
-    # for in a real project.
-    __import__("mid"); __import__("end")   # importing IS the registration
+    # A declared stage registers itself on IMPORT, so a plain import is the whole of it.
+    # The project scan used to find stages by reading files; a pipeline that spans several
+    # modules imports them from the one `[tool.iv] instance` names.
+    __import__("mid"); __import__("end")
     yield tmp_path, p.iv
     for m in ("p", "mid", "end"):
         sys.modules.pop(m, None)
