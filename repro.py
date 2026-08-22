@@ -1,4 +1,4 @@
-"""One small pipeline exercising every shape wvorp has. Run it: `uv run python repro.py`.
+"""One small pipeline exercising every shape iv has. Run it: `uv run python repro.py`.
 
 config/today/           the clock, as a file — what a "re-run daily" policy used to be
 config/hyperparams/     metadata, as a file — what a model version used to be
