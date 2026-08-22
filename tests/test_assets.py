@@ -11,6 +11,7 @@ import pytest
 
 from iv import Pipeline
 from iv import graph as _graph
+from iv import shards as _sh
 from iv.errors import DeclError, StateError
 
 
@@ -294,7 +295,7 @@ def test_one_dataset_has_one_producer(iv):
     def feed():
         return frame()
 
-    with pytest.raises(DeclError, match="already built by"):
+    with pytest.raises(DeclError, match="already written by"):
         @iv.data("raw/feed/", why="the same feed again")
         def feed2():
             return frame()
@@ -374,3 +375,191 @@ def test_a_stage_may_read_the_copy_it_is_about_to_overwrite(iv):
     today()
     assert log().height == 2, "a new day appended"
     assert log.is_current()
+
+
+# ── one computation, several outputs ──────────────────────────────────────────
+
+def test_a_stage_with_several_outputs_runs_once(iv):
+    ran = []
+
+    @iv.data("raw/feed/", why="the feed")
+    def feed():
+        return frame()
+
+    @iv.step(outputs={"a": "processed/a/", "b": "processed/b/", "c": "processed/c/"},
+             why="one computation, three tables")
+    def fit(feed=iv.all_of("raw/feed/", why="the upstream")):
+        ran.append(1)
+        return {"a": feed, "b": feed.head(1), "c": feed.tail(1)}
+
+    feed()
+    assert fit() is True and len(ran) == 1
+    assert fit() is False and len(ran) == 1
+    for ds in ("processed/a/", "processed/b/", "processed/c/"):
+        assert iv.is_current(ds)
+
+
+def test_losing_any_one_output_brings_the_whole_stage_back(iv):
+    """A crash between two of the writes leaves exactly this state."""
+    import shutil
+    ran = []
+
+    @iv.data("raw/feed/", why="the feed", once=True)
+    def feed():
+        return frame()
+
+    @iv.step(outputs={"a": "processed/a/", "b": "processed/b/"}, why="two tables")
+    def fit(feed=iv.all_of("raw/feed/", why="the upstream")):
+        ran.append(1)
+        return {"a": feed, "b": feed.head(1)}
+
+    feed(); fit()
+    shutil.rmtree(iv.resolve_out("processed/b/"))
+    assert fit() is True and len(ran) == 2
+    assert iv.resolve_out("processed/b/").exists()
+
+
+def test_an_undeclared_output_is_refused(iv):
+    @iv.step(outputs={"a": "processed/a/"}, why="returns something it did not declare")
+    def fit():
+        return {"a": frame(), "surprise": frame()}
+
+    with pytest.raises(DeclError, match="does not declare as outputs"):
+        fit()
+
+
+def test_a_missing_output_is_refused_unless_allowed(iv):
+    @iv.step(outputs={"a": "processed/a/", "b": "processed/b/"}, why="returns one of two")
+    def fit():
+        return {"a": frame()}
+
+    with pytest.raises(DeclError, match="declares the output 'b'"):
+        fit()
+
+
+def test_allow_missing_lets_an_output_stay_absent(iv):
+    @iv.step(outputs={"a": "processed/a/",
+                      "b": iv.output("processed/b/", allow_missing=True)},
+             why="the second table is not always producible")
+    def fit():
+        return {"a": frame()}
+
+    fit()
+    assert iv.resolve_out("processed/a/").exists()
+    assert not iv.resolve_out("processed/b/").exists()
+
+
+def test_terminal_belongs_to_the_output_not_the_stage(iv):
+    @iv.data("raw/feed/", why="the feed")
+    def feed():
+        return frame()
+
+    @iv.step(outputs={"read_by_someone": "processed/a/",
+                      "read_by_a_person": iv.output("processed/b/", terminal=True)},
+             why="one fit, one table nothing downstream reads")
+    def fit(feed=iv.all_of("raw/feed/", why="the upstream")):
+        return {"read_by_someone": feed, "read_by_a_person": feed}
+
+    @iv.data("dump/site/", why="the app reads it", terminal=True)
+    def site(a=iv.all_of("processed/a/", why="the table a stage reads")):
+        return a
+
+    errors, _ = _graph.check(_graph.build(iv))
+    assert not errors, errors
+
+
+# ── two stages, two shards, one dataset ───────────────────────────────────────
+
+def test_two_stages_may_share_a_dataset_by_writing_different_partitions(iv):
+    @iv.data("raw/feed/", why="the feed", once=True)
+    def feed():
+        return frame()
+
+    @iv.data("derived/blocks/", why="the first block", part={"source": "a"})
+    def block_a(feed=iv.all_of("raw/feed/", why="the upstream")):
+        return frame(2)
+
+    @iv.data("derived/blocks/", why="the second block", part={"source": "b"})
+    def block_b(feed=iv.all_of("raw/feed/", why="the upstream")):
+        return frame(3)
+
+    feed(); block_a(); block_b()
+    names = sorted(p.name for p in iv.resolve_out("derived/blocks/").iterdir())
+    assert len(names) == 2 and names[0].startswith("source=a")
+    assert pl.read_parquet(iv.reads("derived/blocks/", why="both")).height == 5
+
+
+def test_the_same_shard_written_twice_is_refused(iv):
+    @iv.data("derived/blocks/", why="the first block", part={"source": "a"})
+    def block_a():
+        return frame()
+
+    with pytest.raises(DeclError, match="different partitions"):
+        @iv.data("derived/blocks/", why="the same shard again", part={"source": "a"})
+        def block_a2():
+            return frame()
+
+
+def test_a_fixed_partition_takes_no_call_argument(iv):
+    @iv.data("derived/blocks/", why="one block", part={"source": "a"})
+    def block():
+        return frame()
+
+    with pytest.raises(DeclError, match="names no other"):
+        block("b")
+
+
+# ── one computation, many shards ──────────────────────────────────────────────
+
+def test_split_writes_a_shard_per_returned_key(iv):
+    ran = []
+
+    @iv.data("raw/feed/", why="the feed", once=True)
+    def feed():
+        return pl.DataFrame({"season": ["2024", "2024", "2025"], "pts": [1, 2, 3]})
+
+    @iv.data("derived/features/", why="built in one pass, split by season",
+             part="season", split=True)
+    def features(feed=iv.all_of("raw/feed/", why="every season at once")):
+        ran.append(1)
+        return {str(s): rows for (s,), rows in feed.group_by("season", maintain_order=True)}
+
+    feed(); features()
+    assert len(ran) == 1
+    assert sorted(_sh.current_shards(iv.resolve_out("derived/features/"))) == \
+        ["season=2024", "season=2025"]
+    assert features() is False, "every shard is current, so the pass must not repeat"
+
+
+def test_a_split_stage_must_return_a_mapping(iv):
+    @iv.data("derived/features/", why="split, but returns a frame",
+             part="season", split=True)
+    def features():
+        return frame()
+
+    with pytest.raises(DeclError, match="returns {season: value}"):
+        features()
+
+
+def test_split_needs_a_partition_key(iv):
+    with pytest.raises(DeclError, match="needs a partition key"):
+        @iv.data("derived/features/", why="split with nothing to split on", split=True)
+        def features():
+            return {"a": frame()}
+
+
+# ── external sources ──────────────────────────────────────────────────────────
+
+def test_an_external_source_is_declared_and_drawn(iv):
+    @iv.data("raw/feed/", why="fetched from an API",
+             external={"espn/feeds": "ESPN's season files"})
+    def feed(clock=iv.all_of("config/today/", why="poll once a day")):
+        return frame()
+
+    @iv.data("config/today/", why="the clock", ext=".json")
+    def today():
+        return {"date": "2026-08-22"}
+
+    g = _graph.build(iv)
+    node = next(n for n in g.stages if n.endswith("::feed"))
+    assert [s.dataset for s in g.stages[node].externals] == ["external:espn/feeds"]

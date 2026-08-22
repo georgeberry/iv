@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import decl as _decl
@@ -123,32 +124,102 @@ def check_signature(fn, part_key: str | None, dataset: str) -> None:
             f"A partition value is named after the stage's part=.")
 
 
-class Asset:
-    """One dataset, its producer, and the decision about whether to run it."""
+@dataclass(frozen=True)
+class Output:
+    """One dataset a stage writes, and how."""
+    dataset: str
+    ext: str = _sh.EXT
+    terminal: bool = False
+    allow_missing: bool = False
 
-    def __init__(self, pipeline, dataset: str, fn, *, why: str,
-                 part: str | None = None, ext: str = _sh.EXT,
-                 terminal: bool = False, if_needed: bool = True,
-                 once: bool = False) -> None:
+
+def output(dataset: str, *, ext: str = _sh.EXT, terminal: bool = False,
+           allow_missing: bool = False) -> Output:
+    """One output of a multi-output stage, where it differs from the others.
+
+    A joint fit usually has one table something downstream reads and several that only a
+    person does — so `terminal` belongs to the output, not to the stage:
+
+        outputs={"ratings": "processed/xpm/",
+                 "summary": iv.output("processed/xpm_summary/", terminal=True)}
+    """
+    return Output(_decl._canon(dataset), ext, terminal, allow_missing)
+
+
+def _outputs(spec, ext, terminal, allow_missing) -> dict:
+    """`outputs=` as {key: Output}. A bare string is the one-output case."""
+    if isinstance(spec, str):
+        d = _decl._canon(spec)
+        return {d: Output(d, ext, terminal, allow_missing)}
+    if not isinstance(spec, dict) or not spec:
+        raise DeclError(
+            "outputs= is a dataset, or a dict of {name: dataset} naming each one — "
+            'outputs={"ratings": "processed/xpm/", "summary": "processed/xpm_summary/"}. '
+            "The names are the keys the body returns.")
+    out = {}
+    for k, v in spec.items():
+        if isinstance(v, Output):
+            out[k] = Output(_decl._canon(v.dataset), v.ext, v.terminal, v.allow_missing)
+        else:
+            out[k] = Output(_decl._canon(v), ext, terminal, allow_missing)
+    return out
+
+
+class Asset:
+    """A stage: what it reads, what it writes, and whether it needs to run.
+
+    One object for both shapes. `@iv.data` is the single-output case, where the body
+    returns the value; `@iv.step(outputs={...})` returns a dict keyed by the names in the
+    declaration, which is how one expensive fit produces six tables without being run six
+    times.
+    """
+
+    def __init__(self, pipeline, outputs, fn, *, why: str,
+                 part=None, ext: str = _sh.EXT, terminal: bool = False,
+                 allow_missing: bool = False, if_needed: bool = True,
+                 once: bool = False, split: bool = False, single: bool = True,
+                 external=None) -> None:
         self.pipeline = pipeline
-        self.dataset = _decl._canon(dataset)
+        self.outputs = _outputs(outputs, ext, terminal, allow_missing)
+        self.single = single
         self.fn = fn
-        self.why = _decl._why(why, self.dataset)
-        self.part_key = part
-        self.ext = ext
-        self.terminal = terminal
+        self.why = _decl._why(why, self.primary)
         self.if_needed = if_needed
         self.once = once
-        check_signature(fn, part, self.dataset)
-        self.reads = declared_reads(fn, part)
+        self.split = split
+        self.part_key, self.fixed_part = _part_spec(part, self.primary)
+        if split and not self.part_key:
+            raise DeclError(
+                f"{self.primary}: split=True means the body computes every partition at "
+                f"once and returns {{partition: value}}, so it needs a partition key — "
+                f"@iv.step(..., part='season', split=True).")
+        if split and not self.single:
+            raise DeclError(
+                f"{self.primary}: split=True and several outputs cannot both key the "
+                f"returned dict. Split one dataset per stage.")
+        check_signature(fn, self.part_key, self.primary)
+        self.reads = declared_reads(fn, self.part_key)
+        self.externals = _externals(external, self.primary)
         self.wants_out = OUT_PARAM in inspect.signature(fn).parameters
+        if self.wants_out and not self.single:
+            raise DeclError(
+                f"{self.primary}: a body that writes through `{OUT_PARAM}` produces one "
+                f"file, so it cannot serve several outputs.")
         self.__name__ = getattr(fn, "__name__", "asset")
         self.__doc__ = getattr(fn, "__doc__", None)
         self.__wrapped__ = fn
 
+    @property
+    def primary(self) -> str:
+        return next(iter(self.outputs.values())).dataset
+
+    @property
+    def datasets(self) -> tuple:
+        return tuple(o.dataset for o in self.outputs.values())
+
     def __repr__(self) -> str:
-        p = f", part={self.part_key!r}" if self.part_key else ""
-        return f"<iv.data {self.dataset}{p}>"
+        p = f", part={self.part_key or self.fixed_part!r}" if (self.part_key or self.fixed_part) else ""
+        return f"<iv stage {', '.join(self.datasets)}{p}>"
 
     # ── what the graph and the skip check read off it ─────────────────────────
 
@@ -158,7 +229,6 @@ class Asset:
         return tuple(r for r in self.reads if not r.is_own)
 
     def triples(self) -> tuple:
-        """`(dataset, sel, optional)` per trigger — what `key_of` consumes."""
         return tuple(r.triple() for r in self.triggers)
 
     @property
@@ -173,51 +243,60 @@ class Asset:
 
         Running it is the safe failure: the commit is content-addressed, so a body that
         produces the same bytes commits the same shard, and nothing downstream moves. A
-        fetch too expensive to repeat says so with once=True, and then it is the caller
-        who has decided that nothing new can arrive.
+        fetch too expensive to repeat says once=True, and then it is the caller who has
+        decided that nothing new can arrive.
         """
         return bool(self.triggers) or self.once
 
-    # ── building ──────────────────────────────────────────────────────────────
+    # ── deciding ──────────────────────────────────────────────────────────────
 
     def _part(self, args, kwargs) -> dict | None:
-        if self.part_key is None:
+        if self.fixed_part is not None:
             if args or kwargs:
                 raise DeclError(
-                    f"{self.dataset} is not partitioned, so it takes no partition value. "
-                    f"Declare one with @iv.data(..., part='season').")
+                    f"{self.primary} writes the fixed partition {self.fixed_part}, so a "
+                    f"call names no other.")
+            return dict(self.fixed_part)
+        if self.part_key is None or self.split:
+            if args or kwargs:
+                raise DeclError(
+                    f"{self.primary} is not built one partition at a time, so it takes no "
+                    f"partition value.")
             return None
         if self.part_key in kwargs:
             return {self.part_key: str(kwargs[self.part_key])}
         if len(args) == 1:
             return {self.part_key: str(args[0])}
         raise DeclError(
-            f"{self.dataset} is partitioned by {self.part_key!r}, so a call names one: "
+            f"{self.primary} is partitioned by {self.part_key!r}, so a call names one: "
             f"{self.__name__}('2024') or {self.__name__}({self.part_key}='2024').")
 
     def why_stale(self, *args, **kwargs) -> str | None:
-        return self.pipeline.why_stale(self.dataset, self._part(args, kwargs),
-                                       inputs=self.triples())
+        """Stale if ANY output is. Losing one table of a six-table fit brings the fit back."""
+        part = self._part(args, kwargs)
+        for o in self.outputs.values():
+            r = self.pipeline.why_stale(o.dataset, part, inputs=self.triples())
+            if r:
+                return f"{o.dataset}: {r}" if len(self.outputs) > 1 else r
+        return None
 
     def is_current(self, *args, **kwargs) -> bool:
         return self.why_stale(*args, **kwargs) is None
 
     def __call__(self, *args, **kwargs):
-        """Build this shard if it is stale, and hand back its contents either way."""
         iv = self.pipeline
         if iv._in_step:
             raise DeclError(
-                f"{self.dataset} was called from inside another stage. Building one stage "
+                f"{self.primary} was called from inside another stage. Building one stage "
                 f"from within another puts it outside the graph, so nothing orders the two "
                 f"and `iv status` cannot see the edge. Declare it as an upstream instead: "
-                f"def {iv._node.split('::')[-1] or 'stage'}(x=iv.all_of({self.dataset!r}, "
-                f"why='...')).")
+                f"x=iv.all_of({self.primary!r}, why='...').")
         part = self._part(args, kwargs)
         if (self.if_needed and self.may_skip and not iv.force
                 and self.why_stale(*args, **kwargs) is None):
-            return self.load(part)
+            return self.load(part) if self.single and not self.split else False
         self.build(part)
-        return self.load(part)
+        return self.load(part) if self.single and not self.split else True
 
     def build(self, part: dict | None) -> None:
         """Run the body and commit what it produced. No skip check — the caller made it."""
@@ -226,42 +305,90 @@ class Asset:
         prev = (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs)
         iv._part, iv._in_step = part, True
         iv._node = iv._node_name(self.fn)
-        iv._inputs, iv._outputs = self.triples(), (self.dataset,)
+        iv._inputs, iv._outputs = self.triples(), self.datasets
         try:
             kw = self._resolve(part)
-            with iv.writes(self.dataset, why=self.why, part=part, ext=self.ext,
-                           terminal=self.terminal) as staged:
-                if self.wants_out:
+            if self.wants_out:
+                o = next(iter(self.outputs.values()))
+                with iv.writes(o.dataset, why=self.why, part=part, ext=o.ext,
+                               terminal=o.terminal,
+                               allow_missing=o.allow_missing) as staged:
                     kw[OUT_PARAM] = staged
                     self.fn(**kw)
-                else:
-                    value = self.fn(**kw)
-                    if value is None:
-                        raise DeclError(
-                            f"{self.dataset}: {self.__name__} returned None and takes no "
-                            f"{OUT_PARAM!r} parameter, so nothing was produced. Return the "
-                            f"value to store, or take `{OUT_PARAM}` and write to it.")
-                    save_value(value, staged, self.ext)
+                return
+            value = self.fn(**kw)
+            if value is None:
+                raise DeclError(
+                    f"{self.primary}: {self.__name__} returned None and takes no "
+                    f"{OUT_PARAM!r} parameter, so nothing was produced. Return the value "
+                    f"to store, or take `{OUT_PARAM}` and write to it.")
+            if self.split:
+                self._commit_split(value)
+            elif self.single:
+                self._commit(next(iter(self.outputs.values())), value, part)
+            else:
+                self._commit_many(value, part)
         finally:
             (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs) = prev
             iv._fresh_scope()
+
+    def _commit(self, o: Output, value, part) -> None:
+        with self.pipeline.writes(o.dataset, why=self.why, part=part, ext=o.ext,
+                                  terminal=o.terminal,
+                                  allow_missing=o.allow_missing) as staged:
+            if value is not None:
+                save_value(value, staged, o.ext)
+
+    def _commit_many(self, value, part) -> None:
+        if not isinstance(value, dict):
+            raise DeclError(
+                f"{self.__name__} declares {len(self.outputs)} outputs, so it returns a "
+                f"dict keyed by their names — {sorted(self.outputs)} — got "
+                f"{type(value).__name__}.")
+        missing = sorted(set(self.outputs) - set(value))
+        extra = sorted(set(value) - set(self.outputs))
+        if extra:
+            raise DeclError(
+                f"{self.__name__} returned {extra}, which it does not declare as outputs. "
+                f"Declared: {sorted(self.outputs)}.")
+        for key, o in self.outputs.items():
+            if key in missing and not o.allow_missing:
+                raise DeclError(
+                    f"{self.__name__} declares the output {key!r} ({o.dataset}) and did "
+                    f"not return it. Pass allow_missing=True if producing nothing there "
+                    f"is a legitimate outcome — then the shard stays absent and the next "
+                    f"run tries again.")
+            if key in value:
+                self._commit(o, value[key], part)
+
+    def _commit_split(self, value) -> None:
+        """One computation, many shards: the body returns {partition: value}."""
+        if not isinstance(value, dict):
+            raise DeclError(
+                f"{self.primary}: split=True means the body returns "
+                f"{{{self.part_key}: value}} for every partition it computed, got "
+                f"{type(value).__name__}.")
+        o = next(iter(self.outputs.values()))
+        for key, v in value.items():
+            self._commit(o, v, {self.part_key: str(key)})
 
     def _resolve(self, part: dict | None) -> dict:
         """Each declared read, opened — through `Pipeline.reads`, so the recording, the
         enforcement and the undeclared-read check all apply exactly as they always have."""
         from .core import _resolve_sel
         iv = self.pipeline
+        params = inspect.signature(self.fn).parameters
         kw: dict = {}
-        if self.part_key is not None and self.part_key in inspect.signature(self.fn).parameters:
+        if self.part_key is not None and self.part_key in params and part:
             kw[self.part_key] = part[self.part_key]
-        for name, p in inspect.signature(self.fn).parameters.items():
+        for name, p in params.items():
             if not isinstance(p.default, _decl.Read):
                 continue
             r = p.default.bound_to(self.part_key)
             paths = iv.reads(r.dataset, why=r.why,
                              where=_resolve_sel(r.sel(), part, r.dataset),
                              optional=r.optional, update_file_on_disk=r.is_own)
-            kw[name] = load_value(paths, _ext_of(paths, self.ext)) if paths else None
+            kw[name] = load_value(paths, _ext_of(paths, _sh.EXT)) if paths else None
         return kw
 
     def load(self, part: dict | None = None):
@@ -273,21 +400,22 @@ class Asset:
         behind iv's back, which is the exact thing the check exists to refuse.
         """
         iv = self.pipeline
+        o = next(iter(self.outputs.values()))
         with iv.bookkeeping():
-            live = _sh.current_shards(iv.resolve_out(self.dataset))
-            got = live.get(_sh.encode_part(part))
+            live = _sh.current_shards(iv.resolve_out(o.dataset))
+            got = live.get(_sh.encode_part(part if part is not None else self.fixed_part))
             if got is None:
                 raise StateError(
-                    f"{self.dataset} has no shard for "
+                    f"{o.dataset} has no shard for "
                     f"{_sh.encode_part(part) or '(one shard)'} — it was not built.")
             return load_value([got.path], got.ext)
 
     def for_each(self, over) -> list[str]:
         """Build one shard per key, skipping the ones already current."""
-        if self.part_key is None:
+        if self.part_key is None or self.split or self.fixed_part is not None:
             raise DeclError(
-                f"{self.dataset} is not partitioned, so there is nothing to iterate. "
-                f"Declare @iv.data(..., part='season').")
+                f"{self.primary} is not built one partition at a time, so there is "
+                f"nothing to iterate. Declare part='season' without split=.")
         iv = self.pipeline
         want = [str(p) for p in over]
         rebuild = [p for p in want
@@ -295,6 +423,42 @@ class Asset:
         for p in rebuild:
             self.build({self.part_key: p})
         return rebuild
+
+
+def _externals(spec, dataset) -> tuple:
+    """Sources outside the tree — an API, a bucket, a page being scraped.
+
+    Declared rather than called, so `iv graph` draws them without the body running. They
+    cannot trigger anything: nothing on disk says whether an endpoint moved, which is what
+    a clock read is for.
+    """
+    if not spec:
+        return ()
+    if not isinstance(spec, dict):
+        raise DeclError(
+            f"{dataset}: external= is {{name: why}} — "
+            f'external={{"espn/feeds": "ESPN\'s season files"}}.')
+    return tuple((str(k), _decl._why(v, f"{dataset} external {k!r}"))
+                 for k, v in spec.items())
+
+
+def _part_spec(part, dataset) -> tuple:
+    """`part=` is either a KEY this stage builds one shard per, or a LITERAL shard it owns.
+
+    The literal form is how several stages share one dataset: three blocks of a college
+    feature table, or the played and unplayed halves of a prediction table. Each names the
+    shard it writes, so the graph can see they do not collide.
+    """
+    if part is None:
+        return None, None
+    if isinstance(part, str):
+        return part, None
+    if isinstance(part, dict) and part:
+        fixed = {str(k): str(v) for k, v in part.items()}
+        return (next(iter(fixed)) if len(fixed) == 1 else None), fixed
+    raise DeclError(
+        f"{dataset}: part= is a key this stage builds one shard per — part='season' — or "
+        f"a literal shard it owns — part={{'source': 'ncaa'}}. Got {part!r}.")
 
 
 def _ext_of(paths, default: str) -> str:

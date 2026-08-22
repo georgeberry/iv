@@ -110,11 +110,19 @@ def declared_nodes(iv) -> list[_static.Node]:
                          where=r.where(), sel=r.sel(), owner=fn_name)
             for r in asset.reads
         ]
-        # A partitioned asset writes a shard per key, and which keys is a runtime list —
-        # so the write names no literal part=, exactly as a for_each does.
-        sites.append(
-            _static.Site(kind="write", dataset=asset.dataset, why=asset.why, file=rel,
-                         line=_line_of(asset.fn), terminal=asset.terminal, owner=fn_name))
+        # A partitioned asset writes a shard per key, and which keys is a runtime list, so
+        # that write names no literal part= — exactly as a for_each does. A stage owning
+        # ONE shard says so, and that is what lets two stages share a dataset.
+        for name, why in asset.externals:
+            sites.append(
+                _static.Site(kind="external", dataset=_static.EXTERNAL_PREFIX + name,
+                             why=why, file=rel, line=_line_of(asset.fn), owner=fn_name))
+        fixed = tuple(sorted(asset.fixed_part.items())) if asset.fixed_part else ()
+        for o in asset.outputs.values():
+            sites.append(
+                _static.Site(kind="write", dataset=o.dataset, why=asset.why, file=rel,
+                             line=_line_of(asset.fn), terminal=o.terminal, part=fixed,
+                             owner=fn_name))
         # `guarded` is "has a skip check that could be fooled". A root asset has no
         # upstream to be stale against and runs every time, which is how anything outside
         # the tree gets in — so it is not guarded, and the RUNS ONCE warning below is not

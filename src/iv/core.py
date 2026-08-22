@@ -472,10 +472,12 @@ class Pipeline:
     between = staticmethod(_decl.between)
     parts = staticmethod(_decl.parts)
     own_last_copy = staticmethod(_decl.own_last_copy)
+    output = staticmethod(_assets.output)
 
-    def data(self, dataset: str, *, why: str, part: str | None = None,
-             ext: str = _sh.EXT, terminal: bool = False,
-             if_needed: bool = True, once: bool = False) -> Callable:
+    def data(self, dataset: str, *, why: str, part=None,
+             ext: str = _sh.EXT, terminal: bool = False, allow_missing: bool = False,
+             if_needed: bool = True, once: bool = False, split: bool = False,
+             external=None) -> Callable:
         """Name a dataset and decorate the function that builds it.
 
         The upstreams are parameter defaults, which is what makes the whole declaration
@@ -485,25 +487,69 @@ class Pipeline:
             def cohorts(past=iv.before_part("processed/features/", why="prior seasons")):
                 return past.group_by("player").agg(pl.col("z").mean())
         """
-        name = _canon(dataset)
-        _why(why, name)
-
         def decorate(fn: Callable) -> _assets.Asset:
-            asset = _assets.Asset(self, name, fn, why=why, part=part, ext=ext,
-                                  terminal=terminal, if_needed=if_needed, once=once)
-            if name in self._assets and self._assets[name].fn is not fn:
-                raise DeclError(
-                    f"{name} is already built by "
-                    f"{self._assets[name].__name__!r}. A dataset has one producer — two "
-                    f"would race, and whichever ran last would win.")
-            self._assets[name] = asset
-            self._declared[name] = asset.triples()
-            return asset
+            return self._register(_assets.Asset(
+                self, dataset, fn, why=why, part=part, ext=ext, terminal=terminal,
+                allow_missing=allow_missing, if_needed=if_needed, once=once, split=split,
+                single=True, external=external))
         return decorate
 
-    def step(self, *, why: str, part: dict | None = None,
-             if_needed: bool = True) -> Callable:
+    def _register(self, asset: _assets.Asset) -> _assets.Asset:
+        for name in asset.datasets:
+            for other in self._assets.values():
+                if name not in other.datasets or other.fn is asset.fn:
+                    continue
+                # Two stages may share a dataset only by writing DIFFERENT shards of it —
+                # three blocks of a college feature table, the played and unplayed halves
+                # of a prediction table. Without a literal part= on both, whichever ran
+                # last would simply win.
+                if asset.fixed_part and other.fixed_part \
+                        and asset.fixed_part != other.fixed_part:
+                    continue
+                raise DeclError(
+                    f"{name} is already written by {other.__name__!r}. Two stages may "
+                    f"share a dataset only by writing different partitions of it, each "
+                    f"declared with a literal part=. Otherwise they race, and whichever "
+                    f"runs last wins.")
+        self._assets[self._node_name(asset.fn)] = asset
+        for name in asset.datasets:
+            self._declared[name] = asset.triples()
+        return asset
+
+    def producers_of(self, dataset: str) -> list:
+        name = _canon(dataset)
+        return [a for a in self._assets.values() if name in a.datasets]
+
+    def step(self, *, why: str, outputs=None, part=None,
+             ext: str = _sh.EXT, terminal: bool = False, allow_missing: bool = False,
+             if_needed: bool = True, once: bool = False, split: bool = False,
+             external=None) -> Callable:
+        """A stage. Two shapes, and which one is in play is not a guess.
+
+        DECLARED — `outputs=` names what it writes and the signature names what it reads,
+        so one expensive fit produces six tables without being run six times:
+
+            @iv.step(outputs={"ratings": "processed/xpm/",
+                              "summary": "processed/xpm_summary/"}, why="the joint fit")
+            def xpm(poss=iv.all_of("derived_data/possessions/", why="the design matrix")):
+                ...
+                return {"ratings": r, "summary": s}
+
+        SCANNED — no `outputs=`, and the body's own `iv.reads`/`iv.writes` calls are read
+        off its source, exactly as before.
+        """
         _why(why, "step")
+        if outputs is not None:
+            def decorate_declared(fn: Callable) -> _assets.Asset:
+                return self._register(_assets.Asset(
+                    self, outputs, fn, why=why, part=part, ext=ext, terminal=terminal,
+                    allow_missing=allow_missing, if_needed=if_needed, once=once,
+                    split=split, single=isinstance(outputs, str), external=external))
+            return decorate_declared
+        if part is not None and not isinstance(part, dict):
+            raise DeclError(
+                "a scanned @iv.step takes part= as a literal dict. A partition KEY belongs "
+                "to the declared form, which also needs outputs=.")
 
         def decorate(fn: Callable) -> Callable:
             outputs = writes_in(fn)
