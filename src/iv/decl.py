@@ -23,7 +23,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .errors import DeclError
-from .static import PART
+
+#: Stands for the partition being built, inside a selector. It is what makes a
+#: partition-relative read readable without running the closure that would otherwise
+#: supply it — and that is what lets a shard's key be computed before its body runs, so
+#: nothing has to be written down.
+PART = "\x00PART"
 
 
 def _canon(dataset: str) -> str:
@@ -145,8 +150,13 @@ def after_part(dataset: str, *, why: str, inclusive: bool = False,
 
 
 def between(dataset: str, *, why: str, optional: bool = False, load: bool = True,
-            **bounds) -> Read:
-    """A window: between('raw/box/', why='...', ge='2020', lt=iv.PART)."""
+            key: str | None = None, **bounds) -> Read:
+    """A window: between('raw/box/', why='...', ge='2020', lt=iv.PART).
+
+    `key=` names the partition the bounds apply to. It is only needed when the bounds are
+    literal and the stage is not itself partitioned — a stage with `part=` lends its own
+    key, and `iv.PART` only means anything where there is one.
+    """
     d = _canon(dataset)
     ops = {"lt", "le", "gt", "ge"}
     bad = sorted(set(bounds) - ops)
@@ -155,7 +165,7 @@ def between(dataset: str, *, why: str, optional: bool = False, load: bool = True
     if not bounds:
         raise DeclError(f"{d}: between() needs at least one of {sorted(ops)}.")
     body = tuple(sorted((op, v if v == PART else str(v)) for op, v in bounds.items()))
-    return Read(d, "range", body, optional, None, _why(why, d), load)
+    return Read(d, "range", body, optional, key, _why(why, d), load)
 
 
 def parts(dataset: str, *, why: str, optional: bool = False, load: bool = True,

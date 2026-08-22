@@ -9,7 +9,7 @@ from .errors import IvError
 @dataclass(frozen=True)
 class Graph:
     iv: object
-    stages: dict[str, _static.Stage]
+    stages: dict[str, _static.Node]
 
 
     @property
@@ -62,39 +62,19 @@ class Graph:
         at = {n: i for i, n in enumerate(self.stages)}
         return [n for layer in toposort(self.parent_map()) for n in sorted(layer, key=at.get)]
 
-    def export(self) -> dict:
-        return {"schema": "iv/2", "nodes": sorted(self.stages),
-                "parent_map": self.parent_map(),
-                "datasets": {d: {"writers": self.producers_of(d),
-                                 "readers": self.consumers_of(d)} for d in self.produced}}
-
 
 def build(iv) -> Graph:
-    """Every stage this pipeline has, however it was declared.
+    """Every stage this pipeline has, in source order.
 
-    Two ways in, and the graph is their UNION rather than whichever it finds first. A
-    declared stage registers itself when its module imports; a stage written with
-    `iv.reads`/`iv.writes` is found by scanning `source_dirs`. Preferring one would drop the
-    other's nodes silently — and a dataset whose producer is missing from the graph looks
-    like a root, which reads as `current` for anything with a file on disk. A green that
-    means "I could not find the question" is worse than a red.
+    A stage registers itself when its module imports, so the pipeline is known by importing
+    it rather than by parsing it — which is what lets one defined in a notebook declare as
+    well as one in a file, and what leaves a single route to every fact about it.
 
-    The two cannot collide: a node is named `<file>::<function>` from the function's own
-    code object either way, and a declared stage has no `iv.reads(...)` call for the scan
-    to find in the first place.
+    Sorted back into SOURCE order because within a file definition order is run order, and
+    the ORDER check below holds it to being topological.
     """
-    nodes: dict[str, _static.Node] = {}
-    for _, st in _static.scan(iv).items():
-        for node in _static.nodes_of(st):
-            nodes[node.name] = node
-    for node in declared_nodes(iv):
-        nodes[node.name] = node
-    # Back into SOURCE order. Within one file definition order is run order, and the ORDER
-    # check holds it to being topological — so a declared stage appended after the scanned
-    # ones would read as defined last however near the top of the file it sits, and every
-    # scanned stage reading it would look out of order.
-    ordered = sorted(nodes.values(), key=lambda n: (n.file, _first_line(n), n.fn))
-    return Graph(iv=iv, stages={n.name: n for n in ordered})
+    nodes = sorted(declared_nodes(iv), key=lambda n: (n.file, _first_line(n), n.fn))
+    return Graph(iv=iv, stages={n.name: n for n in nodes})
 
 
 def _first_line(node) -> int:
@@ -204,22 +184,6 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
             f"    written at {site.location} and read by nothing. Delete the stage, or "
             f"pass terminal=True if it is consumed outside this pipeline.")
 
-    for name in g.produced:
-        writers = g.producers_of(name)
-        if len(writers) < 2:
-            continue
-        sites = [s for st in g.stages.values() for s in st.outputs if s.dataset == name]
-        parts = [s.part for s in sites]
-        if all(parts) and len(set(parts)) == len(parts):
-            continue
-        why = ("they do not say which partition each writes, so whichever runs last wins"
-               if not all(parts) else
-               "they declare the same partition, so whichever runs last wins")
-        errors.append(
-            f"TWO WRITERS  {name}\n"
-            f"    written by {writers} and {why}. Two stages may share a dataset only by "
-            f"writing DIFFERENT partitions of it, each declared with a literal part=.")
-
     cyc = find_cycle(g)
     if cyc:
         errors.append(f"CYCLE  {cyc}")
@@ -234,21 +198,6 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                 f"count: it is the copy this stage is about to overwrite, excluded from "
                 f"the comparison by design. If this should re-run, read something that "
                 f'moves — "config/today/".')
-
-    for node, st in g.stages.items():
-        # if_needed=False means the step runs no skip check, so there is nothing that could
-        # be fooled by a write it cannot see. `for_each` decides per shard instead.
-        if st.fn and st.guarded:
-            seen_by_scan = {s.dataset for s in st.outputs}
-            in_own_body = {s.dataset for s in st.outputs if s.owner == st.fn}
-            hidden = seen_by_scan - in_own_body
-            if hidden:
-                errors.append(
-                    f"WRITE OUTSIDE THE STEP  {node}\n"
-                    f"    writes {sorted(hidden)} from a helper, not from its own body. "
-                    f"The skip check reads the decorated function's source, so it cannot "
-                    f"see those and will skip the stage while they are missing. Move the "
-                    f"iv.writes(...) into the step body.")
 
     for node, st in g.stages.items():
         mine = {s.dataset for s in st.outputs}

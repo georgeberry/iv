@@ -6,7 +6,6 @@ question here is answerable from the directory listing — which is the point of
 from __future__ import annotations
 
 import hashlib
-import json
 
 import polars as pl
 import pytest

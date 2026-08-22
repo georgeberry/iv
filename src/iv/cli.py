@@ -176,17 +176,6 @@ def drift(trace: Path = typer.Option(None, "--trace")):
 
 
 @app.command()
-def export(out: Path = typer.Option(None, "--out", help="write here instead of stdout")):
-    import json
-    body = json.dumps(_graph_of().export(), indent=1, sort_keys=True)
-    if out:
-        out.write_text(body)
-        typer.echo(f"wrote {out}")
-    else:
-        typer.echo(body)
-
-
-@app.command()
 def viz(out: Path = typer.Option(Path("dag.png"), "--out")):
     from . import viz as _viz
     typer.echo(f"wrote {_viz.draw(_graph_of(), out)}")

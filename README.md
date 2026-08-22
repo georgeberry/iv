@@ -72,7 +72,10 @@ iv.own_last_copy("raw/odds_log/", why="...")       # the copy this stage overwri
 ```
 
 The partition key is never repeated — `same_part` and `before_part` take it from the
-stage's own `part=`.
+stage's own `part=`. Pass `key=` to `between` when the bounds are literal and the stage is
+not itself partitioned, and `load=False` to any of them to be handed the selected **paths**
+rather than their contents — which is what a stage wants when it passes them to something
+that opens them itself, or concatenates two datasets before reading.
 
 ### Walk-forward, declared
 
@@ -124,84 +127,6 @@ def page(out):
     out.write_text(render())
 ```
 
-## The `iv.reads` / `iv.writes` style
-
-The original style still works, and `iv graph` is the **union** of what it scans and what
-registers itself — so a pipeline migrates one stage at a time rather than all at once.
-`example.py` is written in the declared style; a scanned stage sits alongside a declared
-one in the same graph.
-
-Here a stage is a decorated function that does its own I/O, and `iv` reads the declarations
-off its source:
-
-```python
-@iv.step(why="what the app renders")
-def dump():
-    xpm = pl.read_parquet(iv.reads("processed/xpm/", why="the fit"))
-    with iv.writes("dump/site/", why="what the app renders", terminal=True) as out:
-        xpm.write_parquet(out)
-```
-
-Call `dump()` and it runs only if something it reads has moved. The catch is reach: the
-scan needs the source text, so a stage defined in a REPL or a notebook cannot be read this
-way, and a selector built from a variable cannot be read at all.
-
-### Partitions
-
-`for_each` builds one shard per key, and rebuilds only the keys that moved:
-
-```python
-def one(season, out):
-    box = pl.read_parquet(
-        iv.reads("raw/box/", why="raw box for this season",
-                 where={"season": [iv.PART]}))
-    box.with_columns((pl.col("pts") * 2).alias("z")).write_parquet(out)
-
-iv.for_each(SEASONS, one, dataset="processed/features/",
-            key="season", why="per-season box features")
-```
-
-`iv.PART` stands for the partition being built. Because `where=` is **data** rather
-than a lambda, the shard's key can be computed *before* its body runs — which is why
-nothing has to be written down.
-
-### Walk-forward bounds
-
-`where=` selects files, so a cohort physically cannot open a later season:
-
-```python
-past = iv.reads("processed/features/",
-                why="every season before this cohort",
-                where={"season": {"lt": iv.PART}})
-```
-
-A season backfilled *below* the bound is picked up. One added above it is not.
-
-### Metadata is a file
-
-Not a version string, not a label — a shard, declared as an upstream by whoever
-answers to it:
-
-```python
-iv.constants("config/hyperparams/", why="the knobs the fit depends on",
-             half_life=4.0, epochs=300, seed=0)
-```
-
-Change `half_life` and exactly the stages that read it re-run. `iv graph` draws the
-edge.
-
-### Read-modify-write
-
-```python
-have = iv.reads("raw/odds_log/", why="yesterday's copy",
-                update_file_on_disk=True, optional=True)
-```
-
-`update_file_on_disk=True` means: this is the copy I am about to overwrite. It is
-recorded for lineage and excluded from the staleness comparison — otherwise the stage
-would be permanently stale against its own last output, one step behind itself,
-forever. It may only name a dataset the same stage writes.
-
 ## It refuses to guess
 
 Anything `iv` cannot account for stops the run instead of quietly producing a wrong
@@ -211,10 +136,13 @@ number. All of these raise:
   from the recorded inputs, so its source could change forever and nothing would
   rebuild. An undeclared write makes a shard's fingerprint-name a lie. Neither is
   detectable after the fact.
-- **A lambda selector**, which could not be replayed.
-- **A selector built from a closure variable** the static scan cannot read without
-  running the stage.
-- **A computed dataset name** inside a step — unreadable without running the code.
+- **A partition-relative read on a stage with no `part=`** — `iv.PART` only means
+  something where there is a partition being built.
+- **A second producer for one dataset**, unless each names a different literal `part=`.
+  Otherwise they race and whichever runs last wins.
+- **Building one stage from inside another** — that puts it outside the graph, so nothing
+  orders the two and `iv status` cannot see the edge.
+- **A parameter `iv` cannot supply** — every one is a read, the partition value, or `out`.
 - **A read that selects nothing** (pass `optional=True` if that is legitimate).
 - **A stray file** in a dataset directory.
 - **A declared write that wrote nothing** (pass `allow_missing=True` if legitimate).
@@ -241,7 +169,6 @@ instance = "mypkg.pipeline:iv"
 | `iv verify` | re-fingerprint every shard, confirm it matches its name |
 | `iv gc` | drop superseded shards |
 | `iv viz --out dag.png` | draw the DAG |
-| `iv export` | the graph as JSON |
 
 Set `IV_TRACE=<path>` on a run to record it for `iv drift`.
 

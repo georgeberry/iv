@@ -40,11 +40,13 @@ def seasons(iv, keys):
     for s in keys:
         seed(iv, "raw/box/", part={"season": s})
 
-    def one(season, out):
-        pl.read_parquet(iv.reads("raw/box/", why="this season",
-                                 where={"season": [iv.PART]})).write_parquet(out)
-    iv.for_each(keys, one, dataset="processed/features/", key="season",
-                why="per-season features", quiet=True)
+    iv._assets.clear()
+
+    @iv.data("processed/features/", why="per-season features", part="season")
+    def features(box=iv.same_part("raw/box/", why="this season")):
+        return box
+
+    features.for_each(keys)
 
 
 # ── it must not change the answer ─────────────────────────────────────────────

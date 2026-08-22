@@ -27,25 +27,19 @@ iv = Pipeline(root=HERE / "data", source_dirs=["stages"], project_root=HERE,
 '''
 
 MID = '''
-import polars as pl
 from p import iv
 
-@iv.step(why="the middle")
-def build():
-    df = pl.read_parquet(iv.reads("raw/feed/", why="the feed"))
-    with iv.writes("processed/mid/", why="the middle") as out:
-        df.write_parquet(out)
+@iv.data("processed/mid/", why="the middle")
+def build(feed=iv.all_of("raw/feed/", why="the feed")):
+    return feed
 '''
 
 END = '''
-import polars as pl
 from p import iv
 
-@iv.step(why="the app reads it")
-def build():
-    df = pl.read_parquet(iv.reads("processed/mid/", why="the middle"))
-    with iv.writes("dump/site/", why="the app reads it", terminal=True) as out:
-        df.head(1).write_parquet(out)
+@iv.data("dump/site/", why="the app reads it", terminal=True)
+def build(mid=iv.all_of("processed/mid/", why="the middle")):
+    return mid.head(1)
 '''
 
 
@@ -62,6 +56,10 @@ def project(tmp_path, monkeypatch):
     for m in ("p", "mid", "end"):
         sys.modules.pop(m, None)
     import p
+    # A declared stage registers itself on IMPORT. The project scan used to find stages by
+    # reading files; the registry needs them imported, which is what `iv.include(...)` is
+    # for in a real project.
+    __import__("mid"); __import__("end")   # importing IS the registration
     yield tmp_path, p.iv
     for m in ("p", "mid", "end"):
         sys.modules.pop(m, None)
@@ -90,7 +88,12 @@ def cli_says(iv):
 
 def run_says(iv):
     """What actually happens when you run it: dataset -> did the stage run?"""
-    return {ds: fn() is True for ds, fn in steps().items()}
+    out = {}
+    for ds, asset in steps().items():
+        before = asset.is_current()
+        asset()
+        out[ds] = not before
+    return out
 
 
 def test_they_agree_when_everything_is_current(project):
@@ -119,12 +122,14 @@ def test_the_cli_and_the_run_agree_at_every_step_of_a_cascade(project):
     # The middle is stale; the dump is not, because the middle has not been rebuilt yet.
     assert cli_says(iv) == {"processed/mid/": True, "dump/site/": False}
 
-    assert steps()["processed/mid/"]() is True, "the CLI said this one was stale"
+    assert not steps()["processed/mid/"].is_current(), "the CLI said this one was stale"
+    steps()["processed/mid/"]()
 
     # Rebuilding the middle moved its bytes, and only now is the dump stale.
     assert cli_says(iv) == {"processed/mid/": False, "dump/site/": True}
 
-    assert steps()["dump/site/"]() is True
+    assert not steps()["dump/site/"].is_current()
+    steps()["dump/site/"]()
     assert cli_says(iv) == {"processed/mid/": False, "dump/site/": False}
 
 
@@ -177,17 +182,12 @@ def test_the_cli_answer_does_not_change_under_a_snapshot(project):
 
 
 BRANCHY = '''
-import polars as pl
 from p import iv
 
-@iv.step(why="reads one dataset from two call sites")
-def build():
-    if pl.__version__:
-        df = pl.read_parquet(iv.reads("raw/feed/", why="the upstream, one way"))
-    else:
-        df = pl.read_parquet(iv.reads("raw/feed/", why="the upstream, the other way"))
-    with iv.writes("processed/mid/", why="the middle") as out:
-        df.write_parquet(out)
+@iv.data("processed/mid/", why="the middle")
+def build(one=iv.all_of("raw/feed/", why="the upstream, one way"),
+          other=iv.all_of("raw/feed/", load=False, why="the upstream, the other way")):
+    return one
 '''
 
 
@@ -211,8 +211,8 @@ def test_one_dataset_read_at_two_call_sites_gets_one_answer(tmp_path, monkeypatc
     import branchy
 
     seed(p.iv)
-    assert branchy.build() is True
-    assert branchy.build() is False, "the run considers it current"
+    branchy.build()
+    assert branchy.build.is_current(), "the run considers it current"
 
     reasons, _ = _staleness(p.iv, _graph.build(p.iv))
     assert reasons["processed/mid/"] is None, (

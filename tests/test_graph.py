@@ -1,11 +1,17 @@
-"""The scan and the checks: what the code DECLARES, read without running it."""
+"""The graph and the checks: what the code DECLARES, read without running it.
+
+A declared stage registers itself when its module imports, so these build real pipelines
+rather than writing source files and parsing them back. The preflight tests at the bottom
+still write files, because pyflakes reads files.
+"""
 from __future__ import annotations
 
+import polars as pl
 import pytest
 
+from iv import Pipeline
 from iv import graph as _graph
 from iv import static as _static
-from iv.core import Pipeline
 from iv.errors import DeclError
 
 from tests.conftest import write_stage
@@ -18,332 +24,250 @@ def project(tmp_path):
     return tmp_path
 
 
-def iv_for(project, **kw):
-    return Pipeline(root=project / "data", source_dirs=["stages"],
-                    project_root=project, **kw)
+@pytest.fixture
+def iv(tmp_path, monkeypatch):
+    for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
+        monkeypatch.delenv(var, raising=False)
+    return Pipeline(root=tmp_path / "data", stage_dir=tmp_path / "stage",
+                    project_root=tmp_path)
 
 
-def g_for(project, **kw):
-    return _graph.build(iv_for(project, **kw))
+def frame():
+    return pl.DataFrame({"a": [1, 2]})
 
 
-def stage(project, name, body):
-    write_stage(project, f"stages/{name}.py", "from p import iv\n\n" + body)
-
-
-MID = '''
-@iv.step(why="the middle")
-def build():
-    iv.reads("raw/feed/", why="the feed")
-    with iv.writes("processed/mid/", why="the middle"):
-        pass
-'''
-
-END = '''
-@iv.step(why="the app reads it")
-def build():
-    iv.reads("processed/mid/", why="the middle")
-    with iv.writes("dump/site/", why="the app reads it", terminal=True):
-        pass
-'''
-
-
-# ── the scan ──────────────────────────────────────────────────────────────────
-
-def test_a_step_marks_a_stage_and_its_writes_are_the_outputs(project):
-    stage(project, "mid", MID)
-    st = _static.scan(iv_for(project))["stages/mid.py"]
-    assert st.steps == ("build",)
-    assert [s.dataset for s in st.outputs] == ["processed/mid/"]
-    assert [s.dataset for s in st.inputs] == ["raw/feed/"]
-    assert st.outputs[0].why == "the middle"
-
-
-def test_a_step_needs_a_why(project):
-    stage(project, "bad", "@iv.step()\ndef build():\n    pass\n")
-    with pytest.raises(DeclError, match="why="):
-        _static.scan(iv_for(project))
-
-
-def test_a_computed_dataset_name_is_refused(project):
-    stage(project, "bad", 'DS = "processed/x/"\niv.reads(DS, why="unreadable")\n')
-    with pytest.raises(DeclError, match="string LITERAL"):
-        _static.scan(iv_for(project))
-
-
-def test_a_call_without_why_is_not_ours(project):
-    """The `why=` is what makes a match deliberate; a bare `.reads(...)` is someone else's."""
-    stage(project, "other", 'conn.reads("not/ours/")\niv.reads("raw/feed/", why="ours")\n')
-    st = _static.scan(iv_for(project))["stages/other.py"]
-    assert [s.dataset for s in st.inputs] == ["raw/feed/"]
-
-
-def test_a_trailing_slash_is_not_a_second_spelling(project):
-    stage(project, "a", '@iv.step(why="no slash")\ndef build():\n'
-                        '    iv.reads("raw/feed/", why="the feed")\n'
-                        '    with iv.writes("processed/mid", why="no slash"):\n        pass\n')
-    stage(project, "b", MID.replace('iv.reads("raw/feed/", why="the feed")',
-                                    'iv.reads("processed/mid/", why="with a slash")')
-                           .replace('"processed/mid/", why="the middle"',
-                                    '"processed/end/", why="downstream", terminal=True'))
-    g = g_for(project)
-    assert g.producers_of("processed/mid/") == ["stages/a.py::build"]
-    assert g.consumers_of("processed/mid/") == ["stages/b.py::build"]
-
-
-def test_the_scan_finds_a_write_inside_a_helper(project):
-    stage(project, "mid", '''
-def _extra():
-    with iv.writes("processed/extra/", why="from a helper", terminal=True):
-        pass
-
-@iv.step(why="the stage")
-def build():
-    iv.reads("raw/feed/", why="the feed")
-    with iv.writes("processed/mid/", why="its own", terminal=True):
-        pass
-    _extra()
-''')
-    st = _static.scan(iv_for(project))["stages/mid.py"]
-    assert {s.dataset for s in st.outputs_of("build")} == \
-        {"processed/mid/", "processed/extra/"}
+def check(iv):
+    return _graph.check(_graph.build(iv))
 
 
 # ── the checks ────────────────────────────────────────────────────────────────
 
-def test_a_clean_pipeline_passes(project):
-    stage(project, "mid", MID)
-    stage(project, "end", END)
-    assert _graph.check(g_for(project)) == ([], [])
+def test_a_clean_pipeline_passes(iv):
+    @iv.data("processed/mid/", why="the middle")
+    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
+        return feed
+
+    @iv.data("dump/site/", why="the app reads it", terminal=True)
+    def site(m=iv.all_of("processed/mid/", why="the middle")):
+        return m
+
+    assert check(iv) == ([], [])
 
 
-def test_a_read_with_no_producer_outside_the_roots_is_an_error(project):
-    stage(project, "mid", '''
-@iv.step(why="the middle")
-def build():
-    iv.reads("processed/nobody_writes/", why="nothing produces this")
-    with iv.writes("processed/mid/", why="the middle", terminal=True):
-        pass
-''')
-    errors, _ = _graph.check(g_for(project))
+def test_a_read_with_no_producer_outside_the_roots_is_an_error(iv):
+    @iv.data("processed/mid/", why="the middle", terminal=True)
+    def mid(x=iv.all_of("processed/nobody_writes/", why="nothing produces this")):
+        return x
+
+    errors, _ = check(iv)
     assert any("READ WITH NO PRODUCER" in e for e in errors)
 
 
-def test_a_root_prefix_is_how_out_of_band_data_is_declared(project):
-    stage(project, "mid", MID.replace('why="the middle"):', 'why="the middle", terminal=True):'))
-    assert _graph.check(g_for(project))[0] == [], "raw/ is a root"
+def test_an_optional_read_with_no_producer_is_only_a_warning(iv):
+    @iv.data("processed/mid/", why="the middle", terminal=True)
+    def mid(x=iv.all_of("processed/maybe/", optional=True, why="may not be there")):
+        return x
+
+    errors, warns = check(iv)
+    assert errors == [] and any("READ WITH NO PRODUCER" in w for w in warns)
 
 
-def test_a_write_nobody_reads_needs_terminal(project):
-    stage(project, "mid", MID)
-    errors, _ = _graph.check(g_for(project))
+def test_a_root_prefix_is_how_out_of_band_data_is_declared(iv):
+    """`raw/` is declared a root, so nothing has to produce it."""
+    @iv.data("processed/mid/", why="the middle", terminal=True)
+    def mid(feed=iv.all_of("raw/feed/", why="arrives out of band")):
+        return feed
+
+    assert check(iv)[0] == []
+
+
+def test_a_write_nobody_reads_needs_terminal(iv):
+    @iv.data("processed/mid/", why="nothing downstream reads this")
+    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
+        return feed
+
+    errors, _ = check(iv)
     assert any("WRITE WITH NO CONSUMER" in e for e in errors)
 
 
-def test_two_writers_of_one_dataset_is_an_error(project):
-    for n in ("a", "b"):
-        stage(project, n, MID.replace("def build()", f"def build_{n}()")
-                             .replace('why="the middle"):', 'why="the middle", terminal=True):'))
-    errors, _ = _graph.check(g_for(project))
-    assert any("TWO WRITERS" in e for e in errors)
+def test_a_cycle_is_caught(iv):
+    @iv.data("processed/a/", why="a")
+    def a(b=iv.all_of("processed/b/", why="b")):
+        return b
 
+    @iv.data("processed/b/", why="b")
+    def b(a=iv.all_of("processed/a/", why="a")):
+        return a
 
-def test_a_cycle_is_caught(project):
-    stage(project, "a", '@iv.step(why="a")\ndef build():\n'
-                        '    iv.reads("processed/b/", why="b")\n'
-                        '    with iv.writes("processed/a/", why="a"):\n        pass\n')
-    stage(project, "b", '@iv.step(why="b")\ndef build():\n'
-                        '    iv.reads("processed/a/", why="a")\n'
-                        '    with iv.writes("processed/b/", why="b"):\n        pass\n')
-    errors, _ = _graph.check(g_for(project))
+    errors, _ = check(iv)
     assert any("CYCLE" in e for e in errors)
 
 
-def test_a_write_from_a_helper_is_reported(project):
-    """The runtime skip check reads the STEP's own source, so a helper's write is invisible
-    to it. The project scan can see it, so this is where it gets said — otherwise the hole
-    that made the skip check miss an output would simply come back."""
-    stage(project, "mid", '''
-def _extra():
-    with iv.writes("processed/extra/", why="from a helper", terminal=True):
-        pass
+def test_a_stage_with_no_inputs_is_warned_about(iv):
+    """`once=True` says it runs a single time. Right for a fetch-once archive, and worth
+    saying out loud, because nothing will ever bring it back."""
+    @iv.data("raw/archive/", why="fetch-once history", once=True,
+             external={"sports-reference": "a page that will not change"})
+    def archive():
+        return frame()
 
-@iv.step(why="the stage")
-def build():
-    iv.reads("raw/feed/", why="the feed")
-    with iv.writes("processed/mid/", why="its own", terminal=True):
-        pass
-    _extra()
-''')
-    errors, _ = _graph.check(g_for(project))
-    assert any("WRITE OUTSIDE THE STEP" in e for e in errors)
+    @iv.data("dump/site/", why="the app reads it", terminal=True)
+    def site(a=iv.all_of("raw/archive/", why="the archive")):
+        return a
 
-
-def test_a_stage_with_no_inputs_is_warned_about(project):
-    stage(project, "fetch", '''
-@iv.step(why="fetch-once history")
-def build():
-    iv.external("sports-reference", why="a page that will not change")
-    with iv.writes("raw/archive/", why="fetch-once history", terminal=True):
-        pass
-''')
-    errors, warns = _graph.check(g_for(project))
+    errors, warns = check(iv)
     assert errors == [] and any("RUNS ONCE" in w for w in warns)
 
 
-def test_constants_are_a_source_and_not_warned_about(project):
-    stage(project, "config", 'iv.constants("config/model/", why="the model", v="m1")\n')
-    stage(project, "fit", '''
-@iv.step(why="the fit")
-def build():
-    iv.reads("config/model/", why="a model change rebuilds this")
-    with iv.writes("processed/xpm/", why="the fit", terminal=True):
-        pass
-''')
-    assert _graph.check(g_for(project)) == ([], [])
+def test_a_root_that_re_runs_is_not_warned_about(iv):
+    """A root with no `once=` runs every time — that is how anything outside the tree gets
+    in — so the warning would be false."""
+    @iv.data("config/model/", why="the model")
+    def model():
+        return frame()
+
+    @iv.data("processed/xpm/", why="the fit", terminal=True)
+    def xpm(m=iv.all_of("config/model/", why="a model change rebuilds this")):
+        return m
+
+    assert check(iv) == ([], [])
 
 
-def test_a_consumer_defined_before_its_producer_in_one_file_is_an_error(project):
+def test_an_update_read_does_not_count_as_a_trigger(iv):
+    """An accumulator whose only read is its own last copy runs once and never again.
+
+    `own_last_copy` is excluded from the comparison by design, so it cannot be the thing
+    that makes a stage stale — and a stage with nothing else to read is the silent-failure
+    case this check exists for.
+    """
+    @iv.data("raw/log/", why="a running log", terminal=True, once=True)
+    def log(have=iv.own_last_copy("raw/log/", why="yesterday's copy")):
+        return have if have is not None else frame()
+
+    errors, warns = check(iv)
+    assert errors == []
+    assert any("RUNS ONCE" in w and "update_file_on_disk=" in w for w in warns)
+
+
+def test_updating_a_dataset_another_stage_writes_is_an_error(iv):
+    """The static half of the rule: caught by `iv check`, without running anything."""
+    @iv.data("processed/draft/", why="the draft table", terminal=True)
+    def draft(prev=iv.own_last_copy("raw/schedule/", why="the previous run's copy")):
+        return prev
+
+    @iv.data("raw/schedule/", why="the schedule")
+    def fetch(d=iv.all_of("processed/draft/", why="which classes to fetch")):
+        return d
+
+    errors, _ = check(iv)
+    assert any("UPDATES SOMEONE ELSE" in e and "raw/schedule/" in e for e in errors)
+
+
+def test_a_consumer_defined_before_its_producer_in_one_file_is_an_error(iv):
     """Within a file, definition order IS run order, so this one is decidable."""
-    stage(project, "both", END.replace("def build", "def publish") +
-                           MID.replace("def build", "def middle"))
-    errors, _ = _graph.check(g_for(project))
+    @iv.data("dump/site/", why="the app reads it", terminal=True)
+    def site(m=iv.all_of("processed/mid/", why="the middle")):
+        return m
+
+    @iv.data("processed/mid/", why="the middle")
+    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
+        return feed
+
+    errors, _ = check(iv)
     assert any("ORDER" in e for e in errors)
 
 
-def test_two_files_have_no_source_order_so_there_is_nothing_to_check(project):
-    """File order is alphabetical, which means nothing. `end` sorts before `mid`."""
-    stage(project, "mid", MID)
-    stage(project, "end", END)
-    errors, _ = _graph.check(g_for(project))
-    assert not any("ORDER" in e for e in errors)
-    assert g_for(project).order() == ["stages/mid.py::build", "stages/end.py::build"]
+def test_definition_order_is_the_run_order(iv):
+    @iv.data("processed/mid/", why="the middle")
+    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
+        return feed
+
+    @iv.data("dump/site/", why="the app reads it", terminal=True)
+    def site(m=iv.all_of("processed/mid/", why="the middle")):
+        return m
+
+    order = _graph.build(iv).order()
+    assert [n.split("::")[-1] for n in order] == ["mid", "site"]
+    assert check(iv) == ([], [])
 
 
+# ── two stages, one dataset ───────────────────────────────────────────────────
+
+def test_a_second_producer_is_refused_at_declaration(iv):
+    """`iv check` used to catch this after the fact. The registry catches it as the second
+    stage is declared, which is earlier and says which stage it collides with."""
+    @iv.data("processed/mid/", why="the middle")
+    def mid():
+        return frame()
+
+    with pytest.raises(DeclError, match="already written by 'mid'"):
+        @iv.data("processed/mid/", why="the middle again")
+        def mid2():
+            return frame()
 
 
+def test_different_partitions_of_one_dataset_are_allowed(iv):
+    @iv.data("processed/preds/", part={"completed": "true"}, why="played")
+    def played(feed=iv.all_of("raw/feed/", why="the feed")):
+        return feed
 
-def test_an_undeclared_read_is_an_error_and_an_unseen_one_is_a_warning(project):
-    stage(project, "mid", MID)
-    events = [{"kind": "io", "op": "read", "node": "stages/mid.py::build", "rel": "raw/secret/"},
-              {"kind": "io", "op": "write", "node": "stages/mid.py::build", "rel": "processed/mid/"}]
-    errors, warns = _graph.drift(g_for(project), events)
+    @iv.data("processed/preds/", part={"completed": "false"}, why="not yet played")
+    def upcoming(feed=iv.all_of("raw/feed/", why="the feed")):
+        return feed
+
+    @iv.data("dump/site/", why="the app reads it", terminal=True)
+    def site(p=iv.all_of("processed/preds/", why="both halves")):
+        return p
+
+    assert check(iv) == ([], [])
+
+
+# ── drift: the code against a recorded run ────────────────────────────────────
+
+def test_an_undeclared_read_is_an_error_and_an_unseen_one_is_a_warning(iv):
+    @iv.data("processed/mid/", why="the middle", terminal=True)
+    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
+        return feed
+
+    node = next(n for n in _graph.build(iv).stages if n.endswith("::mid"))
+    events = [{"kind": "io", "op": "read", "node": node, "rel": "raw/secret/"},
+              {"kind": "io", "op": "write", "node": node, "rel": "processed/mid/"}]
+    errors, warns = _graph.drift(_graph.build(iv), events)
     assert any("UNDECLARED READ" in e and "raw/secret/" in e for e in errors)
     assert any("raw/feed/" in w for w in warns)
 
 
-def test_an_update_read_does_not_count_as_a_trigger(project):
-    """An accumulator whose only read is its own last copy runs once and never again.
-
-    `update_file_on_disk=` is excluded from the comparison by design, so it cannot be the
-    thing that
-    makes a stage stale — and a stage with nothing else to read is the silent-failure case
-    this check exists for.
-    """
-    stage(project, "log", '''
-@iv.step(why="appends to its own last copy")
-def build():
-    iv.reads("raw/log/", why="yesterday's copy", update_file_on_disk=True, optional=True)
-    with iv.writes("raw/log/", why="a running log", terminal=True):
-        pass
-''')
-    errors, warns = _graph.check(g_for(project))
-    assert errors == [] and any("RUNS ONCE" in w and "update_file_on_disk=" in w
-                                for w in warns)
-
-
-def test_updating_a_dataset_another_stage_writes_is_an_error(project):
-    """The static half of the same rule: caught by `iv check`, without running anything."""
-    stage(project, "draft", '''
-@iv.step(why="reads a dataset a later stage writes")
-def build():
-    iv.reads("raw/schedule/", why="the previous run's copy", update_file_on_disk=True)
-    with iv.writes("processed/draft/", why="the draft table", terminal=True):
-        pass
-''')
-    stage(project, "fetch", '''
-@iv.step(why="fetches the schedule, later in the same run")
-def build():
-    iv.reads("processed/draft/", why="which classes to fetch")
-    with iv.writes("raw/schedule/", why="the schedule"):
-        pass
-''')
-    errors, _ = _graph.check(g_for(project))
-    assert any("UPDATES SOMEONE ELSE" in e and "raw/schedule/" in e for e in errors)
-
+# ── preflight reads files, so these write them ────────────────────────────────
 
 def test_preflight_catches_a_name_a_refactor_left_behind(project):
-    """A build body is not executed until the pipeline runs it, so a stale name imports
-    perfectly and raises an hour in."""
-    stage(project, "mid", MID + "\n\ndef helper():\n    return gone_in_a_refactor + 1\n")
-    assert any("undefined name" in n for n in _static.undefined_names(iv_for(project)))
+    write_stage(project, "stages/one.py", "x = undefined_thing\n")
+    iv = Pipeline(root=project / "data", source_dirs=["stages"], project_root=project)
+    names = _static.undefined_names(iv)
+    if names is None:
+        pytest.skip("pyflakes is not installed")
+    assert any("undefined_thing" in n for n in names)
 
 
 def test_preflight_catches_an_import_of_a_module_that_is_not_there(project):
-    stage(project, "mid", "from stages.vanished import thing\n" + MID)
-    assert any("vanished" in m for m in _static.missing_imports(iv_for(project)))
+    write_stage(project, "stages/one.py", "import stages.gone_away\n")
+    iv = Pipeline(root=project / "data", source_dirs=["stages"], project_root=project)
+    bad = _static.missing_imports(iv)
+    assert any("gone_away" in b for b in bad), bad
 
 
-def test_two_stages_may_share_a_dataset_by_writing_different_partitions(project):
-    """`predict_games` writes the played rows and `predict_upcoming_games` the unplayed
-    ones. That is one dataset with two shards, not two writers of one thing."""
-    stage(project, "played", '''
-@iv.step(why="margins for games that have been played")
-def build():
-    iv.reads("raw/box/", why="the box scores")
-    with iv.writes("processed/predictions/", why="played", part={"completed": "true"},
-                   terminal=True):
-        pass
-''')
-    stage(project, "upcoming", '''
-@iv.step(why="margins for games not yet played")
-def build():
-    iv.reads("raw/box/", why="the box scores")
-    with iv.writes("processed/predictions/", why="upcoming", part={"completed": "false"},
-                   terminal=True):
-        pass
-''')
-    assert _graph.check(g_for(project))[0] == []
+def test_preflight_ignores_a_third_party_import(project):
+    """An absent package is pip's problem and fails the moment anything runs. A local
+    module a refactor renamed is a name that looks fine until the stage is reached."""
+    write_stage(project, "stages/one.py", "import polars\nimport not_a_real_package\n")
+    iv = Pipeline(root=project / "data", source_dirs=["stages"], project_root=project)
+    assert _static.missing_imports(iv) == []
 
 
-def test_two_stages_writing_the_same_partition_is_still_an_error(project):
-    for n in ("a", "b"):
-        stage(project, n, f'''
-@iv.step(why="both write the same shard")
-def build_{n}():
-    iv.reads("raw/box/", why="the box scores")
-    with iv.writes("processed/predictions/", why="same", part={{"completed": "true"}},
-                   terminal=True):
-        pass
-''')
-    errors, _ = _graph.check(g_for(project))
-    assert any("TWO WRITERS" in e and "same partition" in e for e in errors)
-
-
-def test_a_second_pipeline_in_the_same_repo_is_scoped_out_by_source_dirs(project):
-    """Two leagues, one repo. Both write processed/xpm/, and only one of them ever runs —
-    so reporting two writers would be false. `source_dirs` is what says which is which."""
-    body = """
-@iv.step(why="the fit")
-def build():
-    iv.reads("raw/box/", why="the box scores")
-    with iv.writes("processed/xpm/", why="ratings", terminal=True):
-        pass
-"""
-    for lg in ("w", "m"):
-        (project / lg).mkdir()
-        write_stage(project, f"{lg}/fit.py", "from p import iv\n" + body)
-    g = _graph.build(Pipeline(root=project / "data", source_dirs=["w"],
-                              project_root=project))
-    assert g.producers_of("processed/xpm/") == ["w/fit.py::build"]
-    assert _graph.check(g)[0] == []
-
-
-def test_preflight_works_when_source_dirs_names_a_file(project, tmp_path):
+def test_preflight_works_when_source_dirs_names_a_file(project):
     """`source_dirs=["pipeline.py"]` is the shape the docstring recommends, and it used to
-    raise TypeError: the file branch tried to file its result in a dict, copied from `scan`
-    where there is one — but here the target is the report pyflakes writes into."""
-    write_stage(project, "one.py", "from p import iv\n\n" + MID + "\nx = undefined_thing\n")
+    raise TypeError: the file branch tried to file its result in a dict, copied from the
+    project scan where there was one — but here the target is pyflakes' report."""
+    write_stage(project, "one.py", "x = undefined_thing\n")
     iv = Pipeline(root=project / "data", source_dirs=["one.py"], project_root=project)
     names = _static.undefined_names(iv)
     if names is None:

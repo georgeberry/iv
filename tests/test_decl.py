@@ -1,63 +1,52 @@
-"""A declared selector must be the SAME VALUE the source scan reads off the old form.
+"""A declared selector is a VALUE, and these are the values.
 
-That is the whole reason this is tractable: `key_of` and `why_stale` already consume these
-tuples, so nothing about how staleness is decided changes — only where the tuples come
-from. A shape that differs by so much as a sort order is a stage that rebuilds forever, or
-one that never does.
+`key_of` hashes them and `_resolve_sel` turns them back into a `where=`, so a shape that
+differs by so much as a sort order is a stage that rebuilds forever, or one that never
+does. Nothing else in the package pins them down, so they are written out in full here
+rather than compared against another expression of the same thing.
 """
 from __future__ import annotations
-
-import ast
-import textwrap
 
 import pytest
 
 from iv import decl
 from iv.errors import DeclError
-from iv.static import PART, _lit_sel, _lit_where
+from iv.decl import PART
 
 
-def off_the_source(src: str):
-    """What the AST reads out of the equivalent `iv.reads(...)` call."""
-    call = ast.parse(textwrap.dedent(src)).body[0].value
-    kw = {k.arg: k.value for k in call.keywords if k.arg}
-    return _lit_sel(kw.get("where")), _lit_where(kw.get("where"))
-
-
-EQUIVALENT = [
-    ("all_of",
-     decl.all_of("d/", why="x"),
-     'iv.reads("d/", why="x")'),
-    ("same_part",
-     decl.same_part("d/", why="x"),
-     'iv.reads("d/", why="x", where={"season": [iv.PART]})'),
-    ("before_part",
-     decl.before_part("d/", why="x"),
-     'iv.reads("d/", why="x", where={"season": {"lt": iv.PART}})'),
-    ("before_part inclusive",
-     decl.before_part("d/", why="x", inclusive=True),
-     'iv.reads("d/", why="x", where={"season": {"le": iv.PART}})'),
-    ("after_part",
-     decl.after_part("d/", why="x"),
-     'iv.reads("d/", why="x", where={"season": {"gt": iv.PART}})'),
-    ("between",
-     decl.between("d/", why="x", ge="2020", lt=PART),
-     'iv.reads("d/", why="x", where={"season": {"ge": "2020", "lt": iv.PART}})'),
-    ("parts",
-     decl.parts("d/", why="x", season=["2025", "2024"]),
-     'iv.reads("d/", why="x", where={"season": ["2024", "2025"]})'),
+SHAPES = [
+    ("all_of",       decl.all_of("d/", why="x"),                              (), ()),
+    ("same_part",    decl.same_part("d/", why="x"),
+     (("season", ("in", (PART,))),), ()),
+    ("before_part",  decl.before_part("d/", why="x"),
+     (("season", ("range", (("lt", PART),))),), ()),
+    ("before_part inclusive", decl.before_part("d/", why="x", inclusive=True),
+     (("season", ("range", (("le", PART),))),), ()),
+    ("after_part",   decl.after_part("d/", why="x"),
+     (("season", ("range", (("gt", PART),))),), ()),
+    ("between",      decl.between("d/", why="x", ge="2020", lt=PART),
+     (("season", ("range", (("ge", "2020"), ("lt", PART)))),), ()),
+    ("parts",        decl.parts("d/", why="x", season=["2025", "2024"]),
+     (("season", ("in", ("2024", "2025"))),), (("season", ("2024", "2025")),)),
 ]
 
 
-@pytest.mark.parametrize("label,read,src", EQUIVALENT, ids=[e[0] for e in EQUIVALENT])
-def test_a_declared_selector_is_the_one_the_scan_reads(label, read, src):
-    sel, where = off_the_source(src)
+@pytest.mark.parametrize("label,read,sel,where", SHAPES, ids=[s[0] for s in SHAPES])
+def test_a_declared_selector_is_the_value_key_of_hashes(label, read, sel, where):
     bound = read.bound_to("season")
-    assert bound.sel() == sel, f"{label}: selector differs from the scanned form"
-    assert bound.where() == where, f"{label}: DAG edge test differs from the scanned form"
+    assert bound.sel() == sel
+    assert bound.where() == where, "the DAG edge test reads only outright values"
 
 
-def test_a_triple_is_what_reads_in_returns():
+def test_a_bound_relative_to_the_partition_is_not_an_outright_value():
+    """`where()` rules an edge OUT, so only a value stated on both sides counts. A bound
+    that is not known until the shard is chosen cannot, and a missing edge is a wrong DAG.
+    """
+    assert decl.same_part("d/", why="x").bound_to("season").where() == ()
+    assert decl.before_part("d/", why="x").bound_to("season").where() == ()
+
+
+def test_a_triple_is_what_key_of_consumes():
     r = decl.before_part("processed/features/", why="prior seasons").bound_to("season")
     assert r.triple() == ("processed/features/",
                           (("season", ("range", (("lt", PART),))),), False)

@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-import ast
-import datetime as _dt
-import hashlib
-import inspect
 import os
-import textwrap
 import threading
 import time
 from contextlib import contextmanager
@@ -14,37 +9,12 @@ from typing import Callable, Sequence
 
 from . import assets as _assets
 from . import decl as _decl
+from .decl import PART, _canon, _why
 from . import record as _record
 from . import shards as _sh
-from .static import _lit_sel
 from .errors import DeclError, StateError
 
-#: Stands for the partition being built, inside a `where=`. It is what makes a
-#: partition-relative selector readable without running the closure that would
-#: otherwise supply it — and that is what lets a shard's key be computed before
-#: its body runs, so nothing has to be written down.
-PART = "\x00PART"
 from .paths import mkpath
-
-
-def _canon(dataset: str) -> str:
-    if not isinstance(dataset, str) or not dataset.strip():
-        raise DeclError(f"a dataset is a relative directory path, got {dataset!r}")
-    d = dataset.strip().strip("/")
-    if not d or d.startswith(".") or ":" in d:
-        raise DeclError(
-            f"{dataset!r} is not a relative dataset path. Datasets are named relative to "
-            f"the root — 'processed/box_features/' — never absolutely and never as a URI, "
-            f"which is what lets an id survive the data moving.")
-    return d + "/"
-
-
-def _why(why: object, dataset: str) -> str:
-    if not isinstance(why, str) or not why.strip():
-        raise DeclError(
-            f"{dataset} needs why= — one line on what it is for. It is required because "
-            f"there is nowhere else for it to live, which is what stops it going stale.")
-    return why
 
 
 _ACTIVE: list = []
@@ -149,15 +119,6 @@ class Pipeline:
         self._reads, self._updating, self._plain, self._externals = {}, set(), set(), []
 
 
-    def constants(self, dataset: str, *, why: str, **values):
-        import polars as pl
-        if not values:
-            raise DeclError(f"{dataset} needs at least one value — that is what it is for.")
-        self._fresh_scope()
-        with self.writes(dataset, why=why) as out:
-            pl.DataFrame({k: [v] for k, v in values.items()}).write_parquet(out)
-
-
     def reads(self, dataset: str, *, why: str, where: dict | None = None,
               optional: bool = False, update_file_on_disk: bool = False) -> list:
         name = _canon(dataset)
@@ -224,12 +185,6 @@ class Pipeline:
             f"comparison — so on another stage's dataset it hides a real dependency and "
             f"this one never rebuilds when that input moves. Run its producer first and "
             f"read it normally.")
-
-    def external(self, name: str, *, why: str) -> None:
-        _why(why, name)
-        if not self._depth:
-            self._externals.append(name)
-            self.record("io", op="external", rel=f"external:{name}", why=why)
 
     def _enforce_writes(self) -> None:
         owners = [Path]
@@ -420,7 +375,7 @@ class Pipeline:
         out_dir = self.resolve_out(name)
         with self.bookkeeping():
             key = self.key_of(name, part, self._inputs)
-            final = _sh.commit(staged, out_dir, part=part, key=key)
+            _sh.commit(staged, out_dir, part=part, key=key)
         self.record("io", op="write", rel=name, why=why, part=_sh.encode_part(part),
                     key=key, seconds=round(time.time() - started, 2))
         if not self._in_step:
@@ -503,6 +458,8 @@ class Pipeline:
             def cohorts(past=iv.before_part("processed/features/", why="prior seasons")):
                 return past.group_by("player").agg(pl.col("z").mean())
         """
+        _why(why, _canon(dataset))          # say so at the decorator, not at its target
+
         def decorate(fn: Callable) -> _assets.Asset:
             return self._register(_assets.Asset(
                 self, dataset, fn, why=why, part=part, ext=ext, terminal=terminal,
@@ -540,107 +497,27 @@ class Pipeline:
              ext: str = _sh.EXT, terminal: bool = False, allow_missing: bool = False,
              if_needed: bool = True, once: bool = False, split: bool = False,
              external=None) -> Callable:
-        """A stage. Two shapes, and which one is in play is not a guess.
-
-        DECLARED — `outputs=` names what it writes and the signature names what it reads,
-        so one expensive fit produces six tables without being run six times:
+        """A stage: what it reads, in its signature, and what it writes, in `outputs=`.
 
             @iv.step(outputs={"ratings": "processed/xpm/",
                               "summary": "processed/xpm_summary/"}, why="the joint fit")
-            def xpm(poss=iv.all_of("derived_data/possessions/", why="the design matrix")):
+            def xpm(poss=iv.all_of("derived/possessions/", why="the design matrix")):
                 ...
                 return {"ratings": r, "summary": s}
 
-        SCANNED — no `outputs=`, and the body's own `iv.reads`/`iv.writes` calls are read
-        off its source, exactly as before.
+        `@iv.data` is the same thing for the common case of one dataset, where the body
+        returns its contents rather than a dict. Omit `outputs=` for a stage that writes
+        nothing into the tree — a fetch, a publish — and it runs every time, because
+        nothing on disk can say it is done.
         """
         _why(why, "step")
 
-        def declared(fn: Callable) -> _assets.Asset:
+        def decorate(fn: Callable) -> _assets.Asset:
             return self._register(_assets.Asset(
                 self, outputs, fn, why=why, part=part, ext=ext, terminal=terminal,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
                 split=split, single=isinstance(outputs, str), external=external))
-
-        if outputs is not None:
-            return declared
-        if external is not None:
-            return declared
-
-        def decorate(fn: Callable):
-            # A signature carrying reads IS the declaration, whatever else was passed — a
-            # fetch or a publish writes nothing into the tree and still has upstreams
-            # worth drawing.
-            if _assets.has_declared_reads(fn):
-                return declared(fn)
-            if part is not None and not isinstance(part, dict):
-                raise DeclError(
-                    "a scanned @iv.step takes part= as a literal dict. A partition KEY "
-                    "belongs to the declared form, which reads its upstreams from the "
-                    "signature.")
-            outputs = writes_in(fn)
-            inputs = reads_in(fn)
-            node_name = self._node_name(fn)
-            for o in outputs:
-                self._declared[o] = inputs
-
-            def wrapper(*args, **kwargs):
-                if if_needed and not self.force and outputs:
-                    reasons = {o: self.why_stale(o, part, inputs=inputs) for o in outputs}
-                    if not any(reasons.values()):
-                        print(f"  {', '.join(outputs)} — up to date, skipping")
-                        for o in outputs:
-                            self.record("skip", rel=o, part=_sh.encode_part(part))
-                        return False
-                    for o, r in reasons.items():
-                        if r:
-                            print(f"  {o}: {r}")
-                self._fresh_scope()
-                prev = (self._part, self._in_step, self._node, self._inputs,
-                        self._outputs)
-                self._part, self._in_step, self._node = part, True, node_name
-                self._inputs, self._outputs = inputs, outputs
-                try:
-                    fn(*args, **kwargs)
-                    return True
-                finally:
-                    (self._part, self._in_step, self._node, self._inputs,
-                     self._outputs) = prev
-                    self._fresh_scope()
-
-            wrapper.__name__ = getattr(fn, "__name__", "step")
-            wrapper.__doc__ = fn.__doc__
-            wrapper.run = fn
-            wrapper.outputs = outputs
-            return wrapper
         return decorate
-
-
-    def for_each(self, over, build_one: Callable, *, dataset: str, key: str, why: str,
-                 quiet: bool = False) -> list[str]:
-        inputs = reads_in(build_one)
-        name = _canon(dataset)
-        _why(why, name)
-        self._declared[name] = inputs
-        want = [str(p) for p in over]
-        reuse, rebuild = [], []
-        for p in want:
-            current = (not self.force
-                       and self.why_stale(name, {key: p}, inputs=inputs) is None)
-            (reuse if current else rebuild).append(p)
-        if not quiet:
-            print(f"  partitions [{name}] by {key}")
-            print(f"    reuse   ({len(reuse):>2}): {_span(reuse)}")
-            print(f"    rebuild ({len(rebuild):>2}): {_span(rebuild)}")
-        for p in rebuild:
-            self._fresh_scope()
-            prev = (self._inputs, self._outputs, self._part)
-            self._inputs, self._outputs, self._part = inputs, (name,), {key: p}
-            with self.writes(name, why=why, part={key: p}) as out:
-                build_one(p, out)
-            self._inputs, self._outputs, self._part = prev
-        return rebuild
-
 
     def _node_name(self, fn: Callable) -> str:
         """The name the static scan gives this step: `<file>::<function>`.
@@ -672,37 +549,6 @@ class Pipeline:
 
     def reset(self) -> None:
         self._fresh_scope()
-
-
-def reads_in(fn: Callable) -> tuple:
-    """What this step declares it reads: `[(dataset, selector)]`, off its own source.
-
-    Read from the FUNCTION rather than from a scan of the project, so a step defined inline
-    — a test, a notebook, `repro.py` — declares just as well as one in a scanned file.
-
-    An `update_file_on_disk=` read is left out. It is the copy of its own output this stage
-    is about to overwrite, and folding a shard's own identity into its own key is a
-    definition that never settles.
-    """
-    try:
-        src = inspect.getsource(fn)
-    except (OSError, TypeError):
-        return ()
-    out = []
-    for node in ast.walk(ast.parse(textwrap.dedent(src))):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "reads" and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)):
-            continue
-        kw = {k.arg: k.value for k in node.keywords if k.arg}
-        flag = kw.get("update_file_on_disk")
-        if isinstance(flag, ast.Constant) and flag.value is True:
-            continue
-        opt = kw.get("optional")
-        out.append((_canon(node.args[0].value), _lit_sel(kw.get("where")),
-                    isinstance(opt, ast.Constant) and opt.value is True))
-    return tuple(sorted(set(out), key=lambda x: x[0]))
 
 
 def _sub_part(where: dict | None, part: dict | None, name: str):
@@ -757,47 +603,9 @@ def _resolve_sel(sel, part: dict | None, name: str):
     return out
 
 
-def writes_in(fn: Callable) -> tuple[str, ...]:
-    try:
-        src = inspect.getsource(fn)
-    except (OSError, TypeError) as e:
-        raise DeclError(
-            f"cannot read the source of {getattr(fn, '__name__', fn)!r}, so there is no "
-            f"way to know what it writes and no way to decide whether to skip it. This "
-            f"happens in a REPL, a notebook, or a script piped in on stdin. Run it from a "
-            f"file, or pass if_needed=False to say the stage should always run.") from e
-    out = []
-    for node in ast.walk(ast.parse(textwrap.dedent(src))):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if node.func.attr not in ("writes", "constants"):
-            continue
-        kw = {k.arg: k.value for k in node.keywords if k.arg}
-        if not isinstance(kw.get("why"), ast.Constant):
-            continue
-        target = node.args[0] if node.args else kw.get("dataset")
-        if not (isinstance(target, ast.Constant) and isinstance(target.value, str)):
-            shown = ast.dump(target, annotate_fields=False)[:60] if target else "missing"
-            raise DeclError(
-                f"{getattr(fn, '__name__', fn)!r} writes a dataset this cannot read: "
-                f"{shown}. Inside an @iv.step the dataset must be a string LITERAL, "
-                f"because that is how the skip check learns what the stage produces. "
-                f"A partition goes in part=, not in the name.")
-        name = _canon(target.value)
-        if name not in out:
-            out.append(name)
-    return tuple(out)
-
-
 def _span_parts(parts: list[str]) -> str:
     s = sorted(parts)
     return s[0] if len(s) == 1 else f"{s[0]}..{s[-1]}"
-
-
-def _span(parts: list[str]) -> str:
-    if not parts:
-        return "—"
-    return ", ".join(parts) if len(parts) <= 3 else f"{parts[0]}..{parts[-1]}"
 
 
 def _env_force() -> bool:

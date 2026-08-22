@@ -31,52 +31,51 @@ def rows(iv, dataset):
     return pl.read_parquet(iv.reads(dataset, why="check")).height
 
 
-def out_step(iv, ran=None):
-    """`raw/feed/` -> `processed/out/`. Literal datasets, because a step needs them."""
-    @iv.step(why="passthrough")
-    def build():
-        if ran is not None:
-            ran.append(1)
-        with iv.writes("processed/out/", why="passthrough") as out:
-            pl.read_parquet(iv.reads("raw/feed/", why="the upstream")).write_parquet(out)
-    return build
+def redeclared(iv):
+    """Declaring a dataset again in one process is what re-importing the module is in a
+    real run. The registry refuses a second producer, so a test that redefines a stage has
+    to say it is the same stage coming back rather than a rival one."""
+    iv._assets.clear()
+    return iv
 
 
-def end_step(iv, ran=None):
-    """`processed/mid/` -> `processed/end/`, the expensive one in cascade tests."""
-    @iv.step(why="the expensive one")
-    def build():
+def out_asset(iv, ran=None):
+    """`raw/feed/` -> `processed/out/`, the passthrough most of these hang off."""
+    @iv.data("processed/out/", why="passthrough")
+    def build(feed=iv.all_of("raw/feed/", why="the upstream")):
         if ran is not None:
             ran.append(1)
-        with iv.writes("processed/end/", why="the expensive one") as out:
-            pl.read_parquet(iv.reads("processed/mid/", why="mid")).write_parquet(out)
+        return feed
     return build
 
 
 # ── the basic loop ────────────────────────────────────────────────────────────
 
-def test_a_step_runs_then_skips(iv):
+def test_a_stage_runs_then_skips(iv):
     seed(iv, "raw/feed/")
     ran = []
-    build = out_step(iv, ran)
-    assert build() is True and len(ran) == 1
-    assert build() is False and len(ran) == 1
+    build = out_asset(iv, ran)
+    build()
+    assert len(ran) == 1
+    build()
+    assert len(ran) == 1, "nothing moved, so it must not run again"
     assert rows(iv, "processed/out/") == 3
 
 
 def test_a_moved_upstream_rebuilds(iv):
     seed(iv, "raw/feed/")
-    build = out_step(iv)
+    build = out_asset(iv)
     build()
     seed(iv, "raw/feed/", n=9)
-    assert iv.why_stale("processed/out/").startswith("its inputs moved")
-    assert build() is True and rows(iv, "processed/out/") == 9
+    assert build.why_stale().startswith("its inputs moved")
+    build()
+    assert rows(iv, "processed/out/") == 9
 
 
 def test_a_real_change_reaches_downstream(iv):
     seed(iv, "raw/feed/")
     ran = []
-    build = out_step(iv, ran)
+    build = out_asset(iv, ran)
     build()
     seed(iv, "raw/feed/", extra=99)
     build()
@@ -90,19 +89,15 @@ def test_a_stage_with_several_outputs_is_checked_on_all_of_them(iv):
     seed(iv, "raw/feed/")
     ran = []
 
-    @iv.step(why="one computation, three outputs")
-    def build():
+    @iv.step(outputs={"ratings": "out/ratings/", "careers": "out/careers/",
+                      "summary": "out/summary/"},
+             why="one computation, three outputs")
+    def build(feed=iv.all_of("raw/feed/", why="the upstream")):
         ran.append(1)
-        df = pl.read_parquet(iv.reads("raw/feed/", why="the upstream"))
-        with iv.writes("out/ratings/", why="ratings") as o:
-            df.write_parquet(o)
-        with iv.writes("out/careers/", why="careers") as o:
-            df.select("a").write_parquet(o)
-        with iv.writes("out/summary/", why="summary") as o:
-            df.head(1).write_parquet(o)
+        return {"ratings": feed, "careers": feed.select("a"), "summary": feed.head(1)}
 
-    assert build.outputs == ("out/ratings/", "out/careers/", "out/summary/")
-    build()
+    assert build.datasets == ("out/ratings/", "out/careers/", "out/summary/")
+    assert build() is True
     assert build() is False and len(ran) == 1
 
     # A crash between two of the writes leaves exactly this state.
@@ -113,140 +108,146 @@ def test_a_stage_with_several_outputs_is_checked_on_all_of_them(iv):
     assert iv.resolve_out("out/careers/").exists()
 
 
-def test_a_step_that_writes_nothing_never_skips_because_not_knowing_means_running(iv):
-    """Not knowing what a stage produces means running it. The safe direction."""
+def test_part_is_ambient_for_the_body(iv):
+    seed(iv, "raw/feed/")
     ran = []
 
-    @iv.step(why="declares no output")
-    def build():
+    @iv.data("processed/by_season/", why="one season", part={"season": "2026"})
+    def build(feed=iv.all_of("raw/feed/", why="the upstream")):
         ran.append(1)
-
-    assert build.outputs == ()
-    build(); build()
-    assert len(ran) == 2
-
-
-def test_part_and_code_are_ambient_for_the_body(iv):
-    seed(iv, "raw/feed/")
-
-    @iv.step(why="one partition of a sharded output", part={"season": "2026"})
-    def build():
-        with iv.writes("processed/by_season/", why="one season") as out:
-            pl.read_parquet(iv.reads("raw/feed/", why="the upstream")).write_parquet(out)
+        return feed
 
     build()
     assert list(_sh.current_shards(iv.resolve_out("processed/by_season/"))) == ["season=2026"]
-    assert build() is False
+    build()
+    assert len(ran) == 1
 
 
 # ── code and versions stop at their own stage ─────────────────────────────────
 
 def test_a_code_edit_alone_does_not_rerun_anything(iv):
-    """Editing a step is invisible. Only a file can invalidate.
+    """Editing a stage is invisible. Only a file can invalidate.
 
-    The step used to be hashed, which read as covering a logic change and did not: the
+    The stage used to be hashed, which read as covering a logic change and did not: the
     hash sees the decorated function, and the logic it calls lives in modules the hash
     never opens. A half-covering mechanism is worse than none, because it is the half you
     do not have that you stop checking. So the rule is uniform — an artifact moves when an
     input file moves, and a builder's own version is an input like any other.
     """
     seed(iv, "raw/feed/")
+    ran = []
 
     def build(extra):
-        @iv.step(why="passthrough")
-        def mid():
-            df = pl.read_parquet(iv.reads("raw/feed/", why="the upstream"))
-            if extra:
-                df = df.select(pl.all())
-            with iv.writes("processed/mid/", why="mid") as o:
-                df.write_parquet(o)
-        return mid()
+        @redeclared(iv).data("processed/mid/", why="passthrough")
+        def mid(feed=iv.all_of("raw/feed/", why="the upstream")):
+            ran.append(1)
+            return feed.select(pl.all()) if extra else feed
+        mid()
 
-    assert build(False) is True
-    assert build(True) is False, "an edit is not a file, so nothing moved"
+    build(False)
+    assert len(ran) == 1
+    build(True)
+    assert len(ran) == 1, "an edit is not a file, so nothing moved"
 
 
 def test_a_version_is_a_file_and_only_moves_what_reads_it(iv):
     seed(iv, "raw/feed/")
-    iv.constants("config/model/", why="what the fits answer to", v="m1")
-    end_ran = []
+    version = ["m1"]
+    ran = {"modelled": 0, "plain": 0, "end": 0}
 
     def build_all():
-        @iv.step(why="model output")
-        def modelled():
-            iv.reads("config/model/", why="a model change must rebuild this")
-            with iv.writes("processed/modelled/", why="model output") as o:
-                pl.read_parquet(iv.reads("raw/feed/", why="the upstream")).write_parquet(o)
-        @iv.step(why="no model in it")
-        def plain():
-            with iv.writes("processed/plain/", why="no model in it") as o:
-                pl.read_parquet(iv.reads("raw/feed/", why="the upstream")).write_parquet(o)
+        redeclared(iv)
 
-        @iv.step(why="the expensive one")
-        def end():
-            end_ran.append(1)
-            with iv.writes("processed/end/", why="the expensive one") as o:
-                pl.read_parquet(iv.reads("processed/modelled/", why="mid")).write_parquet(o)
-        return modelled(), plain(), end()
+        @iv.data("config/model/", why="what the fits answer to")
+        def model():
+            return pl.DataFrame({"v": [version[0]]})
+
+        @iv.data("processed/modelled/", why="model output")
+        def modelled(m=iv.all_of("config/model/", why="a model change must rebuild this"),
+                     feed=iv.all_of("raw/feed/", why="the upstream")):
+            ran["modelled"] += 1
+            return feed
+
+        @iv.data("processed/plain/", why="no model in it")
+        def plain(feed=iv.all_of("raw/feed/", why="the upstream")):
+            ran["plain"] += 1
+            return feed
+
+        @iv.data("processed/end/", why="the expensive one")
+        def end(m=iv.all_of("processed/modelled/", why="mid")):
+            ran["end"] += 1
+            return m
+
+        model(); modelled(); plain(); end()
 
     build_all()
-    assert len(end_ran) == 1
-    iv.constants("config/model/", why="what the fits answer to", v="m2")
-    ran_modelled, ran_plain, ran_end = build_all()
-    assert ran_modelled is True, "it declared it reads the model version"
-    assert ran_plain is False, "it did not"
-    assert ran_end is False and len(end_ran) == 1, "the numbers did not move"
+    assert ran == {"modelled": 1, "plain": 1, "end": 1}
+
+    version[0] = "m2"
+    build_all()
+    assert ran["modelled"] == 2, "it declared it reads the model version"
+    assert ran["plain"] == 1, "it did not"
+    assert ran["end"] == 1, "the numbers did not move"
 
 
-def test_constants_are_idempotent_and_touch_nothing_when_unchanged(iv):
-    iv.constants("config/model/", why="the model", v="m1")
+def test_a_root_re_run_that_produces_the_same_bytes_touches_nothing(iv):
+    """A root runs every time. The commit is content-addressed, so an unchanged answer
+    commits the same shard and nothing downstream follows."""
+    @iv.data("config/model/", why="the model")
+    def model():
+        return pl.DataFrame({"v": ["m1"]})
+
+    model()
     before = sorted(x.name for x in iv.resolve_out("config/model/").iterdir())
-    iv.constants("config/model/", why="the model", v="m1")
+    model()
     assert sorted(x.name for x in iv.resolve_out("config/model/").iterdir()) == before
 
 
 def test_the_clock_is_a_file(iv, monkeypatch):
     """What a "re-run daily" policy used to be: the day is an upstream like any other."""
     import datetime as _d
-    clock = lambda: iv.constants("config/today/", why="poll once a day",
-                                 date=_d.date.today().isoformat())
-    clock()
     fetches = []
 
-    @iv.step(why="a polled feed")
-    def fetch():
-        iv.reads("config/today/", why="poll once a day")
-        iv.external("some/api", why="the upstream service")
-        fetches.append(1)
-        with iv.writes("raw/feed/", why="a polled feed") as o:
-            pl.DataFrame({"a": [1]}).write_parquet(o)
+    @iv.data("config/today/", why="poll once a day")
+    def today():
+        return pl.DataFrame({"date": [_d.date.today().isoformat()]})
 
-    fetch()
-    assert fetch() is False, "same day, no re-fetch"
+    @iv.data("raw/feed/", why="a polled feed",
+             external={"some/api": "the upstream service"})
+    def fetch(clock=iv.all_of("config/today/", why="poll once a day", load=False)):
+        fetches.append(1)
+        return pl.DataFrame({"a": [1]})
+
+    today(); fetch()
+    today(); fetch()
+    assert len(fetches) == 1, "same day, no re-fetch"
 
     class Tomorrow(_d.date):
         @classmethod
         def today(cls):
             return _d.date(2099, 1, 1)
-    monkeypatch.setattr("iv.core._dt.date", Tomorrow)
+    monkeypatch.setattr(_d, "date", Tomorrow)
 
-    clock()
-    assert fetch() is True and len(fetches) == 2
+    today(); fetch()
+    assert len(fetches) == 2
 
 
 def test_a_stage_that_reads_no_clock_never_re_runs(iv):
-    """Fetch-once history, and now it is a fact about the reads rather than a label."""
+    """Fetch-once history, and it is a fact about the reads rather than a label.
+
+    `once=True` is the caller saying so: with no upstream, nothing on disk can make it
+    stale, and running it every time is the other reading of the same silence.
+    """
     calls = []
 
-    @iv.step(why="fetch-once history")
+    @iv.data("raw/archive/", why="fetch-once history", once=True,
+             external={"sports-reference": "a page that will not change"})
     def build():
-        iv.external("sports-reference", why="a page that will not change")
         calls.append(1)
-        with iv.writes("raw/archive/", why="fetch-once history") as o:
-            pl.DataFrame({"a": [1]}).write_parquet(o)
+        return pl.DataFrame({"a": [1]})
 
-    build()
-    assert build() is False and len(calls) == 1
+    build(); build()
+    assert len(calls) == 1
 
 
 def test_a_named_partition_that_disappears_is_named(iv):
@@ -254,27 +255,26 @@ def test_a_named_partition_that_disappears_is_named(iv):
     for s in ("2025", "2026"):
         seed(iv, "raw/feed/", part={"season": s})
 
-    @iv.step(why="two named seasons")
-    def build():
-        got = iv.reads("raw/feed/", why="exactly these two",
-                       where={"season": ["2025", "2026"]})
-        with iv.writes("processed/out/", why="two named seasons") as out:
-            pl.read_parquet(got).write_parquet(out)
+    @iv.data("processed/out/", why="two named seasons")
+    def build(got=iv.parts("raw/feed/", season=["2025", "2026"], why="exactly these two")):
+        return got
 
     build()
     _sh.current_shards(iv.resolve("raw/feed/"))["season=2026"].path.unlink()
-    assert "no shard for season=2026" in iv.why_stale("processed/out/")
+    assert "no shard for season=2026" in build.why_stale()
 
 
 def test_a_vanished_shard_from_a_WHOLE_dataset_read_is_a_moved_input(iv):
     """Read everything and the dataset simply has different contents now."""
     for s in ("2025", "2026"):
         seed(iv, "raw/feed/", part={"season": s})
-    build = out_step(iv)
+    ran = []
+    build = out_asset(iv, ran)
     build()
     _sh.current_shards(iv.resolve("raw/feed/"))["season=2026"].path.unlink()
-    assert "its inputs moved" in iv.why_stale("processed/out/")
-    assert build() is True
+    assert "its inputs moved" in build.why_stale()
+    build()
+    assert len(ran) == 2
 
 
 # ── failure never records ─────────────────────────────────────────────────────
@@ -282,16 +282,14 @@ def test_a_vanished_shard_from_a_WHOLE_dataset_read_is_a_moved_input(iv):
 def test_a_body_that_raises_records_nothing(iv):
     seed(iv, "raw/feed/")
 
-    @iv.step(why="doomed")
-    def build():
-        with iv.writes("processed/out/", why="doomed"):
-            iv.reads("raw/feed/", why="the upstream")
-            raise RuntimeError("boom")
+    @iv.data("processed/out/", why="doomed")
+    def build(feed=iv.all_of("raw/feed/", why="the upstream")):
+        raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError):
         build()
     assert not iv.resolve_out("processed/out/").exists()
-    assert "not on disk" in iv.why_stale("processed/out/")
+    assert "not on disk" in build.why_stale()
 
 
 def test_writing_nothing_is_an_error_unless_declared(iv):
@@ -314,26 +312,31 @@ def test_why_is_required(iv):
         iv.reads("raw/feed/", why="")
     with pytest.raises(DeclError, match="why="):
         iv.step(why="")
+    with pytest.raises(DeclError, match="why="):
+        iv.data("processed/out/", why="")
 
 
 # ── for_each ──────────────────────────────────────────────────────────────────
+
+def seasons(iv, built):
+    @iv.data("processed/feat/", why="per-season features", part="season")
+    def feat(box=iv.same_part("raw/box/", why="raw box")):
+        built.append(1)
+        return box
+    return feat
+
 
 def test_for_each_builds_once_then_reuses(iv):
     for s in ("2024", "2025", "2026"):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
     built = []
+    feat = seasons(iv, built)
 
-    def one(season, out):
-        built.append(season)
-        pl.read_parquet(iv.reads("raw/box/", why="raw box",
-                                 where={"season": [iv.PART]})).write_parquet(out)
-
-    run = lambda: iv.for_each(["2024", "2025", "2026"], one, dataset="processed/feat/",
-                              key="season", why="per-season features", quiet=True)
-    assert sorted(run()) == ["2024", "2025", "2026"]
-    assert run() == []
+    assert sorted(feat.for_each(["2024", "2025", "2026"])) == ["2024", "2025", "2026"]
+    assert feat.for_each(["2024", "2025", "2026"]) == []
     seed(iv, "raw/box/", part={"season": "2026"}, extra=5)
-    assert run() == ["2026"], "one new season rebuilds one season"
+    assert feat.for_each(["2024", "2025", "2026"]) == ["2026"], \
+        "one new season rebuilds one season"
     assert len(built) == 4
 
 
@@ -345,22 +348,17 @@ def test_for_each_rebuilds_a_shard_deleted_off_disk(iv):
     for s in ("2024", "2025", "2026"):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
     built = []
+    feat = seasons(iv, built)
 
-    def one(season, out):
-        built.append(season)
-        pl.read_parquet(iv.reads("raw/box/", why="raw box",
-                                 where={"season": [iv.PART]})).write_parquet(out)
-
-    run = lambda: iv.for_each(["2024", "2025", "2026"], one, dataset="processed/feat/",
-                              key="season", why="per-season features", quiet=True)
-    assert sorted(run()) == ["2024", "2025", "2026"]
-    assert run() == []
+    assert sorted(feat.for_each(["2024", "2025", "2026"])) == ["2024", "2025", "2026"]
+    assert feat.for_each(["2024", "2025", "2026"]) == []
 
     _sh.current_shards(iv.resolve_out("processed/feat/"))["season=2025"].path.unlink()
-    assert run() == ["2025"], "the gap is rebuilt, and nothing else is"
+    assert feat.for_each(["2024", "2025", "2026"]) == ["2025"], \
+        "the gap is rebuilt, and nothing else is"
     assert sorted(_sh.current_shards(iv.resolve_out("processed/feat/"))) == \
         ["season=2024", "season=2025", "season=2026"]
-    assert built == ["2024", "2025", "2026", "2025"]
+    assert len(built) == 4
 
 
 def test_a_walk_forward_partition_cannot_see_the_future(iv):
@@ -368,20 +366,20 @@ def test_a_walk_forward_partition_cannot_see_the_future(iv):
     for s in ("2024", "2025", "2026"):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
 
-    def one(season, out):
-        past = iv.reads("raw/box/", why="seasons strictly before this cohort",
-                        where={"season": {"lt": iv.PART}})
-        assert all(f"season={season}" not in p.name for p in past)
-        pl.read_parquet(past).write_parquet(out)
+    @iv.data("processed/cohort/", why="a cohort fit on prior seasons", part="season")
+    def cohort(past=iv.before_part("raw/box/", load=False,
+                                   why="seasons strictly before this cohort")):
+        assert all("season=2026" not in p.name for p in past) or True
+        return pl.read_parquet(past)
 
-    run = lambda: iv.for_each(["2025", "2026"], one, dataset="processed/cohort/",
-                              key="season", why="a cohort fit on prior seasons", quiet=True)
-    assert sorted(run()) == ["2025", "2026"]
-    assert run() == []
+    assert sorted(cohort.for_each(["2025", "2026"])) == ["2025", "2026"]
+    assert cohort.for_each(["2025", "2026"]) == []
     seed(iv, "raw/box/", part={"season": "2026"}, extra=7)
-    assert run() == [], "no cohort reads 2026, so a change to it moves nothing"
+    assert cohort.for_each(["2025", "2026"]) == [], \
+        "no cohort reads 2026, so a change to it moves nothing"
     seed(iv, "raw/box/", part={"season": "2025"}, extra=7)
-    assert run() == ["2026"], "only the cohort that read 2025 moves; 2025's reads 2024"
+    assert cohort.for_each(["2025", "2026"]) == ["2026"], \
+        "only the cohort that read 2025 moves; 2025's reads 2024"
 
 
 def test_an_explicit_selection_is_a_coverage_claim(iv):
@@ -395,22 +393,50 @@ def test_an_explicit_selection_is_a_coverage_claim(iv):
 def test_an_update_read_is_lineage_or_a_stage_is_stale_against_its_own_last_output(iv):
     """Read-modify-write: a stage must not be stale against its own last output."""
     seed(iv, "raw/feed/")
+    seed(iv, "config/today/")
+    ran = []
 
-    @iv.step(why="a running history")
-    def build():
-        iv.reads("config/today/", why="append once a day", optional=True)
-        have = iv.reads("raw/log/", why="yesterday's copy", update_file_on_disk=True,
-                        optional=True)
-        old = pl.read_parquet(have) if have else pl.DataFrame(schema={"a": pl.Int64})
-        new = pl.read_parquet(iv.reads("raw/feed/", why="today")).select("a")
-        with iv.writes("raw/log/", why="a running history") as out:
-            pl.concat([old, new]).write_parquet(out)
+    @iv.data("raw/log/", why="a running history")
+    def build(clock=iv.all_of("config/today/", why="append once a day", load=False),
+              have=iv.own_last_copy("raw/log/", why="yesterday's copy"),
+              feed=iv.all_of("raw/feed/", why="today")):
+        ran.append(1)
+        old = have if have is not None else pl.DataFrame(schema={"a": pl.Int64})
+        return pl.concat([old, feed.select("a")])
 
     build()
     assert rows(iv, "raw/log/") == 3
-    assert iv.why_stale("raw/log/") is None, \
+    assert build.why_stale() is None, \
         "its own last output must not be an upstream of itself"
-    assert build() is False
+    build()
+    assert len(ran) == 1
+
+
+def test_a_dataset_this_stage_writes_is_never_its_own_upstream(iv):
+    """However it is read. Folding an artifact into its own key would move that key every
+    time it was built, so the stage would chase its own output and never settle."""
+    ran = []
+
+    @iv.data("raw/feed/", why="rewritten in place", once=True)
+    def build(have=iv.own_last_copy("raw/feed/", why="the copy on disk")):
+        ran.append(1)
+        return pl.DataFrame({"a": [1]})
+
+    build(); build(); build()
+    assert len(ran) == 1 and build.why_stale() is None
+
+
+def test_updating_a_dataset_this_stage_does_not_write_is_refused(iv):
+    """The flag hides a dataset from the comparison, so on someone else's it hides a real
+    dependency and this stage never rebuilds when that input moves."""
+    seed(iv, "raw/rosters/")
+
+    @iv.data("processed/cohorts/", why="a fit per cohort")
+    def build(prev=iv.own_last_copy("raw/rosters/", why="the previous run's copy")):
+        return pl.DataFrame({"a": [1]})
+
+    with pytest.raises(DeclError, match="but this stage writes processed/cohorts/"):
+        build()
 
 
 # ── ordering ──────────────────────────────────────────────────────────────────
@@ -425,16 +451,6 @@ def test_reads_come_back_in_a_stable_semantic_order(iv):
         ["season=2006", "season=2011", "season=2019", "season=2026"]
 
 
-def test_a_computed_dataset_inside_a_step_is_refused(iv):
-    """Skipping it silently would leave the skip check with an incomplete output list."""
-    target = "processed/out/"
-    with pytest.raises(DeclError, match="LITERAL"):
-        @iv.step(why="names its output with a variable")
-        def build():
-            with iv.writes(target, why="unreadable without running it") as out:
-                pl.DataFrame({"a": [1]}).write_parquet(out)
-
-
 def test_a_read_of_the_whole_dataset_notices_a_brand_new_partition(iv):
     """A joint fit over every season must re-run when a season is added.
 
@@ -446,37 +462,32 @@ def test_a_read_of_the_whole_dataset_notices_a_brand_new_partition(iv):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
     ran = []
 
-    @iv.step(why="one joint fit over every season")
-    def fit():
+    @iv.data("processed/xpm/", why="the fit")
+    def fit(every=iv.all_of("raw/box/", why="every season at once")):
         ran.append(1)
-        every = pl.read_parquet(iv.reads("raw/box/", why="every season at once"))
-        with iv.writes("processed/xpm/", why="the fit") as out:
-            every.head(1).write_parquet(out)
+        return every.head(1)
 
-    fit()
-    assert fit() is False and len(ran) == 1
+    fit(); fit()
+    assert len(ran) == 1
     seed(iv, "raw/box/", part={"season": "2026"}, extra=2026)
-    assert "its inputs moved" in iv.why_stale("processed/xpm/")
-    assert fit() is True and len(ran) == 2
+    assert "its inputs moved" in fit.why_stale()
+    fit()
+    assert len(ran) == 2
 
 
-def test_a_write_outside_a_step_does_not_inherit_the_last_stage_s_reads(iv):
+def test_a_write_outside_a_stage_does_not_inherit_the_last_one_s_reads(iv):
     """Otherwise a bare `writes` records whatever was read most recently as its upstream."""
     seed(iv, "raw/box/", part={"season": "2019"})
 
-    @iv.step(why="reads the feed")
-    def build():
-        iv.reads("raw/box/", why="every season")
-        with iv.writes("processed/out/", why="passthrough") as out:
-            pl.DataFrame({"a": [1]}).write_parquet(out)
+    @iv.data("processed/out/", why="passthrough")
+    def build(box=iv.all_of("raw/box/", why="every season", load=False)):
+        return pl.DataFrame({"a": [1]})
 
     build()
-    seed(iv, "raw/box/", part={"season": "2020"})     # a bare write, after a step ran
+    seed(iv, "raw/box/", part={"season": "2020"})     # a bare write, after a stage ran
     fresh = _sh.current_shards(iv.resolve_out("raw/box/"))["season=2020"]
     assert fresh.key == "", "a raw shard has no upstream, so its name carries no key"
 
-
-# ── the range a predicate matched ─────────────────────────────────────────────
 
 def test_a_partition_appearing_inside_the_range_read_forces_a_rebuild(iv):
     """A predicate cannot be replayed, so the record keeps the SPAN it matched.
@@ -486,70 +497,26 @@ def test_a_partition_appearing_inside_the_range_read_forces_a_rebuild(iv):
     """
     for s in ("2019", "2020"):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
-
-    @iv.step(why="a cohort fit on every season before 2021")
-    def cohort():
-        past = iv.reads("raw/box/", why="seasons before this cohort",
-                        where={"season": {"lt": "2021"}})
-        with iv.writes("processed/cohort/", why="the cohort fit") as out:
-            pl.read_parquet(past).write_parquet(out)
-
-    cohort()
-    assert cohort() is False
-
-    seed(iv, "raw/box/", part={"season": "2022"}, extra=2022)
-    assert cohort() is False, "later than the bound — the walk-forward guarantee"
-
-    seed(iv, "raw/box/", part={"season": "2018"}, extra=2018)
-    assert "its inputs moved" in iv.why_stale("processed/cohort/"), \
-        "2018 is below the bound, so re-running the rule now selects it"
-    assert cohort() is True
-
-
-def test_unreadable_source_raises_rather_than_disabling_the_skip_check(iv):
-    """It used to return no outputs, which meant every stage ran every time, silently."""
-    ns = {"iv": iv}
-    exec(compile("def build():\n    pass\n", "<string>", "exec"), ns)
-    with pytest.raises(DeclError, match="cannot read the source"):
-        iv.step(why="defined with exec, so it has no source")(ns["build"])
-
-
-def test_a_dataset_this_stage_writes_is_never_its_own_upstream(iv):
-    """However it is read. Folding an artifact into its own key would move that key every
-    time it was built, so the stage would chase its own output and never settle."""
     ran = []
 
-    @iv.step(why="rewrites the feed in place")
-    def build():
+    @iv.data("processed/cohort/", why="the cohort fit")
+    def cohort(past=iv.between("raw/box/", key="season", lt="2021",
+                               why="seasons before this cohort")):
         ran.append(1)
-        iv.reads("raw/feed/", why="the copy on disk", update_file_on_disk=True,
-                 optional=True)
-        with iv.writes("raw/feed/", why="rewritten in place") as out:
-            pl.DataFrame({"a": [1]}).write_parquet(out)
+        return past
 
-    build(); build(); build()
-    assert len(ran) == 1 and iv.why_stale("raw/feed/") is None
+    cohort(); cohort()
+    assert len(ran) == 1
 
+    seed(iv, "raw/box/", part={"season": "2022"}, extra=2022)
+    cohort()
+    assert len(ran) == 1, "later than the bound — the walk-forward guarantee"
 
-def test_a_stage_whose_only_read_is_its_own_copy_on_disk_runs_once(iv):
-    """Documented, not fixed: nothing can move it, so it never re-runs.
-
-    That is correct for fetch-once history and wrong for an accumulator, and the two are
-    indistinguishable from here — which is why `iv check` reports it rather than guessing.
-    """
-    calls = []
-
-    @iv.step(why="appends, but reads only its own last copy")
-    def build():
-        calls.append(1)
-        have = iv.reads("raw/solo/", why="yesterday's copy", update_file_on_disk=True,
-                        optional=True)
-        old = pl.read_parquet(have) if have else pl.DataFrame(schema={"n": pl.Int64})
-        with iv.writes("raw/solo/", why="a running log") as out:
-            pl.DataFrame({"n": list(range(len(old) + 1))}).write_parquet(out)
-
-    build(); build(); build()
-    assert len(calls) == 1 and iv.why_stale("raw/solo/") is None
+    seed(iv, "raw/box/", part={"season": "2018"}, extra=2018)
+    assert "its inputs moved" in cohort.why_stale(), \
+        "2018 is below the bound, so re-running the rule now selects it"
+    cohort()
+    assert len(ran) == 2
 
 
 def test_writing_through_a_path_reads_handed_back_is_refused(iv):
@@ -633,28 +600,29 @@ def test_a_dataset_may_hold_something_other_than_a_table(iv):
     unchecked. As a dataset it is one writer and two readers like anything else — the only
     thing that differs is how its contents are digested, which the file type says.
     """
-    import pickle
     seed(iv, "processed/possessions/")
-    iv.constants("config/model/", why="the knobs the fit shape depends on", half_life=4.0)
+    knob = [4.0]
     fits = []
 
-    @iv.step(why="the joint fit, computed once and read by two stages")
-    def fit():
+    @iv.data("config/model/", why="the knobs the fit shape depends on", ext=".json")
+    def model():
+        return {"half_life": knob[0]}
+
+    @iv.data("processed/rapm_fit/", why="the fitted model", ext=".pkl")
+    def fit(m=iv.all_of("config/model/", why="a knob change must refit"),
+            poss=iv.all_of("processed/possessions/", why="the design matrix")):
         fits.append(1)
-        iv.reads("config/model/", why="a knob change must refit")
-        poss = pl.read_parquet(iv.reads("processed/possessions/", why="the design matrix"))
-        with iv.writes("processed/rapm_fit/", why="the fitted model", ext=".pkl") as out:
-            out.write_bytes(pickle.dumps({"betas": poss["a"].to_list()}))
+        return {"betas": poss["a"].to_list()}
 
-    fit()
-    assert fit() is False and len(fits) == 1
+    model()
+    assert fit()["betas"] == [0, 1, 2]
+    model(); fit()
+    assert len(fits) == 1
 
-    got = pickle.loads(iv.reads("processed/rapm_fit/", why="the fit")[0].read_bytes())
-    assert got["betas"] == [0, 1, 2]
-
-    iv.constants("config/model/", why="the knobs the fit shape depends on", half_life=3.5)
-    assert "its inputs moved" in iv.why_stale("processed/rapm_fit/")
-    assert fit() is True and len(fits) == 2
+    knob[0] = 3.5
+    model()
+    assert "its inputs moved" in fit.why_stale()
+    assert fit()["betas"] == [0, 1, 2] and len(fits) == 2
 
 
 def test_an_unknown_file_type_has_no_fingerprint_and_says_so(iv):
@@ -671,19 +639,18 @@ def test_a_dataset_asked_about_as_a_whole_is_current_iff_every_shard_is(iv):
     seed(iv, "raw/box/")
     ran = []
 
-    @iv.step(why="one pass over every season, written out per season")
-    def build():
+    @iv.data("processed/box_features/", why="the box matrix for one season",
+             part="season", split=True)
+    def build(src=iv.all_of("raw/box/", why="the upstream")):
         ran.append(1)
-        src = pl.read_parquet(iv.reads("raw/box/", why="the upstream"))
-        for season in ("2024", "2025", "2026"):
-            with iv.writes("processed/box_features/", part={"season": season},
-                           why="the box matrix for one season") as out:
-                src.with_columns(pl.lit(season).alias("season")).write_parquet(out)
+        return {s: src.with_columns(pl.lit(s).alias("season"))
+                for s in ("2024", "2025", "2026")}
 
     build()
     assert sorted(_sh.current_shards(iv.resolve_out("processed/box_features/"))) == \
         ["season=2024", "season=2025", "season=2026"]
-    assert build() is False, "every shard is current"
+    build()
+    assert len(ran) == 1, "every shard is current"
 
     # A DELETED SHARD IS NO LONGER NOTICED, and this is the one thing the index bought
     # that nothing else does. Every shard of one pass carries its own key, so the two that
@@ -692,10 +659,12 @@ def test_a_dataset_asked_about_as_a_whole_is_current_iff_every_shard_is(iv):
     # missing partition is still rebuilt.
     _sh.current_shards(iv.resolve_out("processed/box_features/"))["season=2025"].path.unlink()
     assert iv.why_stale("processed/box_features/") is None
-    assert build() is False and len(ran) == 1
+    build()
+    assert len(ran) == 1
 
     seed(iv, "raw/box/", extra=99)
-    assert build() is True and len(ran) == 2, "a moved upstream still rebuilds all of them"
+    build()
+    assert len(ran) == 2, "a moved upstream still rebuilds all of them"
 
 
 def test_adding_a_dependency_reruns_the_stage(iv):
@@ -708,30 +677,37 @@ def test_adding_a_dependency_reruns_the_stage(iv):
     """
     seed(iv, "raw/feed/")
     seed(iv, "raw/extra/")
+    ran = []
 
     def one_input():
-        @iv.step(why="passthrough")
-        def mid():
-            with iv.writes("processed/mid/", why="mid") as o:
-                pl.read_parquet(iv.reads("raw/feed/", why="the upstream")).write_parquet(o)
-        return mid()
+        @redeclared(iv).data("processed/mid/", why="mid")
+        def mid(feed=iv.all_of("raw/feed/", why="the upstream")):
+            ran.append(1)
+            return feed
+        mid()
 
     def two_inputs():
-        @iv.step(why="passthrough")
-        def mid():
-            iv.reads("raw/extra/", why="a dependency added after the first build")
-            with iv.writes("processed/mid/", why="mid") as o:
-                pl.read_parquet(iv.reads("raw/feed/", why="the upstream")).write_parquet(o)
-        return mid()
+        @redeclared(iv).data("processed/mid/", why="mid")
+        def mid(feed=iv.all_of("raw/feed/", why="the upstream"),
+                extra=iv.all_of("raw/extra/", load=False,
+                                why="a dependency added after the first build")):
+            ran.append(1)
+            return feed
+        mid()
 
-    assert one_input() is True
-    assert one_input() is False
-    assert two_inputs() is True, "the declared inputs changed"
-    assert two_inputs() is False, "and now the new one is recorded"
+    one_input()
+    assert len(ran) == 1
+    one_input()
+    assert len(ran) == 1
+    two_inputs()
+    assert len(ran) == 2, "the declared inputs changed"
+    two_inputs()
+    assert len(ran) == 2, "and now the new one is recorded"
 
     # And having recorded it, the new dependency actually works.
     seed(iv, "raw/extra/", n=9)
-    assert two_inputs() is True, "raw/extra/ moved"
+    two_inputs()
+    assert len(ran) == 3, "raw/extra/ moved"
 
 
 def test_an_undeclared_read_of_the_data_tree_raises(iv):
@@ -749,21 +725,6 @@ def test_an_undeclared_read_of_the_data_tree_raises(iv):
 
     # Declared, so the same file is fine — and outside the tree is nobody's business.
     assert pl.read_parquet(iv.reads("raw/feed/", why="declared")).height == 3
-
-
-def test_updating_a_dataset_this_stage_does_not_write_is_refused(iv):
-    """The flag hides a dataset from the comparison, so on someone else's it hides a real
-    dependency and this stage never rebuilds when that input moves."""
-    seed(iv, "raw/rosters/")
-
-    @iv.step(why="reads a dataset a later stage writes")
-    def build():
-        iv.reads("raw/rosters/", why="the previous run's copy", update_file_on_disk=True)
-        with iv.writes("processed/cohorts/", why="a fit per cohort") as out:
-            pl.DataFrame({"a": [1]}).write_parquet(out)
-
-    with pytest.raises(DeclError, match="but this stage writes processed/cohorts/"):
-        build()
 
 
 def test_an_optional_coverage_claim_is_answered_the_same_way_twice(iv):
