@@ -3,11 +3,21 @@
 config/today/           the clock, as a file — what a "re-run daily" policy used to be
 config/hyperparams/     metadata, as a file — what a model version used to be
 raw/box/                sharded by season, one file per season
-raw/odds_log/           an UPDATE: read yesterday's copy, append, write it back
+raw/odds_log/           an UPDATE: read the copy on disk, append, write it back
 processed/features/     sharded by season, built one season at a time
 processed/xpm/          a JOINT fit — reads every season at once
 processed/xpm_summary/  ...a second output of the same fit
 dump/site/              terminal: something outside the pipeline reads it
+
+THERE IS NO INDEX. A derived shard is named `<part>.<key>.<fp>`: the key is a digest of the
+upstreams it was built from, the fp a digest of its bytes. "Is it current" recomputes the
+key from the declared upstreams and the files on disk and asks whether that name is here —
+so the record cannot go missing, go stale, or disagree with the tree. A shard with no key
+was not derived here; it is a root, and its identity is its contents.
+
+Both hashes earn their place. The key moves when an upstream moves, which is what makes a
+stage re-run; the fp is what downstream reads, which is what keeps the early cutoff — see
+the hyperparameter change below, where the fit re-runs and the dump does not.
 """
 
 import datetime as dt
@@ -62,7 +72,7 @@ def features():
         ran.append(f"features:{season}")
         box = pl.read_parquet(
             iv.reads(
-                "raw/box/", why="raw box for this season", where={"season": [season]}
+                "raw/box/", why="raw box for this season", where={"season": [iv.PART]}
             )
         )
         box.with_columns((pl.col("pts") * 2).alias("z")).write_parquet(out)
@@ -84,9 +94,10 @@ def features():
 def append_odds():
     """READ-MODIFY-WRITE, which used to need its own primitive.
 
-    `prior=True` says: this is the previous run's copy. It is recorded for lineage and
-    EXCLUDED from the comparison — otherwise the stage would be permanently stale against
-    its own last output, one step behind itself, forever.
+    `update_file_on_disk=True` says: this is the copy on disk that I am about to
+    overwrite. It is recorded for lineage and EXCLUDED from the comparison — otherwise the
+    stage would be permanently stale against its own last output, one step behind itself,
+    forever. It may only name a dataset this same stage writes.
 
     The clock is what makes it re-run at all. Without that read nothing could ever move it,
     which is right for a fetch-once archive and wrong for anything polled.
@@ -94,7 +105,8 @@ def append_odds():
     ran.append("append_odds")
     iv.reads("config/today/", why="append once a day")
     iv.external("some-sportsbook", why="today's closing lines")
-    have = iv.reads("raw/odds_log/", why="yesterday's copy", prior=True, optional=True)
+    have = iv.reads("raw/odds_log/", why="yesterday's copy", update_file_on_disk=True,
+                    optional=True)
     old = (
         pl.read_parquet(have)
         if have
@@ -113,9 +125,10 @@ def append_odds():
 def cohorts():
     """`where=` picks FILES, so a cohort physically cannot open a later season.
 
-    The rule is DATA, not a lambda, and that is what makes it exact later: it goes into the
-    record and is re-run against the dataset as it stands now. A season backfilled BELOW the
-    bound is picked up; one added above it is not.
+    The rule is DATA, not a lambda, and `iv.PART` is what makes it readable without running
+    the closure — which is what lets this shard's key be computed BEFORE it is built, so
+    there is nothing to write down. A season backfilled BELOW the bound is picked up; one
+    added above it is not.
     """
 
     def one(season, out):
@@ -123,7 +136,7 @@ def cohorts():
         past = iv.reads(
             "processed/features/",
             why="every season before this cohort",
-            where={"season": {"lt": season}},
+            where={"season": {"lt": iv.PART}},
         )
         pl.read_parquet(past).group_by("player", maintain_order=True).agg(
             pl.col("z").mean()
@@ -274,9 +287,15 @@ def no_source():
 shows("a step whose source cannot be read", no_source)
 
 
-def corrupt_index():
-    (root / "processed/xpm/_index.json").write_text("{not json")
-    iv.why_stale("processed/xpm/")
+def unreadable_selector():
+    cutoff = "2025"
+
+    @iv.step(why="selects on a closure this cannot read")
+    def build():
+        with iv.writes("processed/nope/", why="unreadable upstream") as out:
+            iv.reads("raw/box/", why="up to a bound", where={"season": {"lt": cutoff}})
+            pl.DataFrame({"a": [1]}).write_parquet(out)
+    build()
 
 
-shows("a corrupt index, which used to read as 'never built'", corrupt_index)
+shows("a selector this cannot read without running the stage", unreadable_selector)

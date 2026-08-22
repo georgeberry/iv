@@ -35,18 +35,32 @@ class Graph:
                    for st in self.stages.values() for s in st.outputs)
 
     def parent_map(self) -> dict[str, list[str]]:
+        """Who must run before whom — per PARTITION, not per dataset.
+
+        Two stages may write different partitions of one dataset, and a reader that names
+        the partitions it wants depends only on whoever writes those. Comparing dataset
+        names alone merges them, and a pair that writes past and future games while reading
+        each other's half reads as a cycle it does not have.
+        """
         out: dict[str, list[str]] = {n: [] for n in self.stages}
         for node, st in self.stages.items():
             for s in st.triggers:
-                out[node].extend(p for p in self.producers_of(s.dataset) if p != node)
+                for p in self.producers_of(s.dataset):
+                    if p != node and any(_overlaps(s, w) for w in self.stages[p].outputs
+                                         if w.dataset == s.dataset):
+                        out[node].append(p)
         return {k: sorted(set(v)) for k, v in out.items()}
 
     def order(self) -> list[str]:
-        declared = declared_order(self.iv)
-        if declared:
-            return [n for n in declared if n in self.stages] + \
-                   sorted(n for n in self.stages if n not in declared)
-        return [n for layer in toposort(self.parent_map()) for n in layer]
+        """Run order: dependencies first, ties broken by where the step is written.
+
+        Two steps in the SAME file have a source order and it is meaningful, so the tiebreak
+        preserves it and the ORDER check below holds it to being topological. Two steps in
+        different files do not — file order is alphabetical, which means nothing — so there
+        the toposort is the only answer, and there is nothing to check.
+        """
+        at = {n: i for i, n in enumerate(self.stages)}
+        return [n for layer in toposort(self.parent_map()) for n in sorted(layer, key=at.get)]
 
     def export(self) -> dict:
         return {"schema": "iv/2", "nodes": sorted(self.stages),
@@ -56,28 +70,32 @@ class Graph:
 
 
 def build(iv) -> Graph:
-    return Graph(iv=iv, stages=_static.scan(iv))
+    """Every step `source_dirs` reaches, in the order they are defined.
+
+    Membership is what the scan walks — point `source_dirs` at the pipeline and that is the
+    pipeline. It used to be scraped from a refresh script, which meant the run order lived
+    in the shell and the code separately and could disagree; now there is one copy.
+    """
+    every = _static.scan(iv)
+    nodes: dict[str, _static.Node] = {}
+    for _, st in every.items():
+        for node in _static.nodes_of(st):
+            nodes[node.name] = node
+    return Graph(iv=iv, stages=nodes)
 
 
-def declared_order(iv) -> list[str]:
-    import re
-    if not iv.order_from:
-        return []
-    p = iv.order_from
-    from pathlib import Path
-    path = Path(p) if Path(p).is_absolute() else Path(iv.project_root or ".") / p
-    if not path.exists():
-        return []
-    out, seen = [], set()
-    pat = re.compile(r"(?:python3?|uv run(?:\s+\S+)*?)\s+(\S+\.py)")
-    for line in path.read_text().splitlines():
-        if line.lstrip().startswith("#"):
-            continue
-        m = pat.search(line)
-        if m and m.group(1) not in seen:
-            seen.add(m.group(1))
-            out.append(m.group(1))
-    return out
+def _overlaps(read, write) -> bool:
+    """Could this read see anything this write produces?
+
+    Only a value stated on BOTH sides can rule an edge out. Anything unstated means the
+    read may well cover the write, so the edge stays: an edge too many is a redundant
+    ordering constraint, an edge too few is a stage running before its input exists.
+    """
+    wanted = dict(read.where)
+    for key, val in write.part:
+        if key in wanted and val not in wanted[key]:
+            return False
+    return True
 
 
 def toposort(parents: dict[str, list[str]]) -> list[list[str]]:
@@ -126,11 +144,19 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
 
     for name in g.produced:
         writers = g.producers_of(name)
-        if len(writers) > 1:
-            errors.append(
-                f"TWO WRITERS  {name}\n"
-                f"    written by {writers}. One writer per dataset — a second producer "
-                f"should write its own PARTITION of it, or its own dataset.")
+        if len(writers) < 2:
+            continue
+        sites = [s for st in g.stages.values() for s in st.outputs if s.dataset == name]
+        parts = [s.part for s in sites]
+        if all(parts) and len(set(parts)) == len(parts):
+            continue
+        why = ("they do not say which partition each writes, so whichever runs last wins"
+               if not all(parts) else
+               "they declare the same partition, so whichever runs last wins")
+        errors.append(
+            f"TWO WRITERS  {name}\n"
+            f"    written by {writers} and {why}. Two stages may share a dataset only by "
+            f"writing DIFFERENT partitions of it, each declared with a literal part=.")
 
     cyc = find_cycle(g)
     if cyc:
@@ -142,36 +168,47 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
             warns.append(
                 f"RUNS ONCE  {node} writes {sorted({s.dataset for s in real})} and "
                 f"reads nothing that can trigger it, so it runs once and never again. "
-                f"Right for a fetch-once archive. A prior= read does not count: it is the "
-                f"previous run's copy, excluded from the comparison by design. If this "
-                f'should re-run, read something that moves — "config/today/".')
+                f"Right for a fetch-once archive. An update_file_on_disk= read does not "
+                f"count: it is the copy this stage is about to overwrite, excluded from "
+                f"the comparison by design. If this should re-run, read something that "
+                f'moves — "config/today/".')
 
     for node, st in g.stages.items():
-        for fn in st.steps:
-            seen_by_scan = {s.dataset for s in st.outputs_of(fn)}
-            in_own_body = {s.dataset for s in st.outputs if s.owner == fn}
+        # if_needed=False means the step runs no skip check, so there is nothing that could
+        # be fooled by a write it cannot see. `for_each` decides per shard instead.
+        if st.fn and st.guarded:
+            seen_by_scan = {s.dataset for s in st.outputs}
+            in_own_body = {s.dataset for s in st.outputs if s.owner == st.fn}
             hidden = seen_by_scan - in_own_body
             if hidden:
                 errors.append(
-                    f"WRITE OUTSIDE THE STEP  {node}:{fn}\n"
+                    f"WRITE OUTSIDE THE STEP  {node}\n"
                     f"    writes {sorted(hidden)} from a helper, not from its own body. "
                     f"The skip check reads the decorated function's source, so it cannot "
                     f"see those and will skip the stage while they are missing. Move the "
                     f"iv.writes(...) into the step body.")
 
-    declared = declared_order(g.iv)
-    if declared:
-        pos = {n: i for i, n in enumerate(declared)}
-        for node, ps in g.parent_map().items():
-            for p in ps:
-                if node in pos and p in pos and pos[p] > pos[node]:
-                    errors.append(
-                        f"ORDER  {node} runs before {p}, but reads something {p} writes.")
-    elif g.iv.order_from:
-        warns.append(
-            f"no stage invocations found in {g.iv.order_from}, so run ORDER was not "
-            f"checked. A stage launched via a shell function or a variable is invisible "
-            f"to the scrape.")
+    for node, st in g.stages.items():
+        mine = {s.dataset for s in st.outputs}
+        for site in st.inputs:
+            if not site.update_file_on_disk or site.dataset in mine:
+                continue
+            errors.append(
+                f"UPDATES SOMEONE ELSE  {node}\n"
+                f"    reads {site.dataset} with update_file_on_disk=True at "
+                f"{site.location}, but writes {sorted(mine) or 'nothing'}. That flag "
+                f"excludes a dataset from the staleness comparison, which is only right "
+                f"for the copy this stage is about to overwrite. On another stage's "
+                f"dataset it hides a real dependency: run that producer first and read "
+                f"it normally.")
+
+    at = {n: i for i, n in enumerate(g.stages)}
+    for node, ps in g.parent_map().items():
+        for p in ps:
+            if node.split("::")[0] == p.split("::")[0] and at[p] > at[node]:
+                errors.append(
+                    f"ORDER  {node} is defined before {p}, but reads something {p} writes. "
+                    f"Within one file, definition order is run order.")
 
     return errors, warns
 

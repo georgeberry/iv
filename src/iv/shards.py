@@ -14,10 +14,15 @@ from .errors import DeclError, StateError
 
 DIGEST_LEN = 16
 PART_SEP = "__"
-INDEX_NAME = "_index.json"
 STAGE_ENV = "IV_STAGE_DIR"
-INDEX_VERSION = 1
 EXT = ".parquet"
+
+FINGERPRINT_OF = {
+    ".parquet": lambda p: fingerprint(__import__("polars").read_parquet(str(p))),
+    ".pkl": lambda p: _short("bytes:" + hashlib.sha256(Path(p).read_bytes()).hexdigest()),
+    ".json": lambda p: _short("bytes:" + hashlib.sha256(Path(p).read_bytes()).hexdigest()),
+    ".html": lambda p: _short("bytes:" + hashlib.sha256(Path(p).read_bytes()).hexdigest()),
+}
 
 _BAD_IN_VALUE = (".", "=", "/", "\\", PART_SEP)
 
@@ -77,33 +82,67 @@ class Shard:
     part_str: str
     fp: str
     part: dict[str, str] = field(default_factory=dict)
+    ext: str = EXT
+    key: str = ""
 
     @property
     def name(self) -> str:
         return self.path.name
 
 
-def shard_name(part: dict[str, object] | None, fp: str) -> str:
+def shard_name(part: dict[str, object] | None, fp: str, ext: str = EXT,
+               key: str = "") -> str:
+    """`<part>.<key>.<fp><ext>` — the whole record, in the name.
+
+    `key` is the DERIVATION: a digest of the inputs this shard was built from, resolved as
+    they stood. `fp` is a digest of the bytes. Both are needed and they answer different
+    questions. The key answers "am I current" — recomputed from the code and the tree, it
+    either matches a file that is here or it does not, so nothing has to be written down.
+    The fp is what DOWNSTREAM reads as this dataset's identity, which is what keeps the
+    early cutoff: a stage that re-runs and produces identical bytes moves its own key and
+    not its fp, so nothing below it rebuilds.
+
+    A shard with no key was not derived by this pipeline — it is a root, and its identity
+    is its contents and nothing else.
+    """
     if not _HEX.match(fp or ""):
         raise DeclError(
             f"a fingerprint must be {DIGEST_LEN} hex chars, got {fp!r}. The shape is what "
             f"makes a shard name distinguishable from any other file in the directory.")
-    part_str = encode_part(part)
-    return f"{part_str}.{fp}{EXT}" if part_str else f"{fp}{EXT}"
+    if ext not in FINGERPRINT_OF:
+        raise DeclError(
+            f"no way to fingerprint a {ext!r} shard; known: {sorted(FINGERPRINT_OF)}. "
+            f"Add it to FINGERPRINT_OF and say how its contents are digested.")
+    if key and not _HEX.match(key):
+        raise DeclError(f"a derivation key must be {DIGEST_LEN} hex chars, got {key!r}")
+    return ".".join([p for p in (encode_part(part), key, fp) if p]) + ext
 
 
 def parse_name(path) -> Shard | None:
+    """Read a shard's name back. The segment count alone is ambiguous, the shapes are not:
+    a partition string always contains `=`, a digest never does."""
     name = path.name
-    if not name.endswith(EXT) or name == INDEX_NAME:
+    ext = next((e for e in FINGERPRINT_OF if name.endswith(e)), None)
+    if ext is None:
         return None
-    segs = name[: -len(EXT)].split(".")
-    if len(segs) not in (1, 2) or not _HEX.match(segs[-1]):
+    segs = name[: -len(ext)].split(".")
+    if not segs or len(segs) > 3 or not _HEX.match(segs[-1]):
         return None
-    if len(segs) == 1:
-        return Shard(path=path, part_str="", fp=segs[0], part={})
-    part = _decode(segs[0])
-    return None if part is None else Shard(
-        path=path, part_str=segs[0], fp=segs[1], part=part)
+    fp, rest = segs[-1], segs[:-1]
+    part_str, key = "", ""
+    if len(rest) == 2:
+        part_str, key = rest
+    elif len(rest) == 1:
+        if _decode(rest[0]):
+            part_str = rest[0]
+        elif _HEX.match(rest[0]):
+            key = rest[0]
+        else:
+            return None
+    part = _decode(part_str)
+    if part is None or (key and not _HEX.match(key)):
+        return None
+    return Shard(path=path, part_str=part_str, fp=fp, part=part, ext=ext, key=key)
 
 
 def _short(s: str) -> str:
@@ -118,8 +157,11 @@ def fingerprint(frame) -> str:
 
 
 def fingerprint_of_file(path) -> str:
-    import polars as pl
-    return fingerprint(pl.read_parquet(str(path)))
+    ext = next((e for e in FINGERPRINT_OF if str(path).endswith(e)), None)
+    if ext is None:
+        raise DeclError(
+            f"no way to fingerprint {path}; known: {sorted(FINGERPRINT_OF)}.")
+    return FINGERPRINT_OF[ext](path)
 
 
 def dataset_id(shards: Iterable[Shard]) -> str:
@@ -133,13 +175,11 @@ def list_shards(dataset_dir) -> dict[str, list[Shard]]:
     if not dataset_dir.exists():
         return out
     for p in dataset_dir.iterdir():
-        if p.name == INDEX_NAME:
-            continue
         got = parse_name(p)
         if got is None:
             raise StateError(
                 f"{p} is in a dataset directory but is not a shard of it. Expected "
-                f"<part>.<fingerprint>{EXT} or {INDEX_NAME}, and nothing else — a shard is "
+                f"<part>.<key>.<fingerprint>[{"|".join(sorted(FINGERPRINT_OF))}] and nothing else — a shard is "
                 f"staged on local disk and moved in whole, so there is no in-flight file to "
                 f"allow for. A name this cannot read would silently drop a partition and "
                 f"every read of {dataset_dir.name} would come back short, so it stops here.")
@@ -200,15 +240,16 @@ def select(shards: dict[str, Shard], where: dict[str, object] | None = None,
     return sorted(picked, key=lambda s: sort_key(s.part_str))
 
 
-def stage(tag: object = "", stage_dir=None) -> Path:
+def stage(tag: object = "", stage_dir=None, ext: str = EXT) -> Path:
     d = Path(stage_dir or os.environ.get(STAGE_ENV) or tempfile.gettempdir()) / "iv-stage"
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{os.getpid()}-{tag}{EXT}"
+    return d / f"{os.getpid()}-{tag}{ext}"
 
 
-def commit(staged, dataset_dir, *, part: dict[str, object] | None) -> object:
+def commit(staged, dataset_dir, *, part: dict[str, object] | None,
+           key: str = "") -> object:
     fp = fingerprint_of_file(staged)
-    final = dataset_dir / shard_name(part, fp)
+    final = dataset_dir / shard_name(part, fp, Path(str(staged)).suffix, key)
     part_str = encode_part(part)
     superseded = [s for s in list_shards(dataset_dir).get(part_str, [])
                   if s.name != final.name]
@@ -231,6 +272,15 @@ def _move(src: Path, dst) -> None:
     src.unlink()
 
 
+def schemas_of(shards: Iterable[Shard]) -> dict[tuple, list[str]]:
+    import polars as pl
+    out: dict[tuple, list[str]] = {}
+    for s in shards:
+        cols = tuple(pl.read_parquet_schema(str(s.path)).items())
+        out.setdefault(cols, []).append(s.part_str)
+    return out
+
+
 def gc(dataset_dir, *, keep: set[str] | None = None) -> list[str]:
     keep = keep or set()
     removed = []
@@ -240,27 +290,3 @@ def gc(dataset_dir, *, keep: set[str] | None = None) -> list[str]:
                 s.path.unlink()
                 removed.append(s.name)
     return sorted(removed)
-
-
-def read_index(dataset_dir) -> dict:
-    p = dataset_dir / INDEX_NAME
-    if not p.exists():
-        return {}
-    try:
-        got = json.loads(p.read_text())
-    except (ValueError, OSError) as e:
-        raise StateError(
-            f"{p} is unreadable: {e}. It records what each shard was built from, so a "
-            f"damaged one cannot be told apart from a dataset that was never built. "
-            f"Delete it to force a rebuild of this dataset, knowingly.") from e
-    if not isinstance(got, dict) or got.get("v") != INDEX_VERSION:
-        raise StateError(
-            f"{p} is version {got.get('v') if isinstance(got, dict) else '?'}, and this is "
-            f"version {INDEX_VERSION}. Delete it to rebuild this dataset.")
-    return got
-
-
-def write_entry(dataset_dir, part_str: str, entry: dict) -> None:
-    got = read_index(dataset_dir) or {"v": INDEX_VERSION, "shards": {}}
-    got.setdefault("shards", {})[part_str] = entry
-    (dataset_dir / INDEX_NAME).write_text(json.dumps(got, indent=1, sort_keys=True))

@@ -16,7 +16,7 @@ def to_networkx(g) -> nx.DiGraph:
     for node, stage in g.stages.items():
         for out in stage.outputs:
             for inp in stage.inputs:
-                if inp.dataset == out.dataset or inp.prior:
+                if inp.dataset == out.dataset or inp.update_file_on_disk:
                     continue
                 d.add_edge(inp.dataset, out.dataset, stage=node)
     return d

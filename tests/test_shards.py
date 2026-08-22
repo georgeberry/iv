@@ -70,7 +70,7 @@ def test_a_fingerprint_must_look_like_one():
 
 
 def test_non_shard_files_are_not_ours(tmp_path):
-    for name in (sh.INDEX_NAME, "notes.txt", ".parquet", "aaaa.parquet",
+    for name in ("_index.json", "notes.txt", ".parquet", "aaaa.parquet",
                  "notes.backup.parquet", "season=2019.parquet"):
         assert sh.parse_name(tmp_path / name) is None
 
@@ -84,13 +84,6 @@ def test_a_stray_file_of_any_shape_stops_the_run(tmp_path):
         with pytest.raises(StateError, match="not a shard"):
             sh.list_shards(d)
         (d / junk).unlink()
-
-
-def test_the_index_is_the_only_other_name_allowed(tmp_path):
-    d = tmp_path / "ds"
-    keep = shard(d, {"season": 2026}, "a")
-    (d / sh.INDEX_NAME).write_text("{}")
-    assert [x.name for v in sh.list_shards(d).values() for x in v] == [keep.name]
 
 
 # ── ordering ──────────────────────────────────────────────────────────────────
@@ -271,39 +264,6 @@ def test_gc_drops_what_is_not_kept(tmp_path):
     stale = shard(d, {"season": 2026}, "b")
     assert sh.gc(d, keep={keep.name}) == [stale.name]
     assert sh.current_shards(d)["season=2026"].name == keep.name
-
-
-# ── the index ─────────────────────────────────────────────────────────────────
-
-def test_index_round_trips(tmp_path):
-    d = tmp_path / "ds"
-    d.mkdir()
-    sh.write_entry(d, "season=2026", {"fp": dg("c"), "seconds": 1.5})
-    assert sh.read_index(d)["shards"]["season=2026"]["seconds"] == 1.5
-
-
-def test_a_missing_index_is_normal_and_a_corrupt_one_is_not(tmp_path):
-    """The two used to be the same answer, so a truncated write read as "never built"."""
-    d = tmp_path / "ds"
-    shard(d, {"season": 2026}, "a")
-    assert sh.read_index(d) == {}, "never built is a legitimate empty record"
-
-    (d / sh.INDEX_NAME).write_text("{not json")
-    with pytest.raises(StateError, match="unreadable"):
-        sh.read_index(d)
-
-    (d / sh.INDEX_NAME).write_text(json.dumps({"v": 999, "shards": {}}))
-    with pytest.raises(StateError, match="version"):
-        sh.read_index(d)
-
-    # The shard itself is still readable from its name either way.
-    assert sh.current_shards(d)["season=2026"].fp == dg("a")
-
-
-def test_failing_to_write_the_index_is_an_error(tmp_path):
-    """Silently losing it means the stage rebuilds forever with nothing to explain it."""
-    with pytest.raises(OSError):
-        sh.write_entry(tmp_path / "does" / "not" / "exist", "p", {"a": 1})
 
 
 # ── the whole point ───────────────────────────────────────────────────────────

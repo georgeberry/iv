@@ -11,6 +11,8 @@ from . import graph as _graph
 from . import record as _rec
 from . import render as _render
 from . import shards as _sh
+from . import static as _static
+from .core import _canon, _resolve_sel
 from .errors import ConfigError, IvError
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
@@ -26,6 +28,24 @@ def main(instance: str = typer.Option(
         help="module:attr of the Pipeline. Default: [tool.iv] instance in pyproject.toml")):
     global _INSTANCE
     _INSTANCE = instance
+
+
+def reports(fn):
+    """A command that touches the data tree reports what is wrong with it.
+
+    `IvError` says something true and actionable about the tree — a file that is not a shard,
+    two shards for one partition, an index from another version. A traceback buries that
+    under twenty lines of this package's own frames, which is nobody's problem but ours.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except IvError as e:
+            _die(e)
+    return wrapper
 
 
 def _die(e: Exception) -> None:
@@ -91,6 +111,30 @@ def stage(name: str):
 
 
 @app.command()
+def preflight():
+    """Stop a run before it starts: undefined names, missing modules, cycles."""
+    iv = _load()
+    g = _graph.build(iv)
+    bad = []
+    names = _static.undefined_names(iv)
+    if names is None:
+        typer.secho("  pyflakes is not installed, so undefined names were NOT checked",
+                    fg="yellow")
+    for line in names or ():
+        bad.append(f"UNDEFINED NAME  {line}")
+    for line in _static.missing_imports(iv):
+        bad.append(f"MISSING MODULE  {line}")
+    cyc = _graph.find_cycle(g)
+    if cyc:
+        bad.append(f"CYCLE  {cyc}")
+    for b in bad:
+        typer.secho(b, fg="red")
+    if bad:
+        raise typer.Exit(1)
+    typer.secho(f"ok — {len(g.stages)} stages, no cycle, no unreachable name", fg="green")
+
+
+@app.command()
 def check(trace: Path = typer.Option(None, "--trace", help="also diff against a run")):
     g = _graph_of()
     errors, warns = _graph.check(g)
@@ -149,15 +193,24 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out")):
 
 
 def _staleness(iv, g):
+    """The CLI has no running step to ask, so it reads each stage's declared upstreams off
+    the static scan — the same `(dataset, selector, optional)` triples `reads_in` takes off
+    the source at runtime, arrived at the other way round.
+
+    It must NOT fall back to the runtime registry: `_load()` imports the module holding the
+    Pipeline, not the module holding the steps, so nothing would be registered and every
+    dataset would look like a root — which reads as `current` for anything with a file on
+    disk. A green that means "I could not find the question" is worse than a red."""
     out, stale = {}, set()
     for node in g.order():
+        inputs = tuple((s.dataset, s.sel, s.optional) for s in g.stages[node].triggers)
         for site in g.stages[node].outputs:
             name = site.dataset
             if name in out:
                 continue
             d = iv.resolve_out(name)
             parts = sorted(_sh.current_shards(d)) or [""]
-            reasons = [(p, iv.why_stale(name, _sh.decode_part(p) or None))
+            reasons = [(p, iv.why_stale(name, _sh.decode_part(p) or None, inputs=inputs))
                        for p in parts]
             bad = [(p, r) for p, r in reasons if r]
             out[name] = None if not bad else (
@@ -169,6 +222,7 @@ def _staleness(iv, g):
 
 
 @app.command()
+@reports
 def status():
     iv = _load()
     g = _graph_of()
@@ -185,8 +239,10 @@ def status():
 
 
 @app.command()
+@reports
 def why(dataset: str):
     iv = _load()
+    g = _graph_of()
     d = iv.resolve_out(dataset)
     try:
         present = _sh.current_shards(d)
@@ -195,22 +251,30 @@ def why(dataset: str):
     if not present:
         typer.echo(f"{dataset}: nothing on disk")
         raise typer.Exit(1)
-    index = (_sh.read_index(d).get("shards") or {})
+    node = next((n for n, st in g.stages.items()
+                 if any(s.dataset == _canon(dataset) for s in st.outputs)), None)
+    inputs = tuple((s.dataset, s.sel, s.optional)
+                   for s in g.stages[node].triggers) if node else ()
     for part in sorted(present, key=_sh.sort_key):
         sh = present[part]
-        reason = iv.why_stale(dataset, _sh.decode_part(part) or None)
-        typer.echo(f"\n{dataset}{part or '(one shard)'}")
+        reason = iv.why_stale(dataset, _sh.decode_part(part) or None, inputs=inputs)
+        typer.echo(f"\n{_canon(dataset)}{part or '(one shard)'}")
         typer.echo(f"  fp      {sh.fp}")
-        entry = index.get(part, {})
-        for k in ("by", "at", "seconds", "why"):
-            if entry.get(k) not in (None, ""):
-                typer.echo(f"  {k:<7} {entry[k]}")
-        for name, was in sorted((entry.get("inputs") or {}).items()):
-            typer.echo(f"  in      {name:<40} {was.get('id')} ({len(was.get('parts', []))})")
-        for name in entry.get("prior") or ():
-            typer.echo(f"  prior   {name}")
-        for ext in entry.get("external") or ():
-            typer.echo(f"  from    {ext}")
+        typer.echo(f"  key     {sh.key or ('(no key in the name — not written by the '
+                                       'pipeline as it stands)' if node else
+                                       '(a root — nothing here derives it)')}")
+        if node:
+            typer.echo(f"  by      {node}")
+        # A key does not invert, so this cannot say which input moved. It says what the
+        # upstreams are RIGHT NOW, which is the same question asked forwards.
+        for name, sel, _ in inputs:
+            live = _sh.current_shards(iv.resolve(name))
+            try:
+                got = _sh.select(live, _resolve_sel(sel, _sh.decode_part(part) or None,
+                                                    name), dataset=name)
+            except IvError:
+                got = []
+            typer.echo(f"  in      {name:<40} {_sh.dataset_id(got)} ({len(got)})")
         if reason:
             typer.secho(f"  stale: {reason}", fg="yellow")
         else:
@@ -218,6 +282,7 @@ def why(dataset: str):
 
 
 @app.command()
+@reports
 def plan():
     iv = _load()
     g = _graph_of()
@@ -242,6 +307,24 @@ def plan():
 
 
 @app.command()
+@reports
+def verify(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
+    """Re-fingerprint every shard and check it still matches the name it is filed under."""
+    iv = _load()
+    g = _graph_of()
+    bad = []
+    for name in ([dataset] if dataset else g.produced):
+        if iv.resolve_out(name).exists():
+            bad += [f"{name}{line}" for line in iv.verify(name)]
+    for b in bad:
+        typer.secho(b, fg="red")
+    if bad:
+        raise typer.Exit(1)
+    typer.secho("ok — every shard matches its name", fg="green")
+
+
+@app.command()
+@reports
 def gc(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
     iv = _load()
     g = _graph_of()
