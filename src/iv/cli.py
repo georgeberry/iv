@@ -226,9 +226,14 @@ def _staleness(iv, g):
 def status():
     iv = _load()
     g = _graph_of()
-    reasons, stale = _staleness(iv, g)
+    # Nothing here writes, so one view of the tree answers every question — without it the
+    # same input directory is re-listed once per partition of every dataset that reads it.
+    with _sh.snapshot():
+        reasons, stale = _staleness(iv, g)
+        counts = {name: (len(_sh.current_shards(iv.resolve_out(name))) if not why else 0)
+                  for name, why in reasons.items()}
     for name, why in reasons.items():
-        n = len(_sh.current_shards(iv.resolve_out(name))) if not why else 0
+        n = counts[name]
         if why:
             typer.secho(f"  stale    {name:<44} {why}", fg="yellow")
         else:
@@ -255,30 +260,33 @@ def why(dataset: str):
                  if any(s.dataset == _canon(dataset) for s in st.outputs)), None)
     inputs = tuple((s.dataset, s.sel, s.optional)
                    for s in g.stages[node].triggers) if node else ()
-    for part in sorted(present, key=_sh.sort_key):
-        sh = present[part]
-        reason = iv.why_stale(dataset, _sh.decode_part(part) or None, inputs=inputs)
-        typer.echo(f"\n{_canon(dataset)}{part or '(one shard)'}")
-        typer.echo(f"  fp      {sh.fp}")
-        typer.echo(f"  key     {sh.key or ('(no key in the name — not written by the '
-                                       'pipeline as it stands)' if node else
-                                       '(a root — nothing here derives it)')}")
-        if node:
-            typer.echo(f"  by      {node}")
-        # A key does not invert, so this cannot say which input moved. It says what the
-        # upstreams are RIGHT NOW, which is the same question asked forwards.
-        for name, sel, _ in inputs:
-            live = _sh.current_shards(iv.resolve(name))
-            try:
-                got = _sh.select(live, _resolve_sel(sel, _sh.decode_part(part) or None,
-                                                    name), dataset=name)
-            except IvError:
-                got = []
-            typer.echo(f"  in      {name:<40} {_sh.dataset_id(got)} ({len(got)})")
-        if reason:
-            typer.secho(f"  stale: {reason}", fg="yellow")
-        else:
-            typer.secho("  current", fg="green")
+    # One view of the tree for the whole report: every partition asks the same upstream
+    # directories the same question, and nothing here writes.
+    with _sh.snapshot():
+        for part in sorted(present, key=_sh.sort_key):
+            sh = present[part]
+            reason = iv.why_stale(dataset, _sh.decode_part(part) or None, inputs=inputs)
+            typer.echo(f"\n{_canon(dataset)}{part or '(one shard)'}")
+            typer.echo(f"  fp      {sh.fp}")
+            typer.echo(f"  key     {sh.key or ('(no key in the name — not written by the '
+                                           'pipeline as it stands)' if node else
+                                           '(a root — nothing here derives it)')}")
+            if node:
+                typer.echo(f"  by      {node}")
+            # A key does not invert, so this cannot say which input moved. It says what the
+            # upstreams are RIGHT NOW, which is the same question asked forwards.
+            for name, sel, _ in inputs:
+                live = _sh.current_shards(iv.resolve(name))
+                try:
+                    got = _sh.select(live, _resolve_sel(sel, _sh.decode_part(part) or None,
+                                                        name), dataset=name)
+                except IvError:
+                    got = []
+                typer.echo(f"  in      {name:<40} {_sh.dataset_id(got)} ({len(got)})")
+            if reason:
+                typer.secho(f"  stale: {reason}", fg="yellow")
+            else:
+                typer.secho("  current", fg="green")
 
 
 @app.command()
@@ -286,7 +294,8 @@ def why(dataset: str):
 def plan():
     iv = _load()
     g = _graph_of()
-    reasons, stale = _staleness(iv, g)
+    with _sh.snapshot():
+        reasons, stale = _staleness(iv, g)
     if not stale:
         typer.echo("nothing to do")
         return

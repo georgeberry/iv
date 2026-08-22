@@ -278,6 +278,12 @@ class Pipeline:
         patched._iv_read_checked = True
         return patched
 
+    def snapshot(self):
+        """A consistent, memoised view of the tree for a read-only pass — see
+        `shards.snapshot`. Wrap a loop that asks `is_current` many times in it; never wrap
+        anything that writes, because a commit would not be seen."""
+        return _sh.snapshot()
+
     def verify(self, dataset: str) -> list[str]:
         with self.bookkeeping():
             out = []

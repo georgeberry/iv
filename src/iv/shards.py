@@ -6,6 +6,8 @@ import os
 import re
 import shutil
 import tempfile
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -29,6 +31,34 @@ _BAD_IN_VALUE = (".", "=", "/", "\\", PART_SEP)
 _NUM = re.compile(r"(\d+)")
 
 _HEX = re.compile(rf"^[0-9a-f]{{{DIGEST_LEN}}}$")
+
+#: Thread-local so a snapshot taken for a read-only pass cannot leak into a thread that
+#: is committing. Absent (None) means no snapshot is open and every listing is live.
+_local = threading.local()
+
+
+@contextmanager
+def snapshot():
+    """Memoise `current_shards` for the duration of a READ-ONLY pass over the tree.
+
+    `iv status` asks "is this current" once per partition of every dataset, and each of
+    those recomputes a key, and each key re-lists the directory of every upstream. So one
+    input directory is listed once per partition of every dataset that reads it, and each
+    of those listings is itself O(partitions) — quadratic work for an answer that cannot
+    change, because nothing is being written.
+
+    Only correct where nothing writes. A commit changes what is current and a cached view
+    would not see it, so this is opt-in rather than the default: `commit` and `gc` go
+    through `list_shards`, which is never memoised and always sees the tree as it is.
+    """
+    if getattr(_local, "cache", None) is not None:
+        yield          # already inside one — reuse it rather than take a second view
+        return
+    _local.cache = {}
+    try:
+        yield
+    finally:
+        _local.cache = None
 
 
 def encode_part(part: dict[str, object] | None) -> str:
@@ -188,6 +218,11 @@ def list_shards(dataset_dir) -> dict[str, list[Shard]]:
 
 
 def current_shards(dataset_dir) -> dict[str, Shard]:
+    cache = getattr(_local, "cache", None)
+    if cache is not None:
+        hit = cache.get(str(dataset_dir))
+        if hit is not None:
+            return hit
     out: dict[str, Shard] = {}
     for part_str, shards in list_shards(dataset_dir).items():
         if len(shards) > 1:
@@ -197,6 +232,8 @@ def current_shards(dataset_dir) -> dict[str, Shard]:
                 f"{part_str or '(none)'}: {names}. A commit was interrupted. Run `iv gc` to "
                 f"drop the superseded one — this cannot be resolved by guessing.")
         out[part_str] = shards[0]
+    if cache is not None:
+        cache[str(dataset_dir)] = out
     return out
 
 
