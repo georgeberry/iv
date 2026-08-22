@@ -167,7 +167,17 @@ class Pipeline:
             self._check_updates_own(name)
         with self.bookkeeping():
             present = _sh.current_shards(self.resolve(name))
-        sel = _sh.select(present, where, dataset=name)
+        try:
+            sel = _sh.select(present, where, dataset=name)
+        except StateError:
+            # An explicit list is a COVERAGE CLAIM, and a value that is not there is a fact
+            # worth saying out loud — unless the read is optional, which is how a stage says
+            # the half it did not take is not its business. `key_of` has always read it that
+            # way; this did not, so a stage could be told its key was fine and then raise
+            # opening the same read. Two answers is one too many.
+            if not optional:
+                raise
+            sel = []
         if not sel and not optional:
             raise StateError(
                 f"{name} selected no shards"
@@ -545,19 +555,29 @@ class Pipeline:
         off its source, exactly as before.
         """
         _why(why, "step")
-        if outputs is not None:
-            def decorate_declared(fn: Callable) -> _assets.Asset:
-                return self._register(_assets.Asset(
-                    self, outputs, fn, why=why, part=part, ext=ext, terminal=terminal,
-                    allow_missing=allow_missing, if_needed=if_needed, once=once,
-                    split=split, single=isinstance(outputs, str), external=external))
-            return decorate_declared
-        if part is not None and not isinstance(part, dict):
-            raise DeclError(
-                "a scanned @iv.step takes part= as a literal dict. A partition KEY belongs "
-                "to the declared form, which also needs outputs=.")
 
-        def decorate(fn: Callable) -> Callable:
+        def declared(fn: Callable) -> _assets.Asset:
+            return self._register(_assets.Asset(
+                self, outputs, fn, why=why, part=part, ext=ext, terminal=terminal,
+                allow_missing=allow_missing, if_needed=if_needed, once=once,
+                split=split, single=isinstance(outputs, str), external=external))
+
+        if outputs is not None:
+            return declared
+        if external is not None:
+            return declared
+
+        def decorate(fn: Callable):
+            # A signature carrying reads IS the declaration, whatever else was passed — a
+            # fetch or a publish writes nothing into the tree and still has upstreams
+            # worth drawing.
+            if _assets.has_declared_reads(fn):
+                return declared(fn)
+            if part is not None and not isinstance(part, dict):
+                raise DeclError(
+                    "a scanned @iv.step takes part= as a literal dict. A partition KEY "
+                    "belongs to the declared form, which reads its upstreams from the "
+                    "signature.")
             outputs = writes_in(fn)
             inputs = reads_in(fn)
             node_name = self._node_name(fn)

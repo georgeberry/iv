@@ -563,3 +563,43 @@ def test_an_external_source_is_declared_and_drawn(iv):
     g = _graph.build(iv)
     node = next(n for n in g.stages if n.endswith("::feed"))
     assert [s.dataset for s in g.stages[node].externals] == ["external:espn/feeds"]
+
+
+# ── a stage that writes nothing ───────────────────────────────────────────────
+
+def test_a_stage_may_write_nothing_and_still_declare_what_it_reads(iv):
+    """A fetch fills a download cache; a publish uploads. Neither leaves an artifact iv
+    names, so there is nothing to be stale and nothing to skip on — but the reads are
+    still worth declaring, or the graph cannot draw the edge."""
+    ran = []
+
+    @iv.data("dump/site/", why="the payload", terminal=True)
+    def site():
+        return frame()
+
+    @iv.step(why="copy the payload somewhere outside the tree",
+             external={"gs://bucket": "the bucket the app reads"})
+    def publish(payload=iv.all_of("dump/site/", load=False, why="what to upload")):
+        ran.append(list(payload))
+
+    site()
+    assert publish() is True and len(ran) == 1
+    assert publish() is True and len(ran) == 2, "nothing on disk can say it is done"
+    assert ran[0] and str(ran[0][0]).endswith(".parquet"), "it was handed the paths"
+
+    g = _graph.build(iv)
+    node = next(n for n in g.stages if n.endswith("::publish"))
+    assert [s.dataset for s in g.stages[node].triggers] == ["dump/site/"]
+    assert [s.dataset for s in g.stages[node].externals] == ["external:gs://bucket"]
+    assert not g.stages[node].outputs
+    errors, warns = _graph.check(g)
+    assert not errors, errors
+    assert not [w for w in warns if "RUNS ONCE" in w], (
+        "it writes nothing, so there is no artifact for the warning to be about")
+
+
+def test_a_stage_that_writes_nothing_has_no_partition(iv):
+    with pytest.raises(DeclError, match="no shard for part= to name"):
+        @iv.step(why="writes nothing but claims a partition", part="season")
+        def act(x=iv.all_of("raw/feed/", why="something")):
+            pass

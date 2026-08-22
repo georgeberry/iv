@@ -153,7 +153,15 @@ def output(dataset: str, *, ext: str = _sh.EXT, terminal: bool = False,
 
 
 def _outputs(spec, ext, terminal, allow_missing) -> dict:
-    """`outputs=` as {key: Output}. A bare string is the one-output case."""
+    """`outputs=` as {key: Output}. A bare string is the one-output case.
+
+    None is a stage that writes NOTHING — a fetch that fills a download cache, a publish
+    that uploads. There is no artifact to be stale, so there is nothing to skip on and it
+    runs every time. Its reads are still declared, so the graph draws the edges and
+    `iv check` can still say the thing it reads has no producer.
+    """
+    if spec is None:
+        return {}
     if isinstance(spec, str):
         d = _decl._canon(spec)
         return {d: Output(d, ext, terminal, allow_missing)}
@@ -190,6 +198,7 @@ class Asset:
         self.outputs = _outputs(outputs, ext, terminal, allow_missing)
         self.single = single
         self.fn = fn
+        self.acts_only = not self.outputs
         self.why = _decl._why(why, self.primary)
         self.if_needed = if_needed
         self.once = once
@@ -201,6 +210,9 @@ class Asset:
                 f"once and returns {{partition: value}}, so it needs a partition key — "
                 f"@iv.step(..., part='season', split=True).")
         check_signature(fn, self.part_key, self.primary)
+        if self.acts_only and (self.split or self.part_key or self.fixed_part):
+            raise DeclError(
+                f"{self.primary} writes nothing, so it has no shard for part= to name.")
         self.reads = declared_reads(fn, self.part_key)
         self.externals = _externals(external, self.primary)
         self.wants_out = OUT_PARAM in inspect.signature(fn).parameters
@@ -214,6 +226,8 @@ class Asset:
 
     @property
     def primary(self) -> str:
+        if not self.outputs:
+            return getattr(self.fn, "__name__", "<stage>")
         return next(iter(self.outputs.values())).dataset
 
     @property
@@ -262,7 +276,7 @@ class Asset:
         fetch too expensive to repeat says once=True, and then it is the caller who has
         decided that nothing new can arrive.
         """
-        return bool(self.triggers) or self.once
+        return bool(self.outputs) and (bool(self.triggers) or self.once)
 
     # ── deciding ──────────────────────────────────────────────────────────────
 
@@ -290,6 +304,9 @@ class Asset:
     def why_stale(self, *args, **kwargs) -> str | None:
         """Stale if ANY output is. Losing one table of a six-table fit brings the fit back."""
         part = self._part(args, kwargs)
+        if self.acts_only:
+            # Nothing was written, so there is nothing on disk to compare a key against.
+            return "writes nothing, so nothing can say it is done"
         for o in self.outputs.values():
             r = self.pipeline.why_stale(o.dataset, dict(o.part) if o.part else part,
                                         inputs=self.triples())
@@ -313,6 +330,8 @@ class Asset:
                 and self.why_stale(*args, **kwargs) is None):
             return self.load(part) if self.single and not self.split else False
         self.build(part)
+        if self.acts_only:
+            return True
         return self.load(part) if self.single and not self.split else True
 
     def build(self, part: dict | None) -> None:
@@ -332,6 +351,9 @@ class Asset:
                                allow_missing=o.allow_missing) as staged:
                     kw[OUT_PARAM] = staged
                     self.fn(**kw)
+                return
+            if self.acts_only:
+                self.fn(**kw)
                 return
             value = self.fn(**kw)
             if value is None:

@@ -764,3 +764,26 @@ def test_updating_a_dataset_this_stage_does_not_write_is_refused(iv):
 
     with pytest.raises(DeclError, match="but this stage writes processed/cohorts/"):
         build()
+
+
+def test_an_optional_coverage_claim_is_answered_the_same_way_twice(iv):
+    """`key_of` and `reads` must agree about a named partition that is not there.
+
+    An explicit list is a coverage claim, so a missing value is an error — but `optional=`
+    says the half this stage did not take is not its business, and `key_of` has always read
+    it that way. `reads` did not, so the skip check could call a stage current and the very
+    same read then raise.
+    """
+    seed(iv, "raw/feed/", part={"half": "a"})
+    sel = (("half", ("in", ("a", "b"))),)
+
+    # The key: the missing half is not this stage's business.
+    assert iv.key_of("processed/out/", None, (("raw/feed/", sel, True),))
+
+    # The read: the same answer, rather than an error the key said would not come.
+    assert iv.reads("raw/feed/", why="both halves if they are there",
+                    where={"half": ["a", "b"]}, optional=True) == []
+
+    with pytest.raises(StateError, match="coverage claim"):
+        iv.reads("raw/feed/", why="both halves, required",
+                 where={"half": ["a", "b"]})
