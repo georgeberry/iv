@@ -210,13 +210,71 @@ def _staleness(iv, g):
         for p in parts:
             part = _sh.decode_part(p) or None
             reasons.append((p, iv.why_stale(name, part, inputs=_owner(owners, part))))
-        bad = [(p, r) for p, r in reasons if r]
-        out[name] = None if not bad else (
-            f"{bad[0][1]}" if len(bad) == 1 and not bad[0][0]
-            else f"{len(bad)}/{len(reasons)} shards: {bad[0][1]}")
-        if bad:
+        out[name] = _summarise(reasons)
+        if out[name] is not None:
             stale.add(name)
     return out, stale
+
+
+def _which(parts: list[str], total: int) -> str:
+    """Name the shards, compactly: a list while it is readable, a range when it is not."""
+    named = sorted(parts, key=_sh.sort_key)
+    if total == 1:
+        return named[0]                      # one shard, so say which rather than count it
+    if len(named) == total:
+        return f"all {total} shards"
+    shown = ", ".join(named[:3]) if len(named) <= 3 else f"{named[0]}..{named[-1]}"
+    return f"{len(named)}/{total} shards ({shown})"
+
+
+def _summarise(reasons: list[tuple]) -> str | None:
+    """One line per dataset, naming WHICH shards are stale and why.
+
+    It used to report `13/21 shards` and whichever reason it found first. That says a
+    rebuild is coming without saying what of — and the two cases it runs together are the
+    ones worth telling apart. A clock moving makes every partition that reads it stale at
+    once, and there the count IS the story; a season backfilled makes one stale, and there
+    the count is the least useful part of it. Shards stale for different reasons are
+    grouped, because "not built yet" and "its inputs moved" are different work.
+    """
+    bad = [(p, r) for p, r in reasons if r]
+    if not bad:
+        return None
+    if len(reasons) == 1 and not bad[0][0]:
+        return bad[0][1]                     # one unpartitioned shard: nothing to name
+    groups: dict[str, list[str]] = {}
+    for part, reason in bad:
+        groups.setdefault(reason, []).append(part or "(one shard)")
+    return "; ".join(f"{_which(parts, len(reasons))}: {reason}"
+                     for reason, parts in groups.items())
+
+
+def _downstream_of(g, stale: set) -> set:
+    """Datasets that read something being rebuilt: current now, and possibly not after.
+
+    POSSIBLY, not certainly, which is the whole reason this is a third state rather than
+    more red. A rebuild that produces the same bytes commits the same shard and stops
+    there, so most of a long tail survives an ordinary daily run untouched — the poll
+    re-fetches, the fetch writes what it wrote yesterday, and nothing below it moves.
+    Reporting that as stale would be a wall of red that is mostly wrong by morning.
+
+    Transitive: the second stage down reads the first and the question is the same one.
+    `order()` is topological, so one pass decides every parent before its children.
+    """
+    writers: dict[str, set] = {}
+    for node, st in g.stages.items():
+        for site in st.outputs:
+            writers.setdefault(site.dataset, set()).add(node)
+    moving = {n for d in stale for n in writers.get(d, ())}
+    parents = g.parent_map()
+    out = set()
+    for node in g.order():
+        if node in moving:
+            continue
+        if any(p in moving for p in parents.get(node, ())):
+            moving.add(node)
+            out.update(s.dataset for s in g.stages[node].outputs if s.dataset not in stale)
+    return out
 
 
 def _owner(owners, part) -> tuple:
@@ -246,13 +304,18 @@ def status():
         reasons, stale = _staleness(iv, g)
         counts = {name: (len(_sh.current_shards(iv.resolve_out(name))) if not why else 0)
                   for name, why in reasons.items()}
+    maybe = _downstream_of(g, stale)
     for name, why in reasons.items():
-        n = counts[name]
         if why:
             typer.secho(f"  stale    {name:<44} {why}", fg="yellow")
+        elif name in maybe:
+            typer.secho(f"  maybe    {name:<44} {counts[name]} shard(s), and reads "
+                        f"something being rebuilt", fg="cyan")
         else:
-            typer.secho(f"  current  {name:<44} {n} shard(s)", fg="green")
-    typer.echo(f"\n{len(reasons) - len(stale)}/{len(reasons)} current")
+            typer.secho(f"  current  {name:<44} {counts[name]} shard(s)", fg="green")
+    settled = len(reasons) - len(stale) - len(maybe)
+    tail = f", {len(maybe)} may follow" if maybe else ""
+    typer.echo(f"\n{settled}/{len(reasons)} current{tail}")
     if stale:
         raise typer.Exit(1)
 
@@ -313,20 +376,12 @@ def plan():
     if not stale:
         typer.echo("nothing to do")
         return
-    parents = g.parent_map()
-    writers = {s.dataset: n for n, st in g.stages.items() for s in st.outputs}
-    downstream = set()
-    for node in g.order():
-        ps = parents.get(node, [])
-        if any(writers.get(name) in ps for name in stale if writers.get(name)):
-            for s in g.stages[node].outputs:
-                if s.dataset not in stale:
-                    downstream.add(s.dataset)
+    downstream = _downstream_of(g, stale)
     for name, r in reasons.items():
         if r:
             typer.secho(f"  rebuild  {name:<44} {r}", fg="yellow")
     for name in sorted(downstream):
-        typer.secho(f"  maybe    {name:<44} (downstream of a rebuild)", fg="cyan")
+        typer.secho(f"  maybe    {name:<44} (reads something being rebuilt)", fg="cyan")
 
 
 @app.command()

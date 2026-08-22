@@ -14,7 +14,9 @@ import polars as pl
 import pytest
 
 from iv import graph as _graph
-from iv.cli import _staleness
+from iv.cli import _downstream_of, _staleness
+from iv.core import Pipeline
+
 from tests.conftest import write_stage
 
 
@@ -283,3 +285,51 @@ def test_each_shard_is_judged_against_the_stage_that_writes_it(tmp_path, monkeyp
 
     for m in ("p", "a", "b"):
         sys.modules.pop(m, None)
+
+
+def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkeypatch):
+    """The clock turns, the poll is stale, and everything below it MIGHT move.
+
+    Might, and usually does not: the poll re-fetches, writes the bytes it wrote yesterday,
+    and the commit is content-addressed so nothing downstream follows. Reporting a whole
+    tail as stale every morning would be a wall of red that is wrong by the time it is read.
+    """
+    for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
+        monkeypatch.delenv(var, raising=False)
+    iv = Pipeline(root=tmp_path / "data", stage_dir=tmp_path / "stage",
+                  project_root=tmp_path)
+    day = ["day1"]
+
+    @iv.data("config/today/", why="the clock", ext=".json")
+    def today():
+        return {"date": day[0]}
+
+    @iv.data("raw/feed/", why="a polled feed")
+    def feed(clock=iv.all_of("config/today/", load=False, why="poll once a day")):
+        return pl.DataFrame({"a": [1]})
+
+    @iv.data("processed/mid/", why="the middle")
+    def mid(f=iv.all_of("raw/feed/", why="the feed")):
+        return f
+
+    @iv.data("dump/site/", why="the app reads it", terminal=True)
+    def site(m=iv.all_of("processed/mid/", why="the middle")):
+        return m
+
+    today(); feed(); mid(); site()
+    g = _graph.build(iv)
+    _, stale = _staleness(iv, g)
+    assert stale == set() and _downstream_of(g, stale) == set()
+
+    day[0] = "day2"
+    today()                      # the clock is a root; running it is how the day lands
+    reasons, stale = _staleness(iv, g)
+    maybe = _downstream_of(g, stale)
+    assert stale == {"raw/feed/"}, "only the thing that reads the clock is stale"
+    assert maybe == {"processed/mid/", "dump/site/"}, "the tail is transitive, and a maybe"
+    assert reasons["processed/mid/"] is None, "a maybe is still current on disk"
+
+    feed()                       # re-polls, writes the same bytes, and stops there
+    _, stale = _staleness(iv, g)
+    assert stale == set() and _downstream_of(g, stale) == set(), \
+        "the maybe was right to be a maybe"

@@ -158,7 +158,7 @@ instance = "mypkg.pipeline:iv"
 
 | command | what it does |
 | --- | --- |
-| `iv status` | what each dataset is, and whether it is current |
+| `iv status` | `current`, `maybe`, or `stale` per dataset — and which shards |
 | `iv plan` | what would rebuild, and what sits downstream of a rebuild |
 | `iv why <dataset>` | per-shard: its key, its fp, its upstreams right now, why it is stale |
 | `iv graph` | the DAG as text (`--focus <stage>`, `--full`) |
@@ -169,6 +169,23 @@ instance = "mypkg.pipeline:iv"
 | `iv verify` | re-fingerprint every shard, confirm it matches its name |
 | `iv gc` | drop superseded shards |
 | `iv viz --out dag.png` | draw the DAG |
+
+`iv status` has three answers, not two:
+
+```
+current  raw/box_settled/     3 shard(s)
+stale    raw/box_live/        season=2024: its inputs moved — ...
+maybe    derived/features/    4 shard(s), and reads something being rebuilt
+```
+
+**`maybe` is the useful one.** A rebuild that produces the same bytes commits the same
+shard and stops there, so on an ordinary day the poll re-fetches, writes what it wrote
+yesterday, and nothing below it moves. Reporting that tail as stale would be a wall of red
+that is wrong by the time you read it.
+
+A stale partitioned dataset names **which** shards, so `3/18 shards (season=2024,
+season=2025, season=2026)` tells you which cohorts need refitting rather than only that
+some do.
 
 Set `IV_TRACE=<path>` on a run to record it for `iv drift`.
 
