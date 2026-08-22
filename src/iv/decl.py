@@ -66,6 +66,10 @@ class Read:
     optional: bool = False
     key: str | None = None
     why: str = ""
+    #: False hands the body the selected PATHS instead of their contents — what
+    #: `iv.reads` has always returned. A stage that passes them to something which opens
+    #: them itself, or that concatenates two datasets before reading, wants the paths.
+    load: bool = True
 
     @property
     def is_own(self) -> bool:
@@ -80,7 +84,8 @@ class Read:
                 f"{self.dataset} is read relative to the partition being built, but the "
                 f"stage declares no part=. A partition-relative selector only means "
                 f"something where there is a partition: @iv.data(..., part='season').")
-        return Read(self.dataset, self.kind, self.body, self.optional, part_key, self.why)
+        return Read(self.dataset, self.kind, self.body, self.optional, part_key, self.why,
+                    self.load)
 
     def sel(self) -> tuple:
         """The selector, in the shape `key_of` and `_resolve_sel` already consume."""
@@ -106,21 +111,22 @@ class Read:
 
 # ── the vocabulary ────────────────────────────────────────────────────────────
 
-def all_of(dataset: str, *, why: str, optional: bool = False) -> Read:
+def all_of(dataset: str, *, why: str, optional: bool = False, load: bool = True) -> Read:
     """Every shard. A joint fit reads this way, and that is visible here rather than
     buried in the builder."""
     d = _canon(dataset)
-    return Read(d, "all", (), optional, None, _why(why, d))
+    return Read(d, "all", (), optional, None, _why(why, d), load)
 
 
-def same_part(dataset: str, *, why: str, optional: bool = False) -> Read:
+def same_part(dataset: str, *, why: str, optional: bool = False,
+              load: bool = True) -> Read:
     """The one shard matching the partition being built."""
     d = _canon(dataset)
-    return Read(d, "in", (PART,), optional, None, _why(why, d))
+    return Read(d, "in", (PART,), optional, None, _why(why, d), load)
 
 
 def before_part(dataset: str, *, why: str, inclusive: bool = False,
-                optional: bool = False) -> Read:
+                optional: bool = False, load: bool = True) -> Read:
     """Everything ordered before this partition — a walk-forward bound.
 
     The selector picks FILES, so a cohort physically cannot open a later season. One
@@ -128,17 +134,18 @@ def before_part(dataset: str, *, why: str, inclusive: bool = False,
     """
     d = _canon(dataset)
     return Read(d, "range", (("le" if inclusive else "lt", PART),), optional, None,
-                _why(why, d))
+                _why(why, d), load)
 
 
 def after_part(dataset: str, *, why: str, inclusive: bool = False,
-               optional: bool = False) -> Read:
+               optional: bool = False, load: bool = True) -> Read:
     d = _canon(dataset)
     return Read(d, "range", (("ge" if inclusive else "gt", PART),), optional, None,
-                _why(why, d))
+                _why(why, d), load)
 
 
-def between(dataset: str, *, why: str, optional: bool = False, **bounds) -> Read:
+def between(dataset: str, *, why: str, optional: bool = False, load: bool = True,
+            **bounds) -> Read:
     """A window: between('raw/box/', why='...', ge='2020', lt=iv.PART)."""
     d = _canon(dataset)
     ops = {"lt", "le", "gt", "ge"}
@@ -148,10 +155,11 @@ def between(dataset: str, *, why: str, optional: bool = False, **bounds) -> Read
     if not bounds:
         raise DeclError(f"{d}: between() needs at least one of {sorted(ops)}.")
     body = tuple(sorted((op, v if v == PART else str(v)) for op, v in bounds.items()))
-    return Read(d, "range", body, optional, None, _why(why, d))
+    return Read(d, "range", body, optional, None, _why(why, d), load)
 
 
-def parts(dataset: str, *, why: str, optional: bool = False, **values) -> Read:
+def parts(dataset: str, *, why: str, optional: bool = False, load: bool = True,
+          **values) -> Read:
     """An explicit set, which is a COVERAGE CLAIM: a value that is not there is an error
     rather than a quietly shorter read."""
     d = _canon(dataset)
@@ -165,10 +173,10 @@ def parts(dataset: str, *, why: str, optional: bool = False, **values) -> Read:
     body = tuple(sorted(v if v == PART else str(v) for v in vals))
     if not body:
         raise DeclError(f"{d}: parts() was given no values for {key!r}.")
-    return Read(d, "in", body, optional, key, _why(why, d))
+    return Read(d, "in", body, optional, key, _why(why, d), load)
 
 
-def own_last_copy(dataset: str, *, why: str) -> Read:
+def own_last_copy(dataset: str, *, why: str, load: bool = True) -> Read:
     """The copy of its own output this stage is about to overwrite.
 
     Recorded for lineage and EXCLUDED from the comparison — otherwise the stage would be
@@ -176,4 +184,4 @@ def own_last_copy(dataset: str, *, why: str) -> Read:
     absent is normal on the first run, so it is always optional.
     """
     d = _canon(dataset)
-    return Read(d, "own", (), True, None, _why(why, d))
+    return Read(d, "own", (), True, None, _why(why, d), load)

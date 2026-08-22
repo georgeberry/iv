@@ -201,24 +201,49 @@ def _staleness(iv, g):
     Pipeline, not the module holding the steps, so nothing would be registered and every
     dataset would look like a root — which reads as `current` for anything with a file on
     disk. A green that means "I could not find the question" is worse than a red."""
-    out, stale = {}, set()
+    # WHICH STAGE OWNS WHICH SHARD. Two stages may share a dataset by writing different
+    # partitions of it — the played and the unplayed half of a prediction table, three
+    # blocks of a college feature table — and each has its own upstreams. This used to take
+    # the first writer in the order and judge every shard of the dataset against it, so most
+    # of them were answered with the wrong question: a shard reported stale against inputs
+    # that do not build it, or current against inputs that never move.
+    writers: dict[str, list[tuple]] = {}
     for node in g.order():
         inputs = tuple((s.dataset, s.sel, s.optional) for s in g.stages[node].triggers)
         for site in g.stages[node].outputs:
-            name = site.dataset
-            if name in out:
-                continue
-            d = iv.resolve_out(name)
-            parts = sorted(_sh.current_shards(d)) or [""]
-            reasons = [(p, iv.why_stale(name, _sh.decode_part(p) or None, inputs=inputs))
-                       for p in parts]
-            bad = [(p, r) for p, r in reasons if r]
-            out[name] = None if not bad else (
-                f"{bad[0][1]}" if len(bad) == 1 and not bad[0][0]
-                else f"{len(bad)}/{len(reasons)} shards: {bad[0][1]}")
-            if bad:
-                stale.add(name)
+            writers.setdefault(site.dataset, []).append((tuple(site.part), inputs))
+
+    out, stale = {}, set()
+    for name, owners in writers.items():
+        d = iv.resolve_out(name)
+        parts = sorted(_sh.current_shards(d)) or [""]
+        reasons = []
+        for p in parts:
+            part = _sh.decode_part(p) or None
+            reasons.append((p, iv.why_stale(name, part, inputs=_owner(owners, part))))
+        bad = [(p, r) for p, r in reasons if r]
+        out[name] = None if not bad else (
+            f"{bad[0][1]}" if len(bad) == 1 and not bad[0][0]
+            else f"{len(bad)}/{len(reasons)} shards: {bad[0][1]}")
+        if bad:
+            stale.add(name)
     return out, stale
+
+
+def _owner(owners, part) -> tuple:
+    """The upstreams of the stage that writes THIS shard.
+
+    A writer naming a literal part= owns exactly that shard. One naming none owns whatever
+    is left — a `for_each` does not know its keys until it runs, so it cannot name them.
+    """
+    if part:
+        for fixed, inputs in owners:
+            if fixed and all(str(part.get(k)) == v for k, v in fixed):
+                return inputs
+    for fixed, inputs in owners:
+        if not fixed:
+            return inputs
+    return owners[0][1]
 
 
 @app.command()

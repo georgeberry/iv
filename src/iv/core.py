@@ -359,7 +359,13 @@ class Pipeline:
                 pairs.append((name, _sh.dataset_id(got)))
         if not inputs:
             return ""
-        body = "|".join(f"{n}={i}" for n, i in sorted(pairs))
+        # DEDUPED, because the same upstream can arrive twice. A stage that branches —
+        # the W draft and the NBA draft read the same box scores for different reasons —
+        # has two call sites for one dataset, and the scan reports a site each while
+        # `reads_in` reports the set. Folding it in twice makes a different key, so
+        # `iv status` called such a stage stale forever while the run, asking the same
+        # question the other way round, skipped it. Two answers is one too many.
+        body = "|".join(f"{n}={i}" for n, i in sorted(set(pairs)))
         return _sh._short(f"key:{dataset}|{_sh.encode_part(part)}|{body}")
 
 
@@ -503,8 +509,8 @@ class Pipeline:
                 # three blocks of a college feature table, the played and unplayed halves
                 # of a prediction table. Without a literal part= on both, whichever ran
                 # last would simply win.
-                if asset.fixed_part and other.fixed_part \
-                        and asset.fixed_part != other.fixed_part:
+                mine, theirs = asset.part_for(name), other.part_for(name)
+                if mine and theirs and mine != theirs:
                     continue
                 raise DeclError(
                     f"{name} is already written by {other.__name__!r}. Two stages may "

@@ -89,7 +89,16 @@ def build(iv) -> Graph:
             nodes[node.name] = node
     for node in declared_nodes(iv):
         nodes[node.name] = node
-    return Graph(iv=iv, stages=nodes)
+    # Back into SOURCE order. Within one file definition order is run order, and the ORDER
+    # check holds it to being topological — so a declared stage appended after the scanned
+    # ones would read as defined last however near the top of the file it sits, and every
+    # scanned stage reading it would look out of order.
+    ordered = sorted(nodes.values(), key=lambda n: (n.file, _first_line(n), n.fn))
+    return Graph(iv=iv, stages={n.name: n for n in ordered})
+
+
+def _first_line(node) -> int:
+    return min((s.line for s in node.sites), default=0)
 
 
 def declared_nodes(iv) -> list[_static.Node]:
@@ -121,8 +130,8 @@ def declared_nodes(iv) -> list[_static.Node]:
         for o in asset.outputs.values():
             sites.append(
                 _static.Site(kind="write", dataset=o.dataset, why=asset.why, file=rel,
-                             line=_line_of(asset.fn), terminal=o.terminal, part=fixed,
-                             owner=fn_name))
+                             line=_line_of(asset.fn), terminal=o.terminal,
+                             part=(o.part or fixed), owner=fn_name))
         # `guarded` is "has a skip check that could be fooled". A root asset has no
         # upstream to be stale against and runs every time, which is how anything outside
         # the tree gets in — so it is not guarded, and the RUNS ONCE warning below is not

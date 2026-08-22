@@ -126,15 +126,20 @@ def check_signature(fn, part_key: str | None, dataset: str) -> None:
 
 @dataclass(frozen=True)
 class Output:
-    """One dataset a stage writes, and how."""
+    """One dataset a stage writes, and how.
+
+    `part` is the literal shard THIS output owns, where it differs from the stage's. One
+    computation can produce a whole dataset and one block of a shared one.
+    """
     dataset: str
     ext: str = _sh.EXT
     terminal: bool = False
     allow_missing: bool = False
+    part: tuple = ()
 
 
 def output(dataset: str, *, ext: str = _sh.EXT, terminal: bool = False,
-           allow_missing: bool = False) -> Output:
+           allow_missing: bool = False, part: dict | None = None) -> Output:
     """One output of a multi-output stage, where it differs from the others.
 
     A joint fit usually has one table something downstream reads and several that only a
@@ -143,7 +148,8 @@ def output(dataset: str, *, ext: str = _sh.EXT, terminal: bool = False,
         outputs={"ratings": "processed/xpm/",
                  "summary": iv.output("processed/xpm_summary/", terminal=True)}
     """
-    return Output(_decl._canon(dataset), ext, terminal, allow_missing)
+    fixed = tuple(sorted((str(k), str(v)) for k, v in part.items())) if part else ()
+    return Output(_decl._canon(dataset), ext, terminal, allow_missing, fixed)
 
 
 def _outputs(spec, ext, terminal, allow_missing) -> dict:
@@ -159,7 +165,8 @@ def _outputs(spec, ext, terminal, allow_missing) -> dict:
     out = {}
     for k, v in spec.items():
         if isinstance(v, Output):
-            out[k] = Output(_decl._canon(v.dataset), v.ext, v.terminal, v.allow_missing)
+            out[k] = Output(_decl._canon(v.dataset), v.ext, v.terminal, v.allow_missing,
+                            v.part)
         else:
             out[k] = Output(_decl._canon(v), ext, terminal, allow_missing)
     return out
@@ -193,10 +200,6 @@ class Asset:
                 f"{self.primary}: split=True means the body computes every partition at "
                 f"once and returns {{partition: value}}, so it needs a partition key — "
                 f"@iv.step(..., part='season', split=True).")
-        if split and not self.single:
-            raise DeclError(
-                f"{self.primary}: split=True and several outputs cannot both key the "
-                f"returned dict. Split one dataset per stage.")
         check_signature(fn, self.part_key, self.primary)
         self.reads = declared_reads(fn, self.part_key)
         self.externals = _externals(external, self.primary)
@@ -216,6 +219,19 @@ class Asset:
     @property
     def datasets(self) -> tuple:
         return tuple(o.dataset for o in self.outputs.values())
+
+    def part_for(self, dataset: str) -> tuple:
+        """The literal shard this stage owns OF THIS DATASET, if it owns one.
+
+        An output may name its own, which is what lets one computation write a whole
+        dataset and one block of a shared one.
+        """
+        for o in self.outputs.values():
+            if o.dataset == dataset:
+                if o.part:
+                    return o.part
+                break
+        return tuple(sorted(self.fixed_part.items())) if self.fixed_part else ()
 
     def __repr__(self) -> str:
         p = f", part={self.part_key or self.fixed_part!r}" if (self.part_key or self.fixed_part) else ""
@@ -275,7 +291,8 @@ class Asset:
         """Stale if ANY output is. Losing one table of a six-table fit brings the fit back."""
         part = self._part(args, kwargs)
         for o in self.outputs.values():
-            r = self.pipeline.why_stale(o.dataset, part, inputs=self.triples())
+            r = self.pipeline.why_stale(o.dataset, dict(o.part) if o.part else part,
+                                        inputs=self.triples())
             if r:
                 return f"{o.dataset}: {r}" if len(self.outputs) > 1 else r
         return None
@@ -333,6 +350,7 @@ class Asset:
             iv._fresh_scope()
 
     def _commit(self, o: Output, value, part) -> None:
+        part = dict(o.part) if o.part else part
         with self.pipeline.writes(o.dataset, why=self.why, part=part, ext=o.ext,
                                   terminal=o.terminal,
                                   allow_missing=o.allow_missing) as staged:
@@ -362,15 +380,43 @@ class Asset:
                 self._commit(o, value[key], part)
 
     def _commit_split(self, value) -> None:
-        """One computation, many shards: the body returns {partition: value}."""
+        """One computation, many shards.
+
+        With one output the body returns {partition: value}. With several it returns
+        {output: {partition: value}} — a walk-forward evaluation computes team, possession
+        and player accuracy in one pass and cuts each by season.
+        """
+        shape = (f"{{{self.part_key}: value}}" if self.single
+                 else f"{{output: {{{self.part_key}: value}}}}, one per {sorted(self.outputs)}")
         if not isinstance(value, dict):
             raise DeclError(
-                f"{self.primary}: split=True means the body returns "
-                f"{{{self.part_key}: value}} for every partition it computed, got "
-                f"{type(value).__name__}.")
-        o = next(iter(self.outputs.values()))
-        for key, v in value.items():
-            self._commit(o, v, {self.part_key: str(key)})
+                f"{self.primary}: split=True means the body returns {shape} for every "
+                f"partition it computed, got {type(value).__name__}.")
+        if self.single:
+            o = next(iter(self.outputs.values()))
+            for key, v in value.items():
+                self._commit(o, v, {self.part_key: str(key)})
+            return
+        extra = sorted(set(value) - set(self.outputs))
+        if extra:
+            raise DeclError(
+                f"{self.__name__} returned {extra}, which it does not declare as outputs. "
+                f"Declared: {sorted(self.outputs)}.")
+        for key, o in self.outputs.items():
+            by_part = value.get(key)
+            if by_part is None:
+                if o.allow_missing:
+                    continue
+                raise DeclError(
+                    f"{self.__name__} declares the output {key!r} ({o.dataset}) and did "
+                    f"not return it. Pass allow_missing=True if producing nothing there "
+                    f"is legitimate.")
+            if not isinstance(by_part, dict):
+                raise DeclError(
+                    f"{self.__name__} returned {key!r} as {type(by_part).__name__}; with "
+                    f"split=True each output is {{{self.part_key}: value}}.")
+            for part_val, v in by_part.items():
+                self._commit(o, v, {self.part_key: str(part_val)})
 
     def _resolve(self, part: dict | None) -> dict:
         """Each declared read, opened — through `Pipeline.reads`, so the recording, the
@@ -388,7 +434,10 @@ class Asset:
             paths = iv.reads(r.dataset, why=r.why,
                              where=_resolve_sel(r.sel(), part, r.dataset),
                              optional=r.optional, update_file_on_disk=r.is_own)
-            kw[name] = load_value(paths, _ext_of(paths, _sh.EXT)) if paths else None
+            if not r.load:
+                kw[name] = list(paths)          # what iv.reads has always handed back
+            else:
+                kw[name] = load_value(paths, _ext_of(paths, _sh.EXT)) if paths else None
         return kw
 
     def load(self, part: dict | None = None):

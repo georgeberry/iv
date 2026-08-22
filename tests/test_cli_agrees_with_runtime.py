@@ -174,3 +174,112 @@ def test_the_cli_answer_does_not_change_under_a_snapshot(project):
     with iv.snapshot():
         cached = cli_says(iv)
     assert cached == live
+
+
+BRANCHY = '''
+import polars as pl
+from p import iv
+
+@iv.step(why="reads one dataset from two call sites")
+def build():
+    if pl.__version__:
+        df = pl.read_parquet(iv.reads("raw/feed/", why="the upstream, one way"))
+    else:
+        df = pl.read_parquet(iv.reads("raw/feed/", why="the upstream, the other way"))
+    with iv.writes("processed/mid/", why="the middle") as out:
+        df.write_parquet(out)
+'''
+
+
+def test_one_dataset_read_at_two_call_sites_gets_one_answer(tmp_path, monkeypatch):
+    """A branching stage reads the same upstream twice, for two different reasons.
+
+    `reads_in` reports the SET of what a stage reads; the scan reports a site per call.
+    Folded into the key twice that is a different digest, so `iv status` called the stage
+    stale forever while the run skipped it — a disagreement neither side could see.
+    """
+    for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "d"\nversion = "0"\n')
+    write_stage(tmp_path, "p.py", PIPE)
+    write_stage(tmp_path, "stages/branchy.py", BRANCHY)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.syspath_prepend(str(tmp_path / "stages"))
+    for m in ("p", "branchy"):
+        sys.modules.pop(m, None)
+    import p
+    import branchy
+
+    seed(p.iv)
+    assert branchy.build() is True
+    assert branchy.build() is False, "the run considers it current"
+
+    reasons, _ = _staleness(p.iv, _graph.build(p.iv))
+    assert reasons["processed/mid/"] is None, (
+        f"the CLI disagrees with the run: {reasons['processed/mid/']}")
+
+    for m in ("p", "branchy"):
+        sys.modules.pop(m, None)
+
+
+SHARED_A = '''
+import polars as pl
+from p import iv
+
+@iv.data("processed/preds/", part={"completed": "true"},
+         why="one row per game played")
+def played(df=iv.all_of("raw/feed/", why="the played upstream")):
+    return df
+'''
+
+SHARED_B = '''
+import polars as pl
+from p import iv
+
+@iv.data("processed/preds/", part={"completed": "false"},
+         why="one row per game not yet played")
+def upcoming(df=iv.all_of("raw/other/", why="the unplayed upstream")):
+    return df
+'''
+
+
+def test_each_shard_is_judged_against_the_stage_that_writes_it(tmp_path, monkeypatch):
+    """Two stages, two shards, one dataset — and two different upstreams.
+
+    `iv status` used to take the first writer it found and judge every shard of the dataset
+    against it, so moving what only the SECOND writer reads was answered with the first
+    one's question. Each stage names the shard it owns, so each shard has an owner to ask.
+    """
+    for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "d"\nversion = "0"\n')
+    write_stage(tmp_path, "p.py", PIPE)
+    write_stage(tmp_path, "stages/a.py", SHARED_A)
+    write_stage(tmp_path, "stages/b.py", SHARED_B)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.syspath_prepend(str(tmp_path / "stages"))
+    for m in ("p", "a", "b"):
+        sys.modules.pop(m, None)
+    import a
+    import b
+    import p
+
+    seed(p.iv)
+    with p.iv.writes("raw/other/", why="the other feed") as out:
+        pl.DataFrame({"a": [1]}).write_parquet(out)
+    a.played()
+    b.upcoming()
+    assert cli_says(p.iv)["processed/preds/"] is False
+
+    # Move ONLY what the unplayed half reads.
+    with p.iv.writes("raw/other/", why="the other feed") as out:
+        pl.DataFrame({"a": [1, 2, 3]}).write_parquet(out)
+
+    assert cli_says(p.iv)["processed/preds/"] is True, "the unplayed half is stale"
+    assert a.played.is_current(), "the played half reads nothing that moved"
+    assert not b.upcoming.is_current(), "the unplayed half must rebuild"
+    b.upcoming()
+    assert cli_says(p.iv)["processed/preds/"] is False
+
+    for m in ("p", "a", "b"):
+        sys.modules.pop(m, None)

@@ -337,3 +337,15 @@ def build():
                               project_root=project))
     assert g.producers_of("processed/xpm/") == ["w/fit.py::build"]
     assert _graph.check(g)[0] == []
+
+
+def test_preflight_works_when_source_dirs_names_a_file(project, tmp_path):
+    """`source_dirs=["pipeline.py"]` is the shape the docstring recommends, and it used to
+    raise TypeError: the file branch tried to file its result in a dict, copied from `scan`
+    where there is one — but here the target is the report pyflakes writes into."""
+    write_stage(project, "one.py", "from p import iv\n\n" + MID + "\nx = undefined_thing\n")
+    iv = Pipeline(root=project / "data", source_dirs=["one.py"], project_root=project)
+    names = _static.undefined_names(iv)
+    if names is None:
+        pytest.skip("pyflakes is not installed")
+    assert any("undefined name" in n and "undefined_thing" in n for n in names)

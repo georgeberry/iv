@@ -483,18 +483,17 @@ def undefined_names(iv) -> list[str] | None:
             continue
         # A source_dir may name a FILE. With every declaration in one pipeline file, that is
         # the exact answer to "what should be scanned" — naming its directory would drag in
-        # whatever else happens to sit beside it.
-        if base.is_file():
-            st = scan_file(base, root)
-            if st is not None:
-                out[st.node] = st
-            continue
-        for f in sorted(base.rglob("*.py")):
+        # whatever else happens to sit beside it. This used to try to file the result in a
+        # dict, copied from `scan` where there is one; here `out` is the report pyflakes
+        # writes into, so `iv preflight` raised TypeError for every project whose
+        # source_dirs names a file — which is the shape the docstring recommends.
+        files = [base] if base.is_file() else [
+            f for f in sorted(base.rglob("*.py"))
             # Vendored code is not this project's source. Scanning it means parsing several
             # thousand files to find no declarations, and one of them will be a fixture with
             # a deliberately broken encoding — which, correctly, is a hard error.
-            if any(part in SKIP_DIRS or part.startswith(".") for part in f.parts):
-                continue
+            if not any(part in SKIP_DIRS or part.startswith(".") for part in f.parts)]
+        for f in files:
             _pf_check(f.read_text(), str(f.relative_to(root)), Reporter(out, err))
     return [l for l in out.getvalue().splitlines() if "undefined name" in l]
 
