@@ -9,7 +9,7 @@ import polars as pl
 import pytest
 
 from iv import shards as _sh
-from iv.core import Pipeline
+from iv.core import Invalidator
 from iv.errors import DeclError, StateError
 
 
@@ -17,8 +17,8 @@ from iv.errors import DeclError, StateError
 def iv(tmp_path, monkeypatch):
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    return Pipeline(root=tmp_path / "data", stage_dir=tmp_path / "stage",
-                    project_root=tmp_path)
+    return Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+                       project=tmp_path)
 
 
 def seed(iv, dataset, part=None, n=3, extra=0, why="an upstream feed"):
@@ -718,7 +718,7 @@ def test_an_undeclared_read_of_the_data_tree_raises(iv):
     Nothing about that is visible at runtime — the read succeeds and the number is wrong.
     """
     seed(iv, "raw/feed/")
-    bare = next(p for p in (iv.root / "raw/feed").iterdir() if p.suffix == ".parquet")
+    bare = next(p for p in (iv.tree / "raw/feed").iterdir() if p.suffix == ".parquet")
 
     with pytest.raises(DeclError, match="not handed back by iv.reads"):
         pl.read_parquet(bare)

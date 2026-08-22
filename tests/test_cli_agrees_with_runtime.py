@@ -15,17 +15,17 @@ import pytest
 
 from iv import graph as _graph
 from iv.cli import _downstream_of, _staleness
-from iv.core import Pipeline
+from iv.core import Invalidator
 
 from tests.conftest import write_stage
 
 
 PIPE = '''
 import pathlib
-from iv.core import Pipeline
+from iv.core import Invalidator
 HERE = pathlib.Path(__file__).resolve().parent
-iv = Pipeline(root=HERE / "data", source_dirs=["stages"], project_root=HERE,
-              stage_dir=HERE / "stage")
+iv = Invalidator(tree=HERE / "data", code=["stages"], project=HERE,
+                 stage_dir=HERE / "stage")
 '''
 
 MID = '''
@@ -296,8 +296,8 @@ def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkey
     """
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    iv = Pipeline(root=tmp_path / "data", stage_dir=tmp_path / "stage",
-                  project_root=tmp_path)
+    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+                     project=tmp_path)
     day = ["day1"]
 
     @iv.data("config/today/", why="the clock", ext=".json")

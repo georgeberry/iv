@@ -9,7 +9,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from iv import Pipeline
+from iv import Invalidator
 from iv import graph as _graph
 from iv import static as _static
 from iv.errors import DeclError
@@ -28,8 +28,8 @@ def project(tmp_path):
 def iv(tmp_path, monkeypatch):
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    return Pipeline(root=tmp_path / "data", stage_dir=tmp_path / "stage",
-                    project_root=tmp_path)
+    return Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+                       project=tmp_path)
 
 
 def frame():
@@ -241,7 +241,7 @@ def test_an_undeclared_read_is_an_error_and_an_unseen_one_is_a_warning(iv):
 
 def test_preflight_catches_a_name_a_refactor_left_behind(project):
     write_stage(project, "stages/one.py", "x = undefined_thing\n")
-    iv = Pipeline(root=project / "data", source_dirs=["stages"], project_root=project)
+    iv = Invalidator(tree=project / "data", code=["stages"], project=project)
     names = _static.undefined_names(iv)
     if names is None:
         pytest.skip("pyflakes is not installed")
@@ -250,7 +250,7 @@ def test_preflight_catches_a_name_a_refactor_left_behind(project):
 
 def test_preflight_catches_an_import_of_a_module_that_is_not_there(project):
     write_stage(project, "stages/one.py", "import stages.gone_away\n")
-    iv = Pipeline(root=project / "data", source_dirs=["stages"], project_root=project)
+    iv = Invalidator(tree=project / "data", code=["stages"], project=project)
     bad = _static.missing_imports(iv)
     assert any("gone_away" in b for b in bad), bad
 
@@ -259,16 +259,16 @@ def test_preflight_ignores_a_third_party_import(project):
     """An absent package is pip's problem and fails the moment anything runs. A local
     module a refactor renamed is a name that looks fine until the stage is reached."""
     write_stage(project, "stages/one.py", "import polars\nimport not_a_real_package\n")
-    iv = Pipeline(root=project / "data", source_dirs=["stages"], project_root=project)
+    iv = Invalidator(tree=project / "data", code=["stages"], project=project)
     assert _static.missing_imports(iv) == []
 
 
 def test_preflight_works_when_source_dirs_names_a_file(project):
-    """`source_dirs=["pipeline.py"]` is the shape the docstring recommends, and it used to
+    """`code=["pipeline.py"]` is the shape the docstring recommends, and it used to
     raise TypeError: the file branch tried to file its result in a dict, copied from the
     project scan where there was one — but here the target is pyflakes' report."""
     write_stage(project, "one.py", "x = undefined_thing\n")
-    iv = Pipeline(root=project / "data", source_dirs=["one.py"], project_root=project)
+    iv = Invalidator(tree=project / "data", code=["one.py"], project=project)
     names = _static.undefined_names(iv)
     if names is None:
         pytest.skip("pyflakes is not installed")

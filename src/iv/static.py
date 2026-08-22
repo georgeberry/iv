@@ -73,28 +73,28 @@ def undefined_names(iv) -> list[str] | None:
         return None
     import io
     out, err = io.StringIO(), io.StringIO()
-    for root, f in _sources(iv):
-        _pf_check(f.read_text(), str(f.relative_to(root)), Reporter(out, err))
+    for project, f in _sources(iv):
+        _pf_check(f.read_text(), str(f.relative_to(project)), Reporter(out, err))
     return [l for l in out.getvalue().splitlines() if "undefined name" in l]
 
 
 def _sources(iv):
     """Every project file to check. A source_dir may name a FILE, which is the exact answer
     when every declaration lives in one pipeline module."""
-    root = Path(iv.project_root or Path.cwd())
-    for d in iv.source_dirs:
-        base = root / d
+    project = Path(iv.project or Path.cwd())
+    for d in iv.code:
+        base = project / d
         if not base.exists():
             continue
         if base.is_file():
-            yield root, base
+            yield project, base
             continue
         for f in sorted(base.rglob("*.py")):
             # Vendored code is not this project's source, and one of its fixtures will have
             # a deliberately broken encoding.
             if any(part in SKIP_DIRS or part.startswith(".") for part in f.parts):
                 continue
-            yield root, f
+            yield project, f
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -123,15 +123,15 @@ def missing_imports(iv) -> list[str]:
     shows up the moment anything runs, but a local module a refactor renamed is a name that
     looks fine and fails at the one moment the stage is finally reached.
     """
-    tops = {d.split("/")[0].removesuffix(".py") for d in iv.source_dirs}
+    tops = {d.split("/")[0].removesuffix(".py") for d in iv.code}
     bad = []
-    for root, f in _sources(iv):
-        node = str(f.relative_to(root))
+    for project, f in _sources(iv):
+        node = str(f.relative_to(project))
         for mod in sorted(_imported_modules(f)):
             if mod.split(".")[0] not in tops:
                 continue
             rel = mod.replace(".", "/")
-            if (root / f"{rel}.py").exists() or (root / rel / "__init__.py").exists():
+            if (project / f"{rel}.py").exists() or (project / rel / "__init__.py").exists():
                 continue
             bad.append(f"{node}: imports {mod!r}, which is not in this project")
     return bad

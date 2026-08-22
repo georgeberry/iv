@@ -67,7 +67,7 @@ _WRITERS = (".parquet", ".json", ".pkl", ".html", ".txt")
 
 
 def load_value(paths, ext: str):
-    """The other half of the round trip. `paths` is what `Pipeline.reads` handed back."""
+    """The other half of the round trip. `paths` is what `Invalidator.reads` handed back."""
     if ext == ".parquet":
         import polars as pl
         return pl.read_parquet([str(p) for p in paths])
@@ -441,7 +441,7 @@ class Asset:
                 self._commit(o, v, {self.part_key: str(part_val)})
 
     def _resolve(self, part: dict | None) -> dict:
-        """Each declared read, opened — through `Pipeline.reads`, so the recording, the
+        """Each declared read, opened — through `Invalidator.reads`, so the recording, the
         enforcement and the undeclared-read check all apply exactly as they always have."""
         from .core import _resolve_sel
         iv = self.pipeline

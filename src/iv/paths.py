@@ -5,12 +5,12 @@ from pathlib import Path
 from .errors import ConfigError
 
 
-def mkpath(spec, project_root: Path | None):
+def mkpath(spec, project: Path | None):
     if not isinstance(spec, str):
         return spec
     if "://" not in spec:
         p = Path(spec)
-        return p if p.is_absolute() or project_root is None else project_root / p
+        return p if p.is_absolute() or project is None else project / p
     try:
         from cloudpathlib import AnyPath
     except ImportError as e:

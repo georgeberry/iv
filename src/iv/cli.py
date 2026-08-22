@@ -25,7 +25,7 @@ _STALE_TRACE_S = 12 * 3600
 @app.callback()
 def main(instance: str = typer.Option(
         None, "--instance", "-i",
-        help="module:attr of the Pipeline. Default: [tool.iv] instance in pyproject.toml")):
+        help="module:attr of the Invalidator. Default: [tool.iv] instance in pyproject.toml")):
     global _INSTANCE
     _INSTANCE = instance
 
@@ -187,7 +187,7 @@ def _staleness(iv, g):
     the source at runtime, arrived at the other way round.
 
     It must NOT fall back to the runtime registry: `_load()` imports the module holding the
-    Pipeline, not the module holding the steps, so nothing would be registered and every
+    Invalidator, not the module holding the steps, so nothing would be registered and every
     dataset would look like a root — which reads as `current` for anything with a file on
     disk. A green that means "I could not find the question" is worse than a red."""
     # WHICH STAGE OWNS WHICH SHARD. Two stages may share a dataset by writing different

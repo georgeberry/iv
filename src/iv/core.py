@@ -32,7 +32,7 @@ def _check_declared(target) -> None:
         if s in iv._handed_out or iv._depth:
             return
     for iv in _ACTIVE:
-        for base in (iv.out_root, iv.root):
+        for base in (iv.out_tree, iv.tree):
             if base and s.startswith(str(base)):
                 raise DeclError(
                     f"{s} is inside the data tree but was not handed back by iv.reads(). "
@@ -41,22 +41,36 @@ def _check_declared(target) -> None:
                     f"Declare it: iv.reads('<dataset>/', why='...').")
 
 
-class Pipeline:
+class Invalidator:
+    """What decides whether a stage has to run.
+
+    Four paths, and they used to be called root, out_root, project_root and roots, which is
+    four different things wearing one word:
+
+        tree      where the DATA lives. A dataset is named relative to it, which is what
+                  lets an id survive the data moving.
+        out_tree  where writes GO, if that is somewhere else. Defaults to `tree`.
+        project   where the CODE lives. Node names are relative to it, so they read the
+                  same however the module was imported.
+        sources   dataset prefixes that arrive from OUTSIDE — a fetch, a hand-placed file.
+                  Nothing here produces them, so `iv check` does not ask what does.
+        code      the modules `iv preflight` reads for undefined names and dead imports.
+    """
 
     def __init__(self, *,
-                 root,
-                 out_root=None,
-                 source_dirs: Sequence[str] = ("src", "scripts"),
-                 roots: Sequence[str] = ("raw/", "config/"),
-                 project_root=None,
+                 tree,
+                 out_tree=None,
+                 code: Sequence[str] = ("src", "scripts"),
+                 sources: Sequence[str] = ("raw/", "config/"),
+                 project=None,
                  trace=None,
                  stage_dir=None,
                  force: bool | None = None) -> None:
-        self.project_root = mkpath(str(project_root), None) if project_root else None
-        self.root = mkpath(root, self.project_root)
-        self.out_root = mkpath(out_root, self.project_root) if out_root is not None else self.root
-        self.source_dirs = tuple(source_dirs)
-        self.roots = tuple(_canon(r) for r in roots)
+        self.project = mkpath(str(project), None) if project else None
+        self.tree = mkpath(tree, self.project)
+        self.out_tree = mkpath(out_tree, self.project) if out_tree is not None else self.tree
+        self.code = tuple(code)
+        self.sources = tuple(_canon(r) for r in sources)
         self.stage_dir = stage_dir
         self.force = _env_force() if force is None else force
         self.trace_path = _abs_trace(trace)
@@ -90,14 +104,14 @@ class Pipeline:
         self._assets: dict[str, _assets.Asset] = {}
 
     def __repr__(self) -> str:
-        return f"<Pipeline {self.root}>"
+        return f"<Invalidator {self.tree}>"
 
 
     def resolve(self, dataset: str):
-        return self.root / _canon(dataset).rstrip("/")
+        return self.tree / _canon(dataset).rstrip("/")
 
     def resolve_out(self, dataset: str):
-        return self.out_root / _canon(dataset).rstrip("/")
+        return self.out_tree / _canon(dataset).rstrip("/")
 
 
     @property
@@ -532,9 +546,9 @@ class Pipeline:
         return f"{self._rel_source(src.co_filename)}::{fn.__name__}"
 
     def _rel_source(self, filename: str) -> str:
-        p = mkpath(filename, self.project_root)
+        p = mkpath(filename, self.project)
         try:
-            return str(p.relative_to(self.project_root)) if self.project_root else str(p)
+            return str(p.relative_to(self.project)) if self.project else str(p)
         except ValueError:
             return str(p)
 
@@ -619,4 +633,4 @@ def _abs_trace(trace):
 
 
 # `iv.PART` on the instance, so a selector reads as what it is at the call site.
-Pipeline.PART = PART
+Invalidator.PART = PART

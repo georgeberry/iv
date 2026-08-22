@@ -11,15 +11,15 @@ import polars as pl
 import pytest
 
 from iv import shards as _sh
-from iv.core import Pipeline
+from iv.core import Invalidator
 
 
 @pytest.fixture
 def iv(tmp_path, monkeypatch):
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    return Pipeline(root=tmp_path / "data", stage_dir=tmp_path / "stage",
-                    project_root=tmp_path)
+    return Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+                       project=tmp_path)
 
 
 def seed(iv, dataset, part=None, n=3, why="an upstream feed"):
@@ -112,8 +112,8 @@ def test_the_saving_grows_with_partitions(iv, monkeypatch):
     """The cost being removed is quadratic, so doubling the partitions must not double the
     listings under a snapshot — it must leave them flat."""
     def listings(keys):
-        pipe = Pipeline(root=iv.root.parent / f"d{len(keys)}",
-                        stage_dir=iv.stage_dir, project_root=iv.project_root)
+        pipe = Invalidator(tree=iv.tree.parent / f"d{len(keys)}",
+                           stage_dir=iv.stage_dir, project=iv.project)
         seasons(pipe, keys)
         calls = counting(monkeypatch)
         with pipe.snapshot():

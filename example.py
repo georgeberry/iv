@@ -37,10 +37,10 @@ import tempfile
 
 import polars as pl
 
-from iv import Pipeline
+from iv import Invalidator
 
 root = pathlib.Path(tempfile.mkdtemp()) / "data"
-iv = Pipeline(root=root, project_root=root.parent, roots=("raw/", "config/"))
+iv = Invalidator(tree=root, project=root.parent, sources=("raw/", "config/"))
 
 SEASONS = ["2022", "2023", "2024"]
 LIVE = "2024"          # the season being played; the rest have settled

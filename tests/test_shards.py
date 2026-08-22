@@ -1,6 +1,6 @@
 """`shards.py` alone: names, ordering, fingerprints, selection, commit, gc, index.
 
-No Pipeline, no static scan, no bucket. A shard is a file in a temp directory, and every
+No Invalidator, no static scan, no bucket. A shard is a file in a temp directory, and every
 question here is answerable from the directory listing — which is the point of the module.
 """
 from __future__ import annotations

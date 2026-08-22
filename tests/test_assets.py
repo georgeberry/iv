@@ -9,7 +9,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from iv import Pipeline
+from iv import Invalidator
 from iv import graph as _graph
 from iv import shards as _sh
 from iv.errors import DeclError, StateError
@@ -19,8 +19,8 @@ from iv.errors import DeclError, StateError
 def iv(tmp_path, monkeypatch):
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    return Pipeline(root=tmp_path / "data", stage_dir=tmp_path / "stage",
-                    project_root=tmp_path)
+    return Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+                       project=tmp_path)
 
 
 def frame(n=2, extra=0):

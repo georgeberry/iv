@@ -163,16 +163,16 @@ def find_cycle(g: Graph) -> str | None:
 def check(g: Graph) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warns: list[str] = []
-    roots = tuple(g.iv.roots)
+    sources = tuple(g.iv.sources)
 
     for name in sorted({s.dataset for st in g.stages.values() for s in st.inputs}):
-        if g.producers_of(name) or name.startswith(roots):
+        if g.producers_of(name) or name.startswith(sources):
             continue
         site = next(s for st in g.stages.values() for s in st.inputs if s.dataset == name)
         msg = (f"READ WITH NO PRODUCER  {name}\n"
                f"    read at {site.location} but nothing writes it. Either a stage is "
-               f"missing, or it arrives out of band — put it under one of {list(roots)} "
-               f"or add that prefix to the Pipeline's roots=.")
+               f"missing, or it arrives out of band — put it under one of "
+               f"{list(sources)} or add that prefix to sources=.")
         (warns if site.optional else errors).append(msg)
 
     for name in g.produced:

@@ -38,6 +38,22 @@ Extras: `data` (polars — the default fingerprint hashes the *data*, not the by
 uv add "iv[data,cli] @ git+https://github.com/georgeberry/iv"
 ```
 
+## The `Invalidator`
+
+```python
+from iv import Invalidator
+
+iv = Invalidator(
+    tree="data/",                       # where the DATA lives; datasets are named
+                                        # relative to it, so an id survives a move
+    out_tree=None,                      # where writes GO, if that is somewhere else
+    project=None,                       # where the CODE lives; node names are relative
+    sources=("raw/", "config/"),        # prefixes that arrive from OUTSIDE — nothing
+                                        # here produces them, so `iv check` does not ask
+    code=("src", "scripts"),            # the modules `iv preflight` reads
+)
+```
+
 ## Declaring a dataset
 
 `@iv.data` names a dataset and decorates the function that builds it. Upstreams are
@@ -149,7 +165,7 @@ number. All of these raise:
 
 ## CLI
 
-Point the CLI at your `Pipeline` instance in `pyproject.toml`:
+Point the CLI at your `Invalidator` instance in `pyproject.toml`:
 
 ```toml
 [tool.iv]
