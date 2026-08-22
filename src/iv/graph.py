@@ -70,18 +70,63 @@ class Graph:
 
 
 def build(iv) -> Graph:
-    """Every step `source_dirs` reaches, in the order they are defined.
+    """Every stage this pipeline has, however it was declared.
 
-    Membership is what the scan walks — point `source_dirs` at the pipeline and that is the
-    pipeline. It used to be scraped from a refresh script, which meant the run order lived
-    in the shell and the code separately and could disagree; now there is one copy.
+    Two ways in, and the graph is their UNION rather than whichever it finds first. A
+    declared stage registers itself when its module imports; a stage written with
+    `iv.reads`/`iv.writes` is found by scanning `source_dirs`. Preferring one would drop the
+    other's nodes silently — and a dataset whose producer is missing from the graph looks
+    like a root, which reads as `current` for anything with a file on disk. A green that
+    means "I could not find the question" is worse than a red.
+
+    The two cannot collide: a node is named `<file>::<function>` from the function's own
+    code object either way, and a declared stage has no `iv.reads(...)` call for the scan
+    to find in the first place.
     """
-    every = _static.scan(iv)
     nodes: dict[str, _static.Node] = {}
-    for _, st in every.items():
+    for _, st in _static.scan(iv).items():
         for node in _static.nodes_of(st):
             nodes[node.name] = node
+    for node in declared_nodes(iv):
+        nodes[node.name] = node
     return Graph(iv=iv, stages=nodes)
+
+
+def declared_nodes(iv) -> list[_static.Node]:
+    """The registered assets, as the same `Node`s the scan produces.
+
+    Everything downstream — `check`, `parent_map`, `iv status` — reads a Node and does not
+    care which route it arrived by, so a declaration has to arrive in that shape rather
+    than in one of its own.
+    """
+    out = []
+    for asset in getattr(iv, "_assets", {}).values():
+        fn_name = getattr(asset.fn, "__name__", "")
+        rel = iv._rel_source(getattr(asset.fn, "__code__").co_filename)
+        sites = [
+            _static.Site(kind="read", dataset=r.dataset, why=r.why, file=rel,
+                         line=_line_of(asset.fn), optional=r.optional,
+                         update_file_on_disk=r.is_own,
+                         where=r.where(), sel=r.sel(), owner=fn_name)
+            for r in asset.reads
+        ]
+        # A partitioned asset writes a shard per key, and which keys is a runtime list —
+        # so the write names no literal part=, exactly as a for_each does.
+        sites.append(
+            _static.Site(kind="write", dataset=asset.dataset, why=asset.why, file=rel,
+                         line=_line_of(asset.fn), terminal=asset.terminal, owner=fn_name))
+        # `guarded` is "has a skip check that could be fooled". A root asset has no
+        # upstream to be stale against and runs every time, which is how anything outside
+        # the tree gets in — so it is not guarded, and the RUNS ONCE warning below is not
+        # about it.
+        out.append(_static.Node(name=f"{rel}::{fn_name}", file=rel, fn=fn_name,
+                                sites=tuple(sites),
+                                guarded=asset.if_needed and asset.may_skip))
+    return out
+
+
+def _line_of(fn) -> int:
+    return getattr(getattr(fn, "__code__", None), "co_firstlineno", 0)
 
 
 def _overlaps(read, write) -> bool:
@@ -164,7 +209,7 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
 
     for node, st in g.stages.items():
         real = [s for s in st.outputs if s.kind != "constant"]
-        if real and not st.triggers:
+        if real and not st.triggers and st.guarded:
             warns.append(
                 f"RUNS ONCE  {node} writes {sorted({s.dataset for s in real})} and "
                 f"reads nothing that can trigger it, so it runs once and never again. "

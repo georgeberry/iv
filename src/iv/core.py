@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Sequence
 
+from . import assets as _assets
+from . import decl as _decl
 from . import record as _record
 from . import shards as _sh
 from .static import _lit_sel
@@ -111,6 +113,11 @@ class Pipeline:
         # DECLARATION time, not at run time, so `why_stale("processed/x/")` answers on its
         # own — the question does not need the stage to have run, only to exist.
         self._declared: dict[str, tuple] = {}
+        # dataset -> the Asset that builds it. Populated by @iv.data at DECLARATION time,
+        # so `iv graph` and `iv status` know the pipeline by importing it rather than by
+        # parsing it — which is what lets a stage defined in a notebook declare as well as
+        # one in a scanned file.
+        self._assets: dict[str, _assets.Asset] = {}
 
     def __repr__(self) -> str:
         return f"<Pipeline {self.root}>"
@@ -455,6 +462,44 @@ class Pipeline:
     def is_current(self, dataset: str, part: dict | None = None, **kw) -> bool:
         return self.why_stale(dataset, part, **kw) is None
 
+
+    #: The selector vocabulary, on the instance so a declaration reads as what it is at
+    #: the call site: `def fit(box=iv.same_part("raw/box/", why="..."))`.
+    all_of = staticmethod(_decl.all_of)
+    same_part = staticmethod(_decl.same_part)
+    before_part = staticmethod(_decl.before_part)
+    after_part = staticmethod(_decl.after_part)
+    between = staticmethod(_decl.between)
+    parts = staticmethod(_decl.parts)
+    own_last_copy = staticmethod(_decl.own_last_copy)
+
+    def data(self, dataset: str, *, why: str, part: str | None = None,
+             ext: str = _sh.EXT, terminal: bool = False,
+             if_needed: bool = True, once: bool = False) -> Callable:
+        """Name a dataset and decorate the function that builds it.
+
+        The upstreams are parameter defaults, which is what makes the whole declaration
+        readable off the function object — no source text, nothing run:
+
+            @iv.data("processed/cohorts/", why="a fit per cohort", part="season")
+            def cohorts(past=iv.before_part("processed/features/", why="prior seasons")):
+                return past.group_by("player").agg(pl.col("z").mean())
+        """
+        name = _canon(dataset)
+        _why(why, name)
+
+        def decorate(fn: Callable) -> _assets.Asset:
+            asset = _assets.Asset(self, name, fn, why=why, part=part, ext=ext,
+                                  terminal=terminal, if_needed=if_needed, once=once)
+            if name in self._assets and self._assets[name].fn is not fn:
+                raise DeclError(
+                    f"{name} is already built by "
+                    f"{self._assets[name].__name__!r}. A dataset has one producer — two "
+                    f"would race, and whichever ran last would win.")
+            self._assets[name] = asset
+            self._declared[name] = asset.triples()
+            return asset
+        return decorate
 
     def step(self, *, why: str, part: dict | None = None,
              if_needed: bool = True) -> Callable:
