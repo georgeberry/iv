@@ -303,9 +303,12 @@ class Asset:
         if len(self.outputs) != 1:
             raise DeclError(
                 f"{self.__name__} writes {len(self.outputs)} datasets, so naming the stage "
-                f"in a read does not say which. Name the output: "
-                f"{self.__name__}[{sorted(self.outputs)[0]!r}], one of "
-                f"{sorted(self.outputs)}.")
+                f"in a read does not say which. Name the output by the key the body "
+                f"returns it under — {self.__name__}[{sorted(self.outputs)[0]!r}], one of "
+                f"{sorted(self.outputs)} — or, better where the read is far from here, "
+                f"declare it above so the read can name the DATASET: "
+                f"X = iv.data('...', why='...'), then output={{...}} and iv.all_of(X, ...). "
+                f"A key means something only next to the dict it is a key of.")
         return self.primary
 
     @property

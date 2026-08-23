@@ -766,3 +766,28 @@ def test_a_source_cannot_be_named_as_something_a_stage_writes(iv):
         @iv.step(output=feed, why="writing what arrives from outside")
         def clobber():
             return frame()
+
+
+def test_the_advice_in_the_own_last_copy_error_is_advice_that_works(iv):
+    """The message used to say `own_last_copy('raw/box/')` — a bare path, which reads
+    stopped accepting. Following it raised a second, different error. An error that tells
+    you to do something impossible is worse than no error, so this runs the advice."""
+    box = iv.data("raw/box/", why="the box scores being patched")
+    pbp = iv.data("raw/pbp/", why="the play-by-play being patched")
+
+    @iv.step(output={"box": box, "pbp": pbp}, why="patch both from the per-game endpoint")
+    def patch(was=iv.own_last_copy(box, why="the copy this amends")):
+        return {"box": frame(), "pbp": frame()}
+
+    assert patch.reads[0].dataset == "raw/box/"
+    assert patch.reads[0].is_own
+
+
+def test_a_multi_output_stage_cannot_read_its_own_copy_without_a_declaration(iv):
+    """Not merely unclear — impossible. The stage cannot name itself: the `Asset` does not
+    exist yet where a parameter default is evaluated. So this is the one case where
+    `iv.data` is load-bearing rather than a legibility choice."""
+    with pytest.raises(DeclError, match="declared above and named here"):
+        @iv.step(output={"box": "raw/box/", "pbp": "raw/pbp/"}, why="patch both")
+        def patch(was=iv.own_last_copy(why="the copy this amends")):
+            return {"box": frame(), "pbp": frame()}

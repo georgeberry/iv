@@ -127,8 +127,12 @@ class Read:
         if own is None:
             raise DeclError(
                 "own_last_copy() means the copy of its OWN output this stage is about to "
-                "overwrite, and this stage writes several — name which: "
-                "own_last_copy('raw/odds_log/', why='...').")
+                "overwrite, and this stage writes several — name which. It cannot name "
+                "the stage, which does not exist yet where the default is evaluated, so "
+                "the output has to be declared above and named here:\n"
+                "    BOX = iv.data('raw/box/', why='...')\n"
+                "    @iv.step(output={'box': BOX, 'pbp': PBP}, why='...')\n"
+                "    def patch(was=iv.own_last_copy(BOX, why='the copy this amends')):")
         return Read(own, self.kind, self.body, self.optional, self.key, self.why,
                     self.as_paths)
 
