@@ -31,12 +31,26 @@ declaration — datasets, selector, partition key — with nothing executed and 
 needed. The walk-forward bounds below are DATA, which is what lets a shard's key be
 computed before its body runs.
 
-DECLARING AND PRODUCING ARE TWO WORDS. `@iv.step` is the function that builds; most write
-one dataset and name it inline, and a read names the stage. `iv.data(...)` declares a
-dataset on its own — a name, a format, a line on what it is for — for the two cases where
-the name has to be said somewhere no single stage can say it: a stage with more outputs
-than it has names for (`processed/xpm/` and its three siblings), and a dataset with more
-writers than any one of them speaks for (`derived/college/`, `processed/predictions/`).
+THREE WORDS, AND WHICH ONE YOU REACH FOR IS NOT A STYLE CHOICE.
+
+    @iv.data     builds ONE dataset. The body returns its contents, and a read names the
+                 STAGE — `iv.all_of(box_features, why="...")`. Almost everything is this.
+
+    @iv.step     builds SEVERAL, or none. `output=` is a dict and the body returns one
+                 keyed the same way, so one expensive fit produces four tables without
+                 being run four times.
+
+    iv.dataset   declares a dataset and says nothing about how it is built. For the two
+                 cases where no single stage speaks for the name:
+
+                 a stage with more OUTPUTS than names. `xpm` writes four tables, so a read
+                 cannot name the stage — and the keys ("ratings") are labels private to
+                 what that one body returns, not names the datasets have. `xpm["ratings"]`
+                 works, and says what this stage calls the thing rather than what it is.
+
+                 a dataset with more WRITERS than one. Three stages write derived/college/
+                 and two write processed/predictions/; naming any one of them for a read
+                 that takes every shard says one thing and does another.
 """
 
 import datetime as dt
@@ -76,8 +90,8 @@ bios = iv.source(
 # ── metadata is a file, and a root always runs ───────────────────────────────
 
 
-@iv.step(
-    output="config/today/",
+@iv.data(
+    dataset="config/today/",
     why="the day, so a polled feed re-fetches once a day",
     ext=".json",
 )
@@ -90,7 +104,7 @@ def today():
     return {"date": TODAY.isoformat()}
 
 
-@iv.step(output="config/model/", why="the knobs the fit shape depends on", ext=".json")
+@iv.data(dataset="config/model/", why="the knobs the fit shape depends on", ext=".json")
 def model_config():
     """Not a version string, not a label — a shard, declared as an upstream by whoever
     answers to it. `iv graph` draws the edge; a change moves exactly those stages."""
@@ -106,8 +120,8 @@ def model_config():
 # to pick up one afternoon. Declared as two datasets, the clock touches exactly one shard.
 
 
-@iv.step(
-    output="raw/box_settled/",
+@iv.data(
+    dataset="raw/box_settled/",
     why="raw box scores for one finished season",
     part="season",
     once=True,
@@ -123,8 +137,8 @@ def box_settled(season):
     )
 
 
-@iv.step(
-    output="raw/box_live/",
+@iv.data(
+    dataset="raw/box_live/",
     why="raw box scores for the season being played",
     part={"season": LIVE},
     external={"espn/feeds": "ESPN's live feed"},
@@ -138,7 +152,7 @@ def box_live(clock=iv.all_of(today, as_paths=True, why="poll once a day")):
     )
 
 
-@iv.step(output="raw/box/", why="one season of box scores, from whichever half has it",
+@iv.data(dataset="raw/box/", why="one season of box scores, from whichever half has it",
          part="season")
 def box(
     season,
@@ -157,8 +171,8 @@ def box(
 # ── an update: read your own last copy, amend it, write it back ───────────────
 
 
-@iv.step(
-    output="derived/schedule/",
+@iv.data(
+    dataset="derived/schedule/",
     why="one row per game, with scores patched in as they land",
     external={"espn/scoreboard": "final scores, which land all day"},
 )
@@ -184,8 +198,8 @@ def schedule(
 # ── one computation, split into a shard per season ───────────────────────────
 
 
-@iv.step(
-    output="derived/box_features/",
+@iv.data(
+    dataset="derived/box_features/",
     why="the per-(season, player) box matrix",
     part="season",
     split=True,
@@ -207,20 +221,21 @@ def box_features(
 
 # ── three stages, three blocks, one dataset ──────────────────────────────────
 #
-# No stage owns this one, so it is declared on its own line and the three writers name it.
-# That is what `iv.data` is for the second time: the first was a stage with more outputs
-# than it has names, this is a dataset with more writers than any one of them speaks for.
+# Three single-output stages, so each is an `@iv.data` — but they write the same dataset,
+# and none of them owns it. So it is declared on its own line and all three name it.
 #
-# Without it a read has to name one of the three — `iv.all_of(ncaa_block, ...)` — which
-# collects all three blocks anyway, because a read of a dataset takes every shard of it.
-# So the name said one thing and the read did another, and which of the three you happened
-# to name was arbitrary.
+# Without that a read has to name one of the three — `iv.all_of(ncaa_block, ...)` — which
+# collects all three blocks anyway, because a read of a dataset takes every shard of it. The
+# name said one thing and the read did another, and which of the three you happened to name
+# was arbitrary.
 
-COLLEGE = iv.data("derived/college/", why="one row per amateur source, ranked on the pros")
+COLLEGE = iv.dataset(
+    "derived/college/", why="one row per amateur source, ranked against the pros"
+)
 
 
-@iv.step(
-    output=COLLEGE,
+@iv.data(
+    dataset=COLLEGE,
     why="the NCAA block of the college feature table",
     part={"source": "ncaa"},
 )
@@ -234,14 +249,14 @@ def ncaa_block(
     return pl.DataFrame({"source": ["ncaa"], "n": [bf.height]})
 
 
-@iv.step(output=COLLEGE, why="the G-League block", part={"source": "gleague"})
+@iv.data(dataset=COLLEGE, why="the G-League block", part={"source": "gleague"})
 def gleague_block(bf=iv.all_of(box_features, why="the pro side")):
     ran.append("gleague")
     return pl.DataFrame({"source": ["gleague"], "n": [1]})
 
 
-@iv.step(
-    output=COLLEGE,
+@iv.data(
+    dataset=COLLEGE,
     why="the international block",
     part={"source": "intl"},
     external={"basketball-reference/international": "the international player pages"},
@@ -253,15 +268,21 @@ def intl_block(bf=iv.all_of(box_features, why="the pro side")):
 
 # ── one fit, several outputs ─────────────────────────────────────────────────
 #
-# Four datasets out of one body, so `output=` has to say which name carries which — and
-# the names the body returns them under ("ratings") are not the names the datasets have
-# ("processed/xpm/"). Declaring each one above gives it a name that downstream reads can
-# use directly, instead of every reader having to know the key.
+# The one place `@iv.step` is right: four tables out of ONE fit. Split into four
+# single-output stages it would fit four times.
+#
+# So `output=` is a dict, and its keys are the names the BODY returns them under. Those are
+# labels private to this one function — "ratings" is not what the dataset is called, and it
+# could as well be "r". A read downstream can say `xpm["ratings"]`, which resolves to the
+# same dataset and the same edge in the graph, but it names a key next to none of the dict
+# it is a key of.
+#
+# Declared above, each output has a name, and a read says which dataset it means.
 
-XPM = iv.data("processed/xpm/", why="a rating per player per season")
-XPM_CAREER = iv.data("processed/xpm_career/", why="one row per player, career to date")
-XPM_SUMMARY = iv.data("processed/xpm_summary/", why="what the fit did, per season")
-XPM_LEVELS = iv.data("processed/xpm_levels/", why="the level each season sits at")
+XPM = iv.dataset("processed/xpm/", why="a rating per player per season")
+XPM_CAREER = iv.dataset("processed/xpm_career/", why="one row per player, career to date")
+XPM_SUMMARY = iv.dataset("processed/xpm_summary/", why="what the fit did, per season")
+XPM_LEVELS = iv.dataset("processed/xpm_levels/", why="the level each season sits at")
 
 
 @iv.step(
@@ -296,8 +317,8 @@ def xpm(
     }
 
 
-@iv.step(
-    output="processed/rapm_fit/",
+@iv.data(
+    dataset="processed/rapm_fit/",
     why="the fitted model object, so nothing refits it twice",
     ext=".pkl",
 )
@@ -313,8 +334,8 @@ def rapm_fit(
 # ── walk-forward, two bounds ─────────────────────────────────────────────────
 
 
-@iv.step(
-    output="processed/xpm_eoy/",
+@iv.data(
+    dataset="processed/xpm_eoy/",
     why="one end-of-year rating per season, frozen once it ends",
     part="season",
 )
@@ -332,8 +353,8 @@ def xpm_eoy(
     return bf.select(pl.lit(season).alias("season"), pl.col("z").mean())
 
 
-@iv.step(
-    output="processed/rookie/",
+@iv.data(
+    dataset="processed/rookie/",
     why="a projection per cohort, on prior seasons only",
     part="season",
 )
@@ -355,11 +376,11 @@ def rookie(
 # wants one — and with the dataset declared, each says which by SELECTOR rather than by
 # picking a writer's name and hoping it lines up.
 
-PREDICTIONS = iv.data("processed/predictions/", why="one predicted margin per game")
+PREDICTIONS = iv.dataset("processed/predictions/", why="one predicted margin per game")
 
 
-@iv.step(
-    output=PREDICTIONS,
+@iv.data(
+    dataset=PREDICTIONS,
     why="one predicted margin per game already played",
     part={"completed": "true"},
 )
@@ -371,8 +392,8 @@ def predict_played(
     return pl.DataFrame({"game": [1], "margin": [3.5]})
 
 
-@iv.step(
-    output=PREDICTIONS,
+@iv.data(
+    dataset=PREDICTIONS,
     why="one predicted margin per game not yet played",
     part={"completed": "false"},
 )
@@ -384,8 +405,8 @@ def predict_upcoming(
     return pl.DataFrame({"game": [2], "margin": [-1.5]})
 
 
-@iv.step(
-    output="processed/calibration/",
+@iv.data(
+    dataset="processed/calibration/",
     why="the sigma the predictions are calibrated with",
     allow_missing=True,
 )
@@ -408,7 +429,7 @@ def calibration(
 # ── terminal, written through `out` ──────────────────────────────────────────
 
 
-@iv.step(output="dump/site/", why="the payload the app renders", ext=".json")
+@iv.data(dataset="dump/site/", why="the payload the app renders", ext=".json")
 def site(
     out,
     x=iv.all_of(XPM, why="the leaderboard"),
@@ -546,7 +567,7 @@ def shows(label, fn):
 
 
 def dict_to_parquet():
-    @iv.step(output="processed/bad_knobs/", why="a dict, but no ext=")
+    @iv.data(dataset="processed/bad_knobs/", why="a dict, but no ext=")
     def bad_knobs():
         return {"a": 1}
 
@@ -554,21 +575,21 @@ def dict_to_parquet():
 
 
 def part_relative_with_no_partition():
-    @iv.step(output="processed/bad_bound/",
+    @iv.data(dataset="processed/bad_bound/",
              why="not partitioned, but reads as if it were")
     def bad_bound(bf=iv.same_part(box_features, why="this season")):
         return bf
 
 
 def a_second_writer_of_the_same_shard():
-    @iv.step(output="derived/college/", why="a second NCAA block",
+    @iv.data(dataset="derived/college/", why="a second NCAA block",
              part={"source": "ncaa"})
     def ncaa_again(bf=iv.all_of(box_features, why="the pro side")):
         return bf
 
 
 def an_output_that_was_not_returned():
-    @iv.step(output="processed/two_out/", why="declares two, returns one")
+    @iv.data(dataset="processed/two_out/", why="declares two, returns one")
     def _unused():
         return None
 
@@ -583,7 +604,7 @@ def an_output_that_was_not_returned():
 
 
 def building_a_stage_from_inside_one():
-    @iv.step(output="processed/reaches/",
+    @iv.data(dataset="processed/reaches/",
              why="reaches for a stage instead of declaring it")
     def reaches(unused=iv.all_of(today, why="declared, then ignored")):
         return box("2024")
@@ -592,7 +613,7 @@ def building_a_stage_from_inside_one():
 
 
 def a_parameter_iv_cannot_supply():
-    @iv.step(output="processed/mystery/", why="takes something unexplained")
+    @iv.data(dataset="processed/mystery/", why="takes something unexplained")
     def mystery(what_is_this):
         return what_is_this
 

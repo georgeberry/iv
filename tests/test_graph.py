@@ -44,11 +44,11 @@ def check(iv):
 
 def test_a_clean_pipeline_passes(iv):
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
-    @iv.step(output="processed/mid/", why="the middle")
+    @iv.data(dataset="processed/mid/", why="the middle")
     def mid(feed=iv.all_of(feed, why="the feed")):
         return feed
 
-    @iv.step(output="dump/site/", why="the app reads it")
+    @iv.data(dataset="dump/site/", why="the app reads it")
     def site(m=iv.all_of(mid, why="the middle")):
         return m
 
@@ -58,7 +58,7 @@ def test_a_clean_pipeline_passes(iv):
 def test_a_root_prefix_is_how_out_of_band_data_is_declared(iv):
     """`raw/` is declared a root, so nothing has to produce it."""
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
-    @iv.step(output="processed/mid/", why="the middle")
+    @iv.data(dataset="processed/mid/", why="the middle")
     def mid(feed=iv.all_of(feed, why="arrives out of band")):
         return feed
 
@@ -73,12 +73,12 @@ def test_a_cycle_cannot_be_written(iv):
     earlier and more precise than a toposort settling it later. `find_cycle` stays because
     `iv viz` has to lay out a graph that was built by hand.
     """
-    @iv.step(output="processed/a/", why="a")
+    @iv.data(dataset="processed/a/", why="a")
     def a():
         return frame()
 
     with pytest.raises(NameError):
-        @iv.step(output="processed/b/", why="b")
+        @iv.data(dataset="processed/b/", why="b")
         def b(x=iv.all_of(later_stage, why="not defined yet")):   # noqa: F821
             return x
 
@@ -86,12 +86,12 @@ def test_a_cycle_cannot_be_written(iv):
 def test_a_stage_with_no_inputs_is_warned_about(iv):
     """`once=True` says it runs a single time. Right for a fetch-once archive, and worth
     saying out loud, because nothing will ever bring it back."""
-    @iv.step(output="raw/archive/", why="fetch-once history", once=True,
+    @iv.data(dataset="raw/archive/", why="fetch-once history", once=True,
              external={"sports-reference": "a page that will not change"})
     def archive():
         return frame()
 
-    @iv.step(output="dump/site/", why="the app reads it")
+    @iv.data(dataset="dump/site/", why="the app reads it")
     def site(a=iv.all_of(archive, why="the archive")):
         return a
 
@@ -102,11 +102,11 @@ def test_a_stage_with_no_inputs_is_warned_about(iv):
 def test_a_root_that_re_runs_is_not_warned_about(iv):
     """A root with no `once=` runs every time — that is how anything outside the tree gets
     in — so the warning would be false."""
-    @iv.step(output="config/model/", why="the model")
+    @iv.data(dataset="config/model/", why="the model")
     def model():
         return frame()
 
-    @iv.step(output="processed/xpm/", why="the fit")
+    @iv.data(dataset="processed/xpm/", why="the fit")
     def xpm(m=iv.all_of(model, why="a model change rebuilds this")):
         return m
 
@@ -120,7 +120,7 @@ def test_an_update_read_does_not_count_as_a_trigger(iv):
     that makes a stage stale — and a stage with nothing else to read is the silent-failure
     case this check exists for.
     """
-    @iv.step(output="raw/log/", why="a running log", once=True)
+    @iv.data(dataset="raw/log/", why="a running log", once=True)
     def log(have=iv.own_last_copy(why="yesterday's copy")):
         return have if have is not None else frame()
 
@@ -131,11 +131,11 @@ def test_an_update_read_does_not_count_as_a_trigger(iv):
 
 def test_updating_a_dataset_another_stage_writes_is_an_error(iv):
     """The static half of the rule: caught by `iv check`, without running anything."""
-    @iv.step(output="raw/schedule/", why="the schedule")
+    @iv.data(dataset="raw/schedule/", why="the schedule")
     def fetch():
         return frame()
 
-    @iv.step(output="processed/draft/", why="the draft table")
+    @iv.data(dataset="processed/draft/", why="the draft table")
     def draft(prev=iv.own_last_copy(fetch, why="the previous run's copy")):
         return prev
 
@@ -145,11 +145,11 @@ def test_updating_a_dataset_another_stage_writes_is_an_error(iv):
 
 def test_definition_order_is_the_run_order(iv):
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
-    @iv.step(output="processed/mid/", why="the middle")
+    @iv.data(dataset="processed/mid/", why="the middle")
     def mid(feed=iv.all_of(feed, why="the feed")):
         return feed
 
-    @iv.step(output="dump/site/", why="the app reads it")
+    @iv.data(dataset="dump/site/", why="the app reads it")
     def site(m=iv.all_of(mid, why="the middle")):
         return m
 
@@ -163,28 +163,28 @@ def test_definition_order_is_the_run_order(iv):
 def test_a_second_producer_is_refused_at_declaration(iv):
     """`iv check` used to catch this after the fact. The registry catches it as the second
     stage is declared, which is earlier and says which stage it collides with."""
-    @iv.step(output="processed/mid/", why="the middle")
+    @iv.data(dataset="processed/mid/", why="the middle")
     def mid():
         return frame()
 
     with pytest.raises(DeclError, match="already written by 'mid'"):
-        @iv.step(output="processed/mid/", why="the middle again")
+        @iv.data(dataset="processed/mid/", why="the middle again")
         def mid2():
             return frame()
 
 
 def test_different_partitions_of_one_dataset_are_allowed(iv):
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
-    @iv.step(output="processed/preds/", part={"completed": "true"}, why="played")
+    @iv.data(dataset="processed/preds/", part={"completed": "true"}, why="played")
     def played(feed=iv.all_of(feed, why="the feed")):
         return feed
 
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
-    @iv.step(output="processed/preds/", part={"completed": "false"}, why="not yet played")
+    @iv.data(dataset="processed/preds/", part={"completed": "false"}, why="not yet played")
     def upcoming(feed=iv.all_of(feed, why="the feed")):
         return feed
 
-    @iv.step(output="dump/site/", why="the app reads it")
+    @iv.data(dataset="dump/site/", why="the app reads it")
     def site(p=iv.all_of(upcoming, why="both halves")):
         return p
 
@@ -195,7 +195,7 @@ def test_different_partitions_of_one_dataset_are_allowed(iv):
 
 def test_an_undeclared_read_is_an_error_and_an_unseen_one_is_a_warning(iv):
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
-    @iv.step(output="processed/mid/", why="the middle")
+    @iv.data(dataset="processed/mid/", why="the middle")
     def mid(feed=iv.all_of(feed, why="the feed")):
         return feed
 
@@ -249,9 +249,9 @@ def test_a_declared_dataset_nothing_writes_is_warned_about(iv):
     """`iv.data` says a dataset exists so something else can name it. If no `output=` ever
     names it, nothing puts it there — and a read of it fails at build time rather than
     here, which is the wrong end of the day to find out."""
-    iv.data("processed/orphan/", why="a table a rename left behind")
+    iv.dataset("processed/orphan/", why="a table a rename left behind")
 
-    @iv.step(output="processed/real/", why="the one that survived")
+    @iv.data(dataset="processed/real/", why="the one that survived")
     def real():
         return frame()
 
@@ -260,7 +260,7 @@ def test_a_declared_dataset_nothing_writes_is_warned_about(iv):
 
 
 def test_a_declared_dataset_a_stage_writes_is_not_warned_about(iv):
-    orphan = iv.data("processed/kept/", why="one of two tables from one fit")
+    orphan = iv.dataset("processed/kept/", why="one of two tables from one fit")
 
     @iv.step(output={"a": orphan, "b": "processed/other/"}, why="the fit")
     def fit():

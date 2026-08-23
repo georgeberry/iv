@@ -462,25 +462,32 @@ class Invalidator:
     parts = staticmethod(_decl.parts)
     own_last_copy = staticmethod(_decl.own_last_copy)
 
-    def data(self, dataset: str, *, why: str, part=None, ext: str = _sh.EXT,
-             allow_missing: bool = False) -> _assets.Dataset:
-        """Declare a dataset this pipeline writes, so that something can NAME it.
+    def dataset(self, dataset: str, *, why: str, part=None, ext: str = _sh.EXT,
+                allow_missing: bool = False) -> _assets.Dataset:
+        """Declare a dataset without saying how it is built, so something can NAME it.
 
-            XPM = iv.data("processed/xpm/", why="the player ratings")
+            XPM = iv.dataset("processed/xpm/", why="a rating per player per season")
 
-        This says a dataset exists and how it is stored. It does not say how it is computed
-        — some `@iv.step` does that, by putting this in its `output=`:
+        A stage writing ONE dataset needs none of this: `@iv.data` names it and a read
+        names the stage. This is for the datasets no single stage speaks for.
+
+        A stage with more OUTPUTS than names. The keys in a `@iv.step` are labels private
+        to what that one body returns — `{"ratings": ..., "career": ...}` — so a read
+        downstream has to say `xpm["ratings"]`, naming a key rather than a dataset, and
+        that key is not visible where the read is written:
+
+            XPM = iv.dataset("processed/xpm/", why="a rating per player per season")
 
             @iv.step(output={"ratings": XPM, "career": XPM_CAREER}, why="the joint fit")
-            def xpm(poss=iv.all_of(possessions, why="the design matrix")):
+            def xpm(bf=iv.all_of(box_features, why="the box prior")):
                 return {"ratings": r, "career": c}
 
-            def wvorp(x=iv.all_of(XPM, why="the headline table")):
+            def leaderboard(x=iv.all_of(XPM, why="the headline table")):
 
-        Most stages write ONE dataset, and a declaration on its own line would be a name
-        used once — so `output="processed/box/"` declares it inline and the read names the
-        stage. Reach for this when the name has to be said somewhere else: a stage writing
-        several, or one whose output another stage names before it is written.
+        A dataset with more WRITERS than any one of them speaks for — three blocks of a
+        college feature table, the played and unplayed halves of a prediction table. Each
+        stage names it and declares the shard it owns, and a read names the dataset instead
+        of picking whichever writer happens to be in scope.
         """
         d = _assets.Dataset(_canon(dataset), ext, allow_missing,
                             _assets._fixed(part, _canon(dataset)),
@@ -491,6 +498,41 @@ class Invalidator:
                 f"it there. It is one or the other.")
         self._datasets[d.dataset] = d
         return d
+
+    def data(self, dataset, *, why: str, part=None, ext: str = _sh.EXT,
+             allow_missing: bool = False, if_needed: bool = True, once: bool = False,
+             split: bool = False, external=None) -> Callable:
+        """The function that builds ONE dataset. The body returns its contents.
+
+            @iv.data(dataset="processed/features/", why="per-season box features",
+                     part="season")
+            def features(box=iv.same_part(box_raw, why="raw box for this season")):
+                return box.with_columns((pl.col("pts") * 2).alias("z"))
+
+        Upstreams are parameter defaults, so the whole declaration — dataset, selectors,
+        partition key — is readable from the function object with nothing executed and no
+        source text needed.
+
+        A read names the STAGE: `iv.all_of(features, why="...")`. There is one dataset, so
+        the stage's name is unambiguous and the path is written once.
+
+        `dataset=` is usually a path, declared right here because nothing else needs to name
+        it. It takes an `iv.dataset(...)` where something does — several stages writing
+        different shards of one dataset, each of them a single-output stage.
+        """
+        _why(why, _canon(dataset) if isinstance(dataset, str) else str(dataset))
+        if isinstance(dataset, dict):
+            raise DeclError(
+                "@iv.data builds ONE dataset and its body returns that dataset's "
+                "contents. For several — one fit, six tables — @iv.step(output=...) "
+                "takes the dict and the body returns one keyed by the same names.")
+
+        def declared(fn: Callable) -> _assets.Asset:
+            return self._register(_assets.Asset(
+                self, dataset, fn, why=why, part=part, ext=ext,
+                allow_missing=allow_missing, if_needed=if_needed, once=once,
+                split=split, single=True, external=external))
+        return declared
 
     def source(self, dataset: str, *, why: str, external=None) -> _assets.Source:
         """Declare a dataset that arrives from outside, so a read can name it.
@@ -549,32 +591,39 @@ class Invalidator:
              ext: str = _sh.EXT, allow_missing: bool = False,
              if_needed: bool = True, once: bool = False, split: bool = False,
              external=None) -> Callable:
-        """The function that BUILDS one or more datasets. Its upstreams are its parameters.
+        """The function that builds SEVERAL datasets, or none.
 
-            @iv.step(output="processed/cohorts/", why="a fit per cohort", part="season")
-            def cohorts(past=iv.before_part(features, why="prior seasons")):
-                return past.group_by("player").agg(pl.col("z").mean())
+        `output=` is a dict naming each one, and the body returns a dict keyed by those
+        names — so one expensive fit produces six tables without being run six times:
 
-        `output=` is:
+            @iv.step(output={"ratings": XPM, "career": XPM_CAREER}, why="the joint fit")
+            def xpm(bf=iv.all_of(box_features, why="the box prior")):
+                return {"ratings": r, "career": c}
 
-          a path            one dataset, declared right here because nothing else needs to
-                            name it — a read names `cohorts`, the stage. The body returns
-                            its contents.
-          an `iv.data(...)` the same, where the dataset was declared above so that reads
-                            can name it directly.
-          a dict            several, keyed by what the body returns. One expensive fit
-                            produces six tables without being run six times.
-          omitted           nothing lands in the tree — a fetch filling a download cache, a
-                            publish copying out to a bucket. There is no artifact to be
-                            stale against, so it runs every time.
+        The keys are labels private to what this body returns. Declaring each output with
+        `iv.dataset(...)` above gives a read downstream a dataset to name instead of a key
+        — `xpm["ratings"]` works, but says what this stage calls the thing rather than what
+        the thing is.
+
+        Omit `output=` for a stage that writes nothing into the tree — a fetch filling a
+        download cache, a publish copying out to a bucket. There is no artifact to be stale
+        against, so it runs every time.
+
+        ONE dataset is `@iv.data`, whose body returns its contents rather than a dict of
+        one.
         """
         _why(why, "step")
+        if output is not None and not isinstance(output, dict):
+            raise DeclError(
+                f"@iv.step builds SEVERAL datasets — output= is a dict naming each, and "
+                f"the body returns one keyed the same way. For one, @iv.data(dataset="
+                f"{output!r}) is the same stage with the body returning its contents.")
 
         def declared(fn: Callable) -> _assets.Asset:
             return self._register(_assets.Asset(
                 self, output, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
-                split=split, single=not isinstance(output, dict), external=external))
+                split=split, single=False, external=external))
         return declared
 
     def _node_name(self, fn: Callable) -> str:

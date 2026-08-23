@@ -30,11 +30,11 @@ def frame():
 def built(iv):
     """A source, a derived dataset and a terminal one — one of each shape."""
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
-    @iv.step(output="processed/mid/", why="the middle")
+    @iv.data(dataset="processed/mid/", why="the middle")
     def mid(feed=iv.all_of(feed, why="arrives out of band")):
         return feed
 
-    @iv.step(output="dump/site/", why="the app reads it")
+    @iv.data(dataset="dump/site/", why="the app reads it")
     def site(m=iv.all_of(mid, why="the middle")):
         return m
 
@@ -61,15 +61,15 @@ def test_two_stages_writing_one_dataset_are_two_nodes(iv):
     as a cycle it does not have — which is what `iv check` correctly said it did not."""
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
 
-    @iv.step(output="processed/preds/", part={"completed": "true"}, why="played")
+    @iv.data(dataset="processed/preds/", part={"completed": "true"}, why="played")
     def played(f=iv.all_of(feed, why="the feed")):
         return frame()
 
-    @iv.step(output="processed/pre/", why="the preseason nets")
+    @iv.data(dataset="processed/pre/", why="the preseason nets")
     def pre(p=iv.parts(played, completed=["true"], why="played games only")):
         return frame()
 
-    @iv.step(output="processed/preds/", part={"completed": "false"}, why="not yet played")
+    @iv.data(dataset="processed/preds/", part={"completed": "false"}, why="not yet played")
     def upcoming(t=iv.all_of(pre, why="the team ratings")):
         return frame()
 
