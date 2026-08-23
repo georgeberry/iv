@@ -84,14 +84,36 @@ iv.before_part("processed/features/", why="...")   # strictly prior — a walk-f
 iv.after_part("processed/features/", why="...")    # strictly later
 iv.between("raw/box/", why="...", ge="2020", lt=iv.PART)
 iv.parts("raw/box/", why="...", season=["2024", "2025"])
-iv.own_last_copy("raw/odds_log/", why="...")       # the copy this stage overwrites
+iv.own_last_copy(why="...")                        # the copy this stage overwrites
 ```
 
 The partition key is never repeated — `same_part` and `before_part` take it from the
-stage's own `part=`. Pass `key=` to `between` when the bounds are literal and the stage is
-not itself partitioned, and `load=False` to any of them to be handed the selected **paths**
-rather than their contents — which is what a stage wants when it passes them to something
-that opens them itself, or concatenates two datasets before reading.
+stage's own `part=`, and `own_last_copy()` names nothing at all because it can only mean
+this stage's own output. Pass `key=` to `between` when the bounds are literal and the stage
+is not itself partitioned.
+
+A read names a **dataset path, or the stage that writes it**:
+
+```python
+@iv.data(dataset="config/today/", why="poll once a day", ext=".json")
+def today():
+    return {"date": dt.date.today().isoformat()}
+
+@iv.data(dataset="raw/box_live/", why="the season being played", part={"season": LIVE})
+def box_live(clock=iv.all_of(today, as_paths=True, why="poll once a day")):
+    ...
+```
+
+Naming the stage is an ordinary Python reference, so a typo is a `NameError` where it is
+written rather than a `READ WITH NO PRODUCER` the next time someone runs `iv check` — and
+the path is not spelled twice for a rename to get half of. A dataset nothing here produces
+has no stage to name and stays a string, as does one several stages write.
+
+`as_paths=True` hands the body the selected **paths** rather than their contents — what a
+stage wants when it passes them to something that opens them itself, concatenates two
+datasets before reading, or never looks at the value and declares the read only so the read
+can make it stale. It says nothing about how staleness is decided: a key is computed from
+filenames either way, and no comparison this package makes ever opens a file.
 
 ### Walk-forward, declared
 

@@ -93,13 +93,19 @@ def load_value(paths, ext: str):
 OUT_PARAM = "out"
 
 
-def declared_reads(fn, part_key: str | None) -> tuple:
-    """The `Read` defaults in a signature, each bound to the stage's partition key."""
-    out = []
-    for p in inspect.signature(fn).parameters.values():
-        if isinstance(p.default, _decl.Read):
-            out.append(p.default.bound_to(part_key))
-    return tuple(out)
+def declared_reads(fn, part_key: str | None, own: str | None = None) -> dict:
+    """The `Read` defaults in a signature, by parameter name, bound to what the stage says
+    about itself.
+
+    Two things are filled in here rather than written twice: the partition key a relative
+    selector applies to, and the output an `own_last_copy()` means — both of which the
+    decorator already said, three lines above the signature. Returned BY PARAMETER so the
+    body is handed the same reads the graph was told about; deriving them twice is how a
+    resolved one and an unresolved one end up in the same stage.
+    """
+    return {name: p.default.bound_to(part_key).against(own)
+            for name, p in inspect.signature(fn).parameters.items()
+            if isinstance(p.default, _decl.Read)}
 
 
 def has_declared_reads(fn) -> bool:
@@ -214,7 +220,8 @@ class Asset:
         if self.acts_only and (self.split or self.part_key or self.fixed_part):
             raise DeclError(
                 f"{self.primary} writes nothing, so it has no shard for part= to name.")
-        self.reads = declared_reads(fn, self.part_key)
+        self.by_param = declared_reads(fn, self.part_key, self._own_output(fn))
+        self.reads = tuple(self.by_param.values())
         self.externals = _externals(external, self.primary)
         self.wants_out = OUT_PARAM in inspect.signature(fn).parameters
         if self.wants_out and not self.single:
@@ -232,8 +239,28 @@ class Asset:
         return next(iter(self.outputs.values())).dataset
 
     @property
+    def dataset(self) -> str:
+        """What `iv.all_of(this_stage, ...)` means: the dataset it writes.
+
+        A stage writing several has no single answer, so it says so rather than picking
+        the first — `iv.all_of("processed/xpm/", ...)` names which.
+        """
+        if len(self.outputs) != 1:
+            raise DeclError(
+                f"{self.__name__} writes {len(self.outputs)} datasets, so naming the stage "
+                f"in a read does not say which: {sorted(self.datasets)}. Name the dataset.")
+        return self.primary
+
+    @property
     def datasets(self) -> tuple:
         return tuple(o.dataset for o in self.outputs.values())
+
+    def _own_output(self, fn) -> str | None:
+        """What a bare `own_last_copy()` in this signature means: the one dataset written.
+
+        None when there are several, so `Read.against` can say so rather than pick.
+        """
+        return self.primary if len(self.outputs) == 1 else None
 
     def part_for(self, dataset: str) -> tuple:
         """The literal shard this stage owns OF THIS DATASET, if it owns one.
@@ -450,14 +477,11 @@ class Asset:
         kw: dict = {}
         if self.part_key is not None and self.part_key in params and part:
             kw[self.part_key] = part[self.part_key]
-        for name, p in params.items():
-            if not isinstance(p.default, _decl.Read):
-                continue
-            r = p.default.bound_to(self.part_key)
+        for name, r in self.by_param.items():
             paths = iv.reads(r.dataset, why=r.why,
                              where=_resolve_sel(r.sel(), part, r.dataset),
                              optional=r.optional, update_file_on_disk=r.is_own)
-            if not r.load:
+            if r.as_paths:
                 kw[name] = list(paths)          # what iv.reads has always handed back
             else:
                 kw[name] = load_value(paths, _ext_of(paths, _sh.EXT)) if paths else None
@@ -477,6 +501,8 @@ class Asset:
             live = _sh.current_shards(iv.resolve_out(o.dataset))
             got = live.get(_sh.encode_part(part if part is not None else self.fixed_part))
             if got is None:
+                if o.allow_missing:
+                    return None
                 raise StateError(
                     f"{o.dataset} has no shard for "
                     f"{_sh.encode_part(part) or '(one shard)'} — it was not built.")

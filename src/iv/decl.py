@@ -43,6 +43,26 @@ def _canon(dataset: str) -> str:
     return d + "/"
 
 
+def _target(dataset) -> str:
+    """What a read names: a dataset path, or the STAGE that writes it.
+
+    Naming the stage is an ordinary Python reference — `iv.all_of(today, ...)` — so a typo
+    is a NameError where it is written rather than a READ WITH NO PRODUCER the next time
+    someone runs `iv check`, and the path is not spelled out twice for a rename to get half
+    of. A dataset nothing here produces has no stage to name and stays a string.
+
+    Duck-typed rather than imported: `assets` imports this module, so it cannot be imported
+    back.
+    """
+    named = getattr(dataset, "dataset", dataset)
+    if not isinstance(named, str):
+        raise DeclError(
+            f"a read names a dataset path — iv.all_of('raw/box/', why='...') — or the "
+            f"stage that writes it — iv.all_of(box, why='...'), where `box` is a function "
+            f"decorated with @iv.data. Got {dataset!r}.")
+    return _canon(named)
+
+
 def _why(why: object, dataset: str) -> str:
     if not isinstance(why, str) or not why.strip():
         raise DeclError(
@@ -71,10 +91,14 @@ class Read:
     optional: bool = False
     key: str | None = None
     why: str = ""
-    #: False hands the body the selected PATHS instead of their contents — what
-    #: `iv.reads` has always returned. A stage that passes them to something which opens
-    #: them itself, or that concatenates two datasets before reading, wants the paths.
-    load: bool = True
+    #: True hands the body the selected PATHS instead of their contents — what `iv.reads`
+    #: has always returned. It says nothing about how staleness is decided: a key is
+    #: computed from FILENAMES either way, and no comparison this package makes ever opens
+    #: a file. It is only about the argument. Wanted by a stage that passes the paths to
+    #: something which opens them itself, that concatenates two datasets before reading, or
+    #: that never looks at the value at all and declares the read so the read can make it
+    #: stale — a clock being the usual one.
+    as_paths: bool = False
 
     @property
     def is_own(self) -> bool:
@@ -90,7 +114,19 @@ class Read:
                 f"stage declares no part=. A partition-relative selector only means "
                 f"something where there is a partition: @iv.data(..., part='season').")
         return Read(self.dataset, self.kind, self.body, self.optional, part_key, self.why,
-                    self.load)
+                    self.as_paths)
+
+    def against(self, own: str | None) -> "Read":
+        """An `own_last_copy()` that named nothing, pointed at the stage's own output."""
+        if self.dataset is not None:
+            return self
+        if own is None:
+            raise DeclError(
+                "own_last_copy() means the copy of its OWN output this stage is about to "
+                "overwrite, and this stage writes several — name which: "
+                "own_last_copy('raw/odds_log/', why='...').")
+        return Read(own, self.kind, self.body, self.optional, self.key, self.why,
+                    self.as_paths)
 
     def sel(self) -> tuple:
         """The selector, in the shape `key_of` and `_resolve_sel` already consume."""
@@ -116,40 +152,40 @@ class Read:
 
 # ── the vocabulary ────────────────────────────────────────────────────────────
 
-def all_of(dataset: str, *, why: str, optional: bool = False, load: bool = True) -> Read:
+def all_of(dataset, *, why: str, optional: bool = False, as_paths: bool = False) -> Read:
     """Every shard. A joint fit reads this way, and that is visible here rather than
     buried in the builder."""
-    d = _canon(dataset)
-    return Read(d, "all", (), optional, None, _why(why, d), load)
+    d = _target(dataset)
+    return Read(d, "all", (), optional, None, _why(why, d), as_paths)
 
 
-def same_part(dataset: str, *, why: str, optional: bool = False,
-              load: bool = True) -> Read:
+def same_part(dataset, *, why: str, optional: bool = False,
+              as_paths: bool = False) -> Read:
     """The one shard matching the partition being built."""
-    d = _canon(dataset)
-    return Read(d, "in", (PART,), optional, None, _why(why, d), load)
+    d = _target(dataset)
+    return Read(d, "in", (PART,), optional, None, _why(why, d), as_paths)
 
 
-def before_part(dataset: str, *, why: str, inclusive: bool = False,
-                optional: bool = False, load: bool = True) -> Read:
+def before_part(dataset, *, why: str, inclusive: bool = False,
+                optional: bool = False, as_paths: bool = False) -> Read:
     """Everything ordered before this partition — a walk-forward bound.
 
     The selector picks FILES, so a cohort physically cannot open a later season. One
     backfilled BELOW the bound is picked up; one added above it is not.
     """
-    d = _canon(dataset)
+    d = _target(dataset)
     return Read(d, "range", (("le" if inclusive else "lt", PART),), optional, None,
-                _why(why, d), load)
+                _why(why, d), as_paths)
 
 
-def after_part(dataset: str, *, why: str, inclusive: bool = False,
-               optional: bool = False, load: bool = True) -> Read:
-    d = _canon(dataset)
+def after_part(dataset, *, why: str, inclusive: bool = False,
+               optional: bool = False, as_paths: bool = False) -> Read:
+    d = _target(dataset)
     return Read(d, "range", (("ge" if inclusive else "gt", PART),), optional, None,
-                _why(why, d), load)
+                _why(why, d), as_paths)
 
 
-def between(dataset: str, *, why: str, optional: bool = False, load: bool = True,
+def between(dataset, *, why: str, optional: bool = False, as_paths: bool = False,
             key: str | None = None, **bounds) -> Read:
     """A window: between('raw/box/', why='...', ge='2020', lt=iv.PART).
 
@@ -157,7 +193,7 @@ def between(dataset: str, *, why: str, optional: bool = False, load: bool = True
     literal and the stage is not itself partitioned — a stage with `part=` lends its own
     key, and `iv.PART` only means anything where there is one.
     """
-    d = _canon(dataset)
+    d = _target(dataset)
     ops = {"lt", "le", "gt", "ge"}
     bad = sorted(set(bounds) - ops)
     if bad:
@@ -165,14 +201,14 @@ def between(dataset: str, *, why: str, optional: bool = False, load: bool = True
     if not bounds:
         raise DeclError(f"{d}: between() needs at least one of {sorted(ops)}.")
     body = tuple(sorted((op, v if v == PART else str(v)) for op, v in bounds.items()))
-    return Read(d, "range", body, optional, key, _why(why, d), load)
+    return Read(d, "range", body, optional, key, _why(why, d), as_paths)
 
 
-def parts(dataset: str, *, why: str, optional: bool = False, load: bool = True,
+def parts(dataset, *, why: str, optional: bool = False, as_paths: bool = False,
           **values) -> Read:
     """An explicit set, which is a COVERAGE CLAIM: a value that is not there is an error
     rather than a quietly shorter read."""
-    d = _canon(dataset)
+    d = _target(dataset)
     if len(values) != 1:
         raise DeclError(
             f"{d}: parts() names exactly one partition key — "
@@ -183,15 +219,20 @@ def parts(dataset: str, *, why: str, optional: bool = False, load: bool = True,
     body = tuple(sorted(v if v == PART else str(v) for v in vals))
     if not body:
         raise DeclError(f"{d}: parts() was given no values for {key!r}.")
-    return Read(d, "in", body, optional, key, _why(why, d), load)
+    return Read(d, "in", body, optional, key, _why(why, d), as_paths)
 
 
-def own_last_copy(dataset: str, *, why: str, load: bool = True) -> Read:
+def own_last_copy(dataset=None, *, why: str, as_paths: bool = False) -> Read:
     """The copy of its own output this stage is about to overwrite.
 
     Recorded for lineage and EXCLUDED from the comparison — otherwise the stage would be
     permanently stale against its own last output, one step behind itself, forever. Being
     absent is normal on the first run, so it is always optional.
+
+    It is the one read that cannot name a stage: it means THIS stage, and the `Asset` does
+    not exist yet when parameter defaults are evaluated. So it names nothing at all by
+    default and is filled in at decoration from the stage's own output. A stage writing
+    several has to say which.
     """
-    d = _canon(dataset)
-    return Read(d, "own", (), True, None, _why(why, d), load)
+    d = _target(dataset) if dataset is not None else None
+    return Read(d, "own", (), True, None, _why(why, d or "own_last_copy()"), as_paths)

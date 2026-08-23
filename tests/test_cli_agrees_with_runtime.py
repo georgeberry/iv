@@ -188,7 +188,7 @@ from p import iv
 
 @iv.data("processed/mid/", why="the middle")
 def build(one=iv.all_of("raw/feed/", why="the upstream, one way"),
-          other=iv.all_of("raw/feed/", load=False, why="the upstream, the other way")):
+          other=iv.all_of("raw/feed/", as_paths=True, why="the upstream, the other way")):
     return one
 '''
 
@@ -305,7 +305,7 @@ def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkey
         return {"date": day[0]}
 
     @iv.data("raw/feed/", why="a polled feed")
-    def feed(clock=iv.all_of("config/today/", load=False, why="poll once a day")):
+    def feed(clock=iv.all_of("config/today/", as_paths=True, why="poll once a day")):
         return pl.DataFrame({"a": [1]})
 
     @iv.data("processed/mid/", why="the middle")

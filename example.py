@@ -106,7 +106,7 @@ def box_settled(season):
     part={"season": LIVE},
     external={"espn/feeds": "ESPN's live feed"},
 )
-def box_live(clock=iv.all_of("config/today/", load=False, why="poll once a day")):
+def box_live(clock=iv.all_of(today, as_paths=True, why="poll once a day")):
     """ONE shard, named outright with a literal `part=`. It reads the clock, so it re-fetches
     when the day turns — and it is the only thing that does."""
     ran.append("live")
@@ -119,8 +119,8 @@ def box_live(clock=iv.all_of("config/today/", load=False, why="poll once a day")
          part="season")
 def box(
     season,
-    settled=iv.same_part("raw/box_settled/", optional=True, why="a finished season"),
-    live=iv.same_part("raw/box_live/", optional=True, why="the season being played"),
+    settled=iv.same_part(box_settled, optional=True, why="a finished season"),
+    live=iv.same_part(box_live, optional=True, why="the season being played"),
 ):
     """Both halves are declared and one is used. A declaration resolves every read before
     the body runs, so the half this season is not in has to be optional rather than absent —
@@ -140,14 +140,15 @@ def box(
     external={"espn/scoreboard": "final scores, which land all day"},
 )
 def schedule(
-    clock=iv.all_of("config/today/", why="scores land all day; re-check daily"),
-    was=iv.own_last_copy("derived/schedule/", why="the copy this amends"),
+    clock=iv.all_of(today, why="scores land all day; re-check daily"),
+    was=iv.own_last_copy(why="the copy this amends"),
 ):
     """READ-MODIFY-WRITE, which used to need its own primitive.
 
-    `own_last_copy` says: this is the copy on disk I am about to overwrite. It is recorded
+    `own_last_copy()` says: this is the copy on disk I am about to overwrite. It is recorded
     for lineage and EXCLUDED from the comparison — otherwise the stage would be permanently
-    stale against its own last output, one step behind itself, forever.
+    stale against its own last output, one step behind itself, forever. It names nothing
+    because it can only mean one thing: the output this stage declares, three lines up.
     """
     ran.append("schedule")
     old = (
@@ -167,8 +168,8 @@ def schedule(
     split=True,
 )
 def box_features(
-    box=iv.all_of("raw/box/", why="every season of raw box scores"),
-    sched=iv.all_of("derived/schedule/", why="which games count"),
+    box=iv.all_of(box, why="every season of raw box scores"),
+    sched=iv.all_of(schedule, why="which games count"),
 ):
     """The features have career-cumulative terms, so they are built in ONE pass and split.
 
@@ -189,7 +190,7 @@ def box_features(
     part={"source": "ncaa"},
 )
 def ncaa_block(
-    bf=iv.all_of("derived/box_features/", why="the pro side to rank against")
+    bf=iv.all_of(box_features, why="the pro side to rank against")
 ):
     """A LITERAL part= is how several stages share one dataset. Each owns exactly one shard,
     so the graph can see they do not collide — without it, whichever ran last would win.
@@ -199,7 +200,7 @@ def ncaa_block(
 
 
 @iv.data(dataset="derived/college/", why="the G-League block", part={"source": "gleague"})
-def gleague_block(bf=iv.all_of("derived/box_features/", why="the pro side")):
+def gleague_block(bf=iv.all_of(box_features, why="the pro side")):
     ran.append("gleague")
     return pl.DataFrame({"source": ["gleague"], "n": [1]})
 
@@ -210,7 +211,7 @@ def gleague_block(bf=iv.all_of("derived/box_features/", why="the pro side")):
     part={"source": "intl"},
     external={"basketball-reference/international": "the international player pages"},
 )
-def intl_block(bf=iv.all_of("derived/box_features/", why="the pro side")):
+def intl_block(bf=iv.all_of(box_features, why="the pro side")):
     ran.append("intl")
     return pl.DataFrame({"source": ["intl"], "n": [1]})
 
@@ -228,8 +229,8 @@ def intl_block(bf=iv.all_of("derived/box_features/", why="the pro side")):
     why="the joint fit and the tables that fall out of it",
 )
 def xpm(
-    knobs=iv.all_of("config/model/", why="a knob change must refit"),
-    bf=iv.all_of("derived/box_features/", why="the box prior, every season at once"),
+    knobs=iv.all_of(model_config, why="a knob change must refit"),
+    bf=iv.all_of(box_features, why="the box prior, every season at once"),
     college=iv.all_of("derived/college/", why="the college block, all three sources"),
 ):
     """ONE expensive computation, four tables. Declaring them together is what stops the fit
@@ -256,8 +257,8 @@ def xpm(
     ext=".pkl",
 )
 def rapm_fit(
-    knobs=iv.all_of("config/model/", why="the fit shape"),
-    bf=iv.all_of("derived/box_features/", why="the design matrix"),
+    knobs=iv.all_of(model_config, why="the fit shape"),
+    bf=iv.all_of(box_features, why="the design matrix"),
 ):
     """Not every artifact is a table. `.pkl` round trips whatever the body returned."""
     ran.append("rapm_fit")
@@ -274,7 +275,7 @@ def rapm_fit(
 )
 def xpm_eoy(
     season,
-    knobs=iv.all_of("config/model/", why="a knob change must refit this season"),
+    knobs=iv.all_of(model_config, why="a knob change must refit this season"),
     bf=iv.before_part(
         "derived/box_features/",
         inclusive=True,
@@ -292,7 +293,7 @@ def xpm_eoy(
     part="season",
 )
 def rookie(
-    bf=iv.before_part("derived/box_features/", why="strictly before this cohort"),
+    bf=iv.before_part(box_features, why="strictly before this cohort"),
     college=iv.all_of("derived/college/", why="the college block"),
 ):
     """EXCLUSIVE: `lt`. The bound picks FILES, so a cohort physically cannot open its own
@@ -312,7 +313,7 @@ def rookie(
 )
 def predict_played(
     x=iv.all_of("processed/xpm/", why="the ratings each game is priced off"),
-    sched=iv.all_of("derived/schedule/", why="which games were played"),
+    sched=iv.all_of(schedule, why="which games were played"),
 ):
     ran.append("predict_played")
     return pl.DataFrame({"game": [1], "margin": [3.5]})
@@ -325,7 +326,7 @@ def predict_played(
 )
 def predict_upcoming(
     x=iv.all_of("processed/xpm/", why="the ratings"),
-    sched=iv.all_of("derived/schedule/", why="the remaining schedule"),
+    sched=iv.all_of(schedule, why="the remaining schedule"),
 ):
     ran.append("predict_upcoming")
     return pl.DataFrame({"game": [2], "margin": [-1.5]})
@@ -360,9 +361,9 @@ def calibration(
 def site(
     out,
     x=iv.all_of("processed/xpm/", why="the leaderboard"),
-    fit=iv.all_of("processed/rapm_fit/", why="the fit, for the ridge it used"),
-    eoy=iv.all_of("processed/xpm_eoy/", why="the end-of-year column"),
-    rk=iv.all_of("processed/rookie/", why="the rookie projections"),
+    fit=iv.all_of(rapm_fit, why="the fit, for the ridge it used"),
+    eoy=iv.all_of(xpm_eoy, why="the end-of-year column"),
+    rk=iv.all_of(rookie, why="the rookie projections"),
     preds=iv.all_of("processed/predictions/", why="today's games"),
     cal=iv.all_of(
         "processed/calibration/", optional=True, why="the sigma, once there is one"
@@ -503,14 +504,14 @@ def dict_to_parquet():
 def part_relative_with_no_partition():
     @iv.data(dataset="processed/bad_bound/",
              why="not partitioned, but reads as if it were")
-    def bad_bound(bf=iv.same_part("derived/box_features/", why="this season")):
+    def bad_bound(bf=iv.same_part(box_features, why="this season")):
         return bf
 
 
 def a_second_writer_of_the_same_shard():
     @iv.data(dataset="derived/college/", why="a second NCAA block",
              part={"source": "ncaa"})
-    def ncaa_again(bf=iv.all_of("derived/box_features/", why="the pro side")):
+    def ncaa_again(bf=iv.all_of(box_features, why="the pro side")):
         return bf
 
 
@@ -523,7 +524,7 @@ def an_output_that_was_not_returned():
         output={"a": "processed/out_a/", "b": "processed/out_b/"},
         why="declares two outputs and returns one",
     )
-    def two(bf=iv.all_of("derived/box_features/", why="the box prior")):
+    def two(bf=iv.all_of(box_features, why="the box prior")):
         return {"a": bf}
 
     two()
@@ -532,7 +533,7 @@ def an_output_that_was_not_returned():
 def building_a_stage_from_inside_one():
     @iv.data(dataset="processed/reaches/",
              why="reaches for a stage instead of declaring it")
-    def reaches(unused=iv.all_of("config/today/", why="declared, then ignored")):
+    def reaches(unused=iv.all_of(today, why="declared, then ignored")):
         return box("2024")
 
     reaches()

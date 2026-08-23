@@ -214,7 +214,7 @@ def test_the_clock_is_a_file(iv, monkeypatch):
 
     @iv.data("raw/feed/", why="a polled feed",
              external={"some/api": "the upstream service"})
-    def fetch(clock=iv.all_of("config/today/", why="poll once a day", load=False)):
+    def fetch(clock=iv.all_of("config/today/", why="poll once a day", as_paths=True)):
         fetches.append(1)
         return pl.DataFrame({"a": [1]})
 
@@ -367,7 +367,7 @@ def test_a_walk_forward_partition_cannot_see_the_future(iv):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
 
     @iv.data("processed/cohort/", why="a cohort fit on prior seasons", part="season")
-    def cohort(past=iv.before_part("raw/box/", load=False,
+    def cohort(past=iv.before_part("raw/box/", as_paths=True,
                                    why="seasons strictly before this cohort")):
         assert all("season=2026" not in p.name for p in past) or True
         return pl.read_parquet(past)
@@ -397,7 +397,7 @@ def test_an_update_read_is_lineage_or_a_stage_is_stale_against_its_own_last_outp
     ran = []
 
     @iv.data("raw/log/", why="a running history")
-    def build(clock=iv.all_of("config/today/", why="append once a day", load=False),
+    def build(clock=iv.all_of("config/today/", why="append once a day", as_paths=True),
               have=iv.own_last_copy("raw/log/", why="yesterday's copy"),
               feed=iv.all_of("raw/feed/", why="today")):
         ran.append(1)
@@ -480,7 +480,7 @@ def test_a_write_outside_a_stage_does_not_inherit_the_last_one_s_reads(iv):
     seed(iv, "raw/box/", part={"season": "2019"})
 
     @iv.data("processed/out/", why="passthrough")
-    def build(box=iv.all_of("raw/box/", why="every season", load=False)):
+    def build(box=iv.all_of("raw/box/", why="every season", as_paths=True)):
         return pl.DataFrame({"a": [1]})
 
     build()
@@ -689,7 +689,7 @@ def test_adding_a_dependency_reruns_the_stage(iv):
     def two_inputs():
         @redeclared(iv).data("processed/mid/", why="mid")
         def mid(feed=iv.all_of("raw/feed/", why="the upstream"),
-                extra=iv.all_of("raw/extra/", load=False,
+                extra=iv.all_of("raw/extra/", as_paths=True,
                                 why="a dependency added after the first build")):
             ran.append(1)
             return feed

@@ -128,3 +128,65 @@ def test_a_scalar_is_a_set_of_one():
 
 def test_values_are_stringified_like_the_scan_does():
     assert decl.parts("raw/box/", why="x", season=[2025, 2024]).body == ("2024", "2025")
+
+
+# ── a read names a dataset, or the stage that writes it ───────────────────────
+
+class _FakeStage:
+    """What `@iv.data` hands back: something that knows its own dataset."""
+    dataset = "processed/features/"
+
+
+def test_a_read_may_name_the_stage_that_writes_it():
+    """Naming the stage is an ordinary Python reference, so a typo is a NameError where it
+    is written rather than a READ WITH NO PRODUCER the next time someone runs `iv check`."""
+    named = decl.all_of(_FakeStage(), why="x")
+    spelled = decl.all_of("processed/features/", why="x")
+    assert named == spelled
+
+
+def test_a_dataset_nothing_produces_is_still_a_path():
+    """A source has no stage to name."""
+    assert decl.all_of("raw_data/pbp_official/", why="x").dataset == "raw_data/pbp_official/"
+
+
+def test_every_helper_takes_either_form():
+    for make in (decl.all_of, decl.same_part, decl.before_part, decl.after_part):
+        assert make(_FakeStage(), why="x").dataset == "processed/features/"
+    assert decl.parts(_FakeStage(), why="x", season=["2024"]).dataset == "processed/features/"
+    assert decl.between(_FakeStage(), why="x", lt="2021").dataset == "processed/features/"
+
+
+def test_something_that_is_neither_says_so():
+    with pytest.raises(DeclError, match="names a dataset path"):
+        decl.all_of(len, why="x")
+
+
+# ── as_paths ──────────────────────────────────────────────────────────────────
+
+def test_as_paths_defaults_to_the_contents():
+    assert decl.all_of("d/", why="x").as_paths is False
+    assert decl.all_of("d/", why="x", as_paths=True).as_paths is True
+
+
+def test_as_paths_survives_being_bound_to_a_partition():
+    r = decl.same_part("d/", why="x", as_paths=True).bound_to("season")
+    assert r.as_paths is True and r.sel() == (("season", ("in", (PART,))),)
+
+
+# ── own_last_copy names nothing, because it can only mean one thing ───────────
+
+def test_own_last_copy_names_nothing_until_the_stage_says():
+    bare = decl.own_last_copy(why="yesterday's copy")
+    assert bare.dataset is None and bare.is_own
+    assert bare.against("raw/log/").dataset == "raw/log/"
+
+
+def test_own_last_copy_may_still_name_one():
+    named = decl.own_last_copy("raw/log/", why="x")
+    assert named.against("something/else/").dataset == "raw/log/", "an explicit one wins"
+
+
+def test_a_bare_own_last_copy_on_a_stage_writing_several_says_so():
+    with pytest.raises(DeclError, match="writes several"):
+        decl.own_last_copy(why="x").against(None)

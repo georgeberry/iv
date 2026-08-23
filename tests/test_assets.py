@@ -579,7 +579,7 @@ def test_a_stage_may_write_nothing_and_still_declare_what_it_reads(iv):
 
     @iv.step(why="copy the payload somewhere outside the tree",
              external={"gs://bucket": "the bucket the app reads"})
-    def publish(payload=iv.all_of("dump/site/", load=False, why="what to upload")):
+    def publish(payload=iv.all_of("dump/site/", as_paths=True, why="what to upload")):
         ran.append(list(payload))
 
     site()
@@ -603,3 +603,103 @@ def test_a_stage_that_writes_nothing_has_no_partition(iv):
         @iv.step(why="writes nothing but claims a partition", part="season")
         def act(x=iv.all_of("raw/feed/", why="something")):
             pass
+
+
+# ── as_paths: what the parameter is handed ────────────────────────────────────
+
+def test_as_paths_hands_back_paths_and_the_default_hands_back_contents(iv):
+    @iv.data(dataset="raw/feed/", why="the feed", once=True)
+    def feed():
+        return frame()
+
+    got = {}
+
+    @iv.data(dataset="processed/contents/", why="wants the frame")
+    def contents(f=iv.all_of(feed, why="the upstream")):
+        got["contents"] = f
+        return f
+
+    @iv.data(dataset="processed/paths/", why="wants the paths")
+    def paths(f=iv.all_of(feed, as_paths=True, why="the upstream")):
+        got["paths"] = f
+        return frame()
+
+    feed(); contents(); paths()
+    assert isinstance(got["contents"], pl.DataFrame)
+    assert isinstance(got["paths"], list)
+    assert str(got["paths"][0]).endswith(".parquet")
+
+
+def test_an_optional_read_that_selects_nothing_is_empty_either_way(iv):
+    """The two forms disagree on what "nothing" looks like, and both are the natural one
+    for their side: `[]` concatenates with another path list, `None` tests with `is None`."""
+    got = {}
+
+    @iv.data(dataset="processed/out/", why="reads what may not be there")
+    def out(p=iv.all_of("raw/absent/", optional=True, as_paths=True, why="maybe"),
+            c=iv.all_of("raw/absent/", optional=True, why="maybe")):
+        got.update(paths=p, contents=c)
+        return frame()
+
+    out()
+    assert got["paths"] == [] and got["contents"] is None
+
+
+# ── a read names the stage that writes it ─────────────────────────────────────
+
+def test_naming_the_stage_builds_the_same_graph_as_naming_the_path(iv):
+    @iv.data(dataset="raw/feed/", why="the feed", once=True)
+    def feed():
+        return frame()
+
+    @iv.data(dataset="processed/out/", why="passthrough", terminal=True)
+    def out(f=iv.all_of(feed, why="the upstream")):
+        return f
+
+    assert [r.dataset for r in out.reads] == ["raw/feed/"]
+    errors, _ = _graph.check(_graph.build(iv))
+    assert errors == [], errors
+
+
+def test_naming_a_stage_that_writes_several_does_not_say_which(iv):
+    @iv.step(output={"a": "out/a/", "b": "out/b/"}, why="two tables")
+    def two():
+        return {"a": frame(), "b": frame()}
+
+    with pytest.raises(DeclError, match="does not say which"):
+        iv.all_of(two, why="ambiguous")
+
+
+# ── own_last_copy with nothing to name ────────────────────────────────────────
+
+def test_a_bare_own_last_copy_means_this_stage_s_own_output(iv):
+    """The read-modify-write loop, with the dataset written once instead of twice."""
+    day = ["day1"]
+    ran = []
+
+    @iv.data(dataset="config/today/", why="the clock", ext=".json")
+    def today():
+        return {"date": day[0]}
+
+    @iv.data(dataset="raw/log/", why="a running log, appended once a day")
+    def log(clock=iv.all_of(today, as_paths=True, why="append once a day"),
+            prior=iv.own_last_copy(why="yesterday's copy")):
+        ran.append(1)
+        old = prior if prior is not None else pl.DataFrame(schema={"date": pl.Utf8})
+        return pl.concat([old, pl.DataFrame({"date": [day[0]]})]).unique("date")
+
+    assert [(r.dataset, r.is_own) for r in log.reads] == \
+        [("config/today/", False), ("raw/log/", True)]
+
+    today(); log()
+    assert log.is_current(), "its own copy must not make it stale against itself"
+    day[0] = "day2"
+    today()
+    assert log().height == 2 and len(ran) == 2
+
+
+def test_a_bare_own_last_copy_on_a_multi_output_stage_is_refused(iv):
+    with pytest.raises(DeclError, match="writes several"):
+        @iv.step(output={"a": "out/a/", "b": "out/b/"}, why="two tables")
+        def two(prior=iv.own_last_copy(why="which one?")):
+            return {"a": frame(), "b": frame()}
