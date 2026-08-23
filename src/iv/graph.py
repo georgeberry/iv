@@ -179,13 +179,26 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
 
     produced = set(g.produced)
     for name, d in sorted(getattr(g.iv, "_datasets", {}).items()):
-        if name not in produced:
+        if name in produced:
+            continue
+        readers = g.consumers_of(name)
+        if readers:
+            # READ but never WRITTEN. Not a style problem: the read resolves to a selector
+            # over a directory nothing fills, so it fails at BUILD time — after however
+            # long the upstream stages took — with a message about an empty dataset rather
+            # than about the stage that was supposed to write it.
+            errors.append(
+                f"READ, NOBODY WRITES  {name}\n"
+                f"    declared with iv.dataset(...) — {d.why} — and read by "
+                f"{', '.join(readers)}, but named in no stage's output=. Nothing puts it "
+                f"there, so the read cannot succeed. Write it with @iv.data or @iv.step, "
+                f"or declare it a source if it arrives from outside.")
+        else:
             warns.append(
                 f"DECLARED, NOBODY WRITES  {name}\n"
-                f"    declared with iv.data(...) — {d.why} — and named in no stage's "
-                f"output=, so nothing puts it there. A declaration exists to be pointed "
-                f"at; one nothing produces is a name a rename left behind. Wire it up, "
-                f"delete it, or declare it a source if it arrives from outside.")
+                f"    declared with iv.dataset(...) — {d.why} — and named in no stage's "
+                f"output=, so nothing puts it there. Nothing reads it either, so this is a "
+                f"name a rename left behind. Wire it up, or delete it.")
 
     cyc = find_cycle(g)
     if cyc:

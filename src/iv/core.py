@@ -491,11 +491,25 @@ class Invalidator:
         """
         d = _assets.Dataset(_canon(dataset), ext, allow_missing,
                             _assets._fixed(part, _canon(dataset)),
-                            _why(why, _canon(dataset)))
+                            _why(why, _canon(dataset)), standalone=True)
         if d.dataset in self._sources:
             raise DeclError(
                 f"{d.dataset} was declared a source — something outside this pipeline puts "
                 f"it there. It is one or the other.")
+        if d.dataset in self._datasets:
+            raise DeclError(
+                f"{d.dataset} is already declared: {self._datasets[d.dataset].why!r}. A "
+                f"dataset is declared ONCE and named everywhere else — that is the whole "
+                f"point of declaring it. Two declarations are two why= lines that can "
+                f"disagree, and a rename that gets one of them.")
+        if d.dataset in self._declared:
+            writer = next(a.__name__ for a in self._assets.values()
+                          if d.dataset in a.datasets)
+            raise DeclError(
+                f"{d.dataset} is already declared by {writer!r}, which names it in its own "
+                f"output=. Declare it here and have that stage name THIS — "
+                f"output={dataset.strip('/').rsplit('/', 1)[-1].upper()} — or leave it "
+                f"there and drop this line. Not both.")
         self._datasets[d.dataset] = d
         return d
 
@@ -544,6 +558,10 @@ class Invalidator:
                 ...
         """
         src = _assets.Source(dataset, why=why, external=external)
+        if src.dataset in self._sources:
+            raise DeclError(
+                f"{src.dataset} is already declared a source: "
+                f"{self._sources[src.dataset].why!r}. A dataset is declared once.")
         if src.dataset in self._datasets:
             raise DeclError(
                 f"{src.dataset} was declared with iv.data(...) — a dataset this pipeline "
@@ -557,6 +575,13 @@ class Invalidator:
         return src
 
     def _register(self, asset: _assets.Asset) -> _assets.Asset:
+        for name, o in asset.outputs.items():
+            if o.dataset in self._datasets and not o.standalone:
+                raise DeclError(
+                    f"{o.dataset} is already declared on its own line — "
+                    f"{self._datasets[o.dataset].why!r} — and {asset.__name__!r} writes "
+                    f"the path out again. Name the declaration instead, so the path is "
+                    f"written once and a rename cannot get half of it.")
         for name in asset.datasets:
             if name in self._sources:
                 raise DeclError(

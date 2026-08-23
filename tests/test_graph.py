@@ -175,14 +175,14 @@ def test_a_second_producer_is_refused_at_declaration(iv):
 
 def test_different_partitions_of_one_dataset_are_allowed(iv):
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
-    @iv.data(dataset="processed/preds/", part={"completed": "true"}, why="played")
-    def played(feed=iv.all_of(feed, why="the feed")):
-        return feed
 
-    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+    @iv.data(dataset="processed/preds/", part={"completed": "true"}, why="played")
+    def played(f=iv.all_of(feed, why="the feed")):
+        return f
+
     @iv.data(dataset="processed/preds/", part={"completed": "false"}, why="not yet played")
-    def upcoming(feed=iv.all_of(feed, why="the feed")):
-        return feed
+    def upcoming(f=iv.all_of(feed, why="the feed")):
+        return f
 
     @iv.data(dataset="dump/site/", why="the app reads it")
     def site(p=iv.all_of(upcoming, why="both halves")):

@@ -637,10 +637,11 @@ def test_an_optional_read_that_selects_nothing_is_empty_either_way(iv):
     """The two forms disagree on what "nothing" looks like, and both are the natural one
     for their side: `[]` concatenates with another path list, `None` tests with `is None`."""
     got = {}
+    absent = iv.source("raw/absent/", why="arrives from outside")
 
     @iv.data(dataset="processed/out/", why="reads what may not be there")
-    def out(p=iv.all_of(iv.source("raw/absent/", why="arrives from outside"), optional=True, as_paths=True, why="maybe"),
-            c=iv.all_of(iv.source("raw/absent/", why="arrives from outside"), optional=True, why="maybe")):
+    def out(p=iv.all_of(absent, optional=True, as_paths=True, why="maybe"),
+            c=iv.all_of(absent, optional=True, why="maybe")):
         got.update(paths=p, contents=c)
         return frame()
 
@@ -791,3 +792,129 @@ def test_a_multi_output_stage_cannot_read_its_own_copy_without_a_declaration(iv)
         @iv.step(output={"box": "raw/box/", "pbp": "raw/pbp/"}, why="patch both")
         def patch(was=iv.own_last_copy(why="the copy this amends")):
             return {"box": frame(), "pbp": frame()}
+
+
+# ── a dataset is declared exactly once ────────────────────────────────────────
+#
+# The point of `iv.dataset` is that the path is written in ONE place and named everywhere
+# else. A second declaration takes that away silently: two `why=` lines that can drift
+# apart, and a rename that gets one of them and leaves the other pointing at a directory
+# nothing fills.
+
+def test_declaring_the_same_dataset_twice_is_refused(iv):
+    iv.dataset("processed/x/", why="a rating per player")
+    with pytest.raises(DeclError, match="already declared"):
+        iv.dataset("processed/x/", why="something else entirely")
+
+
+def test_the_second_declaration_does_not_silently_win(iv):
+    """It used to overwrite, so the LAST `iv.dataset` call decided what the dataset was for
+    — which is the failure this refuses, not merely an untidy one."""
+    iv.dataset("processed/x/", why="the original reason")
+    with pytest.raises(DeclError):
+        iv.dataset("processed/x/", why="a contradicting reason")
+    assert iv._datasets["processed/x/"].why == "the original reason"
+
+
+def test_a_stage_may_not_write_the_path_of_a_declared_dataset_out_again(iv):
+    """Declaring it and then restating the path in an output= is two declarations of one
+    dataset, which is exactly what declaring it was supposed to stop."""
+    iv.dataset("processed/x/", why="declared up here")
+    with pytest.raises(DeclError, match="already declared on its own line"):
+        @iv.data(dataset="processed/x/", why="and written out again down here")
+        def x():
+            return frame()
+
+
+def test_naming_the_declaration_is_one_declaration_used_twice(iv):
+    """The same path in two places is refused; the same OBJECT in two places is the point.
+    Three stages writing three shards of one dataset all name it."""
+    college = iv.dataset("derived/college/", why="one row per amateur source")
+
+    @iv.data(dataset=college, why="the NCAA block", part={"source": "ncaa"})
+    def ncaa():
+        return frame()
+
+    @iv.data(dataset=college, why="the G-League block", part={"source": "gleague"})
+    def gleague():
+        return frame()
+
+    assert ncaa.dataset == gleague.dataset == "derived/college/"
+    assert _graph.check(_graph.build(iv))[0] == []
+
+
+def test_declaring_a_dataset_a_stage_already_wrote_inline_is_refused(iv):
+    """The same rule from the other side: whichever came first is the declaration."""
+    @iv.data(dataset="processed/x/", why="declared inline, where it is written")
+    def x():
+        return frame()
+
+    with pytest.raises(DeclError, match="already declared by 'x'"):
+        iv.dataset("processed/x/", why="and again up here")
+
+
+def test_declaring_the_same_source_twice_is_refused(iv):
+    iv.source("raw/bios/", why="dropped in by hand once a year")
+    with pytest.raises(DeclError, match="already declared a source"):
+        iv.source("raw/bios/", why="dropped in by hand once a year")
+
+
+# ── nothing writes it, and something reads it ────────────────────────────────
+
+def test_reading_a_declared_dataset_nothing_writes_is_an_error(iv):
+    """`iv check` says it, rather than the build saying "selected no shards" an hour in."""
+    ghost = iv.dataset("processed/ghost/", why="a table that lost its writer")
+
+    @iv.data(dataset="processed/y/", why="reads it")
+    def y(g=iv.all_of(ghost, why="the thing nobody makes")):
+        return g
+
+    errors, _ = _graph.check(_graph.build(iv))
+    assert any("READ, NOBODY WRITES  processed/ghost/" in e for e in errors)
+    assert any("::y" in e for e in errors), "it names WHO reads it"
+
+
+def test_a_declared_dataset_nothing_reads_or_writes_is_only_a_warning(iv):
+    """Dead, but nothing is going to fail because of it."""
+    iv.dataset("processed/ghost/", why="a table that lost its writer")
+
+    @iv.data(dataset="processed/y/", why="minds its own business")
+    def y():
+        return frame()
+
+    errors, warns = _graph.check(_graph.build(iv))
+    assert errors == []
+    assert any("DECLARED, NOBODY WRITES  processed/ghost/" in w for w in warns)
+
+
+# ── and the same for a source, which nothing here may write ──────────────────
+
+@pytest.mark.parametrize("write", [
+    pytest.param(lambda iv, s: iv.data(dataset=s, why="w"), id="@iv.data names the source"),
+    pytest.param(lambda iv, s: iv.data(dataset="raw/bios/", why="w"), id="@iv.data names its path"),
+    pytest.param(lambda iv, s: iv.step(output={"a": "processed/a/", "b": s}, why="w"),
+                 id="@iv.step, among several"),
+    pytest.param(lambda iv, s: iv.step(output={"a": "processed/a/", "b": "raw/bios/"}, why="w"),
+                 id="@iv.step by path, among several"),
+])
+def test_no_stage_may_write_a_source(iv, write):
+    """A source is a claim that something OUTSIDE puts the bytes there. A stage writing it
+    contradicts the claim, and then `iv check` cannot say whether a missing file is a
+    fetch that has not run or a stage that has not run."""
+    bios = iv.source("raw/bios/", why="dropped in by hand once a year")
+    with pytest.raises(DeclError, match="declared a source"):
+        write(iv, bios)(lambda: frame())
+
+
+def test_a_source_is_filled_through_iv_writes_which_is_still_allowed(iv):
+    """Refusing a STAGE is not refusing the bytes. Out-of-band data lands through
+    `iv.writes`, which is how a fetcher outside the graph puts a source there."""
+    bios = iv.source("raw/bios/", why="dropped in by hand once a year")
+    with iv.writes("raw/bios/", why="the annual drop") as out:
+        frame().write_parquet(out)
+
+    @iv.data(dataset="processed/y/", why="reads the bios")
+    def y(b=iv.all_of(bios, why="the bios")):
+        return b
+
+    assert y().height == 2

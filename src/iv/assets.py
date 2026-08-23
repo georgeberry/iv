@@ -153,6 +153,12 @@ class Dataset:
     allow_missing: bool = False
     part: tuple = ()
     why: str = ""
+    #: True when this came from `iv.dataset(...)` — a declaration on its own line, which a
+    #: stage names rather than restates. False when a stage declared the path inline in its
+    #: own `output=`, which is the one-writer case. The difference is what lets a second
+    #: declaration of the same path be refused: naming `X` is one declaration used twice,
+    #: writing "processed/x/" again is two declarations that can disagree.
+    standalone: bool = False
 
     def __repr__(self) -> str:
         return f"<iv dataset {self.dataset}>"
@@ -196,7 +202,8 @@ def _fixed(part, dataset) -> tuple:
 
 def _dataset(v, ext, allow_missing) -> Dataset:
     if isinstance(v, Dataset):
-        return Dataset(_decl._canon(v.dataset), v.ext, v.allow_missing, v.part, v.why)
+        return Dataset(_decl._canon(v.dataset), v.ext, v.allow_missing, v.part, v.why,
+                       v.standalone)
     if isinstance(v, Source):
         raise DeclError(
             f"{v.dataset} was declared a source — something outside this pipeline puts it "
