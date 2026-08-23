@@ -44,7 +44,7 @@ def seasons(iv, keys):
 
     iv._assets.clear()
 
-    @iv.data("processed/features/", why="per-season features", part="season")
+    @iv.step(output="processed/features/", why="per-season features", part="season")
     def features(box=iv.same_part(iv._sources["raw/box/"], why="this season")):
         return box
 

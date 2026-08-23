@@ -46,7 +46,7 @@ def redeclared(iv):
 
 def out_asset(iv, feed, ran=None):
     """`raw/feed/` -> `processed/out/`, the passthrough most of these hang off."""
-    @iv.data(dataset="processed/out/", why="passthrough")
+    @iv.step(output="processed/out/", why="passthrough")
     def build(feed=iv.all_of(feed, why="the upstream")):
         if ran is not None:
             ran.append(1)
@@ -117,7 +117,7 @@ def test_part_is_ambient_for_the_body(iv):
     feed = seed(iv, "raw/feed/")
     ran = []
 
-    @iv.data("processed/by_season/", why="one season", part={"season": "2026"})
+    @iv.step(output="processed/by_season/", why="one season", part={"season": "2026"})
     def build(feed=iv.all_of(feed, why="the upstream")):
         ran.append(1)
         return feed
@@ -143,7 +143,7 @@ def test_a_code_edit_alone_does_not_rerun_anything(iv):
     ran = []
 
     def build(extra):
-        @redeclared(iv).data("processed/mid/", why="passthrough")
+        @redeclared(iv).step(output="processed/mid/", why="passthrough")
         def mid(feed=iv.all_of(feed, why="the upstream")):
             ran.append(1)
             return feed.select(pl.all()) if extra else feed
@@ -163,22 +163,22 @@ def test_a_version_is_a_file_and_only_moves_what_reads_it(iv):
     def build_all():
         redeclared(iv)
 
-        @iv.data("config/model/", why="what the fits answer to")
+        @iv.step(output="config/model/", why="what the fits answer to")
         def model():
             return pl.DataFrame({"v": [version[0]]})
 
-        @iv.data("processed/modelled/", why="model output")
+        @iv.step(output="processed/modelled/", why="model output")
         def modelled(m=iv.all_of(model, why="a model change must rebuild this"),
                      feed=iv.all_of(feed, why="the upstream")):
             ran["modelled"] += 1
             return feed
 
-        @iv.data("processed/plain/", why="no model in it")
+        @iv.step(output="processed/plain/", why="no model in it")
         def plain(feed=iv.all_of(feed, why="the upstream")):
             ran["plain"] += 1
             return feed
 
-        @iv.data("processed/end/", why="the expensive one")
+        @iv.step(output="processed/end/", why="the expensive one")
         def end(m=iv.all_of(modelled, why="mid")):
             ran["end"] += 1
             return m
@@ -198,7 +198,7 @@ def test_a_version_is_a_file_and_only_moves_what_reads_it(iv):
 def test_a_root_re_run_that_produces_the_same_bytes_touches_nothing(iv):
     """A root runs every time. The commit is content-addressed, so an unchanged answer
     commits the same shard and nothing downstream follows."""
-    @iv.data("config/model/", why="the model")
+    @iv.step(output="config/model/", why="the model")
     def model():
         return pl.DataFrame({"v": ["m1"]})
 
@@ -213,11 +213,11 @@ def test_the_clock_is_a_file(iv, monkeypatch):
     import datetime as _d
     fetches = []
 
-    @iv.data("config/today/", why="poll once a day")
+    @iv.step(output="config/today/", why="poll once a day")
     def today():
         return pl.DataFrame({"date": [_d.date.today().isoformat()]})
 
-    @iv.data("raw/feed/", why="a polled feed",
+    @iv.step(output="raw/feed/", why="a polled feed",
              external={"some/api": "the upstream service"})
     def fetch(clock=iv.all_of(today, why="poll once a day", as_paths=True)):
         fetches.append(1)
@@ -245,7 +245,7 @@ def test_a_stage_that_reads_no_clock_never_re_runs(iv):
     """
     calls = []
 
-    @iv.data("raw/archive/", why="fetch-once history", once=True,
+    @iv.step(output="raw/archive/", why="fetch-once history", once=True,
              external={"sports-reference": "a page that will not change"})
     def build():
         calls.append(1)
@@ -260,7 +260,7 @@ def test_a_named_partition_that_disappears_is_named(iv):
     for s in ("2025", "2026"):
         feed = seed(iv, "raw/feed/", part={"season": s})
 
-    @iv.data(dataset="processed/out/", why="two named seasons")
+    @iv.step(output="processed/out/", why="two named seasons")
     def build(got=iv.parts(feed, season=["2025", "2026"], why="exactly these two")):
         return got
 
@@ -287,7 +287,7 @@ def test_a_vanished_shard_from_a_WHOLE_dataset_read_is_a_moved_input(iv):
 def test_a_body_that_raises_records_nothing(iv):
     feed = seed(iv, "raw/feed/")
 
-    @iv.data("processed/out/", why="doomed")
+    @iv.step(output="processed/out/", why="doomed")
     def build(feed=iv.all_of(feed, why="the upstream")):
         raise RuntimeError("boom")
 
@@ -326,7 +326,7 @@ def test_why_is_required(iv):
 def seasons(iv, built):
     box_src = iv._sources["raw/box/"]
 
-    @iv.data(dataset="processed/feat/", why="per-season features", part="season")
+    @iv.step(output="processed/feat/", why="per-season features", part="season")
     def feat(box=iv.same_part(box_src, why="raw box")):
         built.append(1)
         return box
@@ -373,7 +373,7 @@ def test_a_walk_forward_partition_cannot_see_the_future(iv):
     for s in ("2024", "2025", "2026"):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
 
-    @iv.data("processed/cohort/", why="a cohort fit on prior seasons", part="season")
+    @iv.step(output="processed/cohort/", why="a cohort fit on prior seasons", part="season")
     def cohort(past=iv.before_part(iv._sources["raw/box/"], as_paths=True,
                                    why="seasons strictly before this cohort")):
         assert all("season=2026" not in p.name for p in past) or True
@@ -403,7 +403,7 @@ def test_an_update_read_is_lineage_or_a_stage_is_stale_against_its_own_last_outp
     today = seed(iv, "config/today/")
     ran = []
 
-    @iv.data(dataset="raw/log/", why="a running history")
+    @iv.step(output="raw/log/", why="a running history")
     def build(clock=iv.all_of(today, why="append once a day", as_paths=True),
               have=iv.own_last_copy(why="yesterday's copy"),
               feed=iv.all_of(feed, why="today")):
@@ -424,7 +424,7 @@ def test_a_dataset_this_stage_writes_is_never_its_own_upstream(iv):
     time it was built, so the stage would chase its own output and never settle."""
     ran = []
 
-    @iv.data(dataset="raw/feed/", why="rewritten in place", once=True)
+    @iv.step(output="raw/feed/", why="rewritten in place", once=True)
     def build(have=iv.own_last_copy(why="the copy on disk")):
         ran.append(1)
         return pl.DataFrame({"a": [1]})
@@ -438,7 +438,7 @@ def test_updating_a_dataset_this_stage_does_not_write_is_refused(iv):
     dependency and this stage never rebuilds when that input moves."""
     rosters = seed(iv, "raw/rosters/")
 
-    @iv.data(dataset="processed/cohorts/", why="a fit per cohort")
+    @iv.step(output="processed/cohorts/", why="a fit per cohort")
     def build(prev=iv.own_last_copy(rosters, why="the previous run's copy")):
         return pl.DataFrame({"a": [1]})
 
@@ -469,7 +469,7 @@ def test_a_read_of_the_whole_dataset_notices_a_brand_new_partition(iv):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
     ran = []
 
-    @iv.data("processed/xpm/", why="the fit")
+    @iv.step(output="processed/xpm/", why="the fit")
     def fit(every=iv.all_of(iv._sources["raw/box/"], why="every season at once")):
         ran.append(1)
         return every.head(1)
@@ -486,7 +486,7 @@ def test_a_write_outside_a_stage_does_not_inherit_the_last_one_s_reads(iv):
     """Otherwise a bare `writes` records whatever was read most recently as its upstream."""
     seed(iv, "raw/box/", part={"season": "2019"})
 
-    @iv.data("processed/out/", why="passthrough")
+    @iv.step(output="processed/out/", why="passthrough")
     def build(box=iv.all_of(iv._sources["raw/box/"], why="every season", as_paths=True)):
         return pl.DataFrame({"a": [1]})
 
@@ -506,7 +506,7 @@ def test_a_partition_appearing_inside_the_range_read_forces_a_rebuild(iv):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
     ran = []
 
-    @iv.data("processed/cohort/", why="the cohort fit")
+    @iv.step(output="processed/cohort/", why="the cohort fit")
     def cohort(past=iv.between(iv._sources["raw/box/"], key="season", lt="2021",
                                why="seasons before this cohort")):
         ran.append(1)
@@ -611,11 +611,11 @@ def test_a_dataset_may_hold_something_other_than_a_table(iv):
     knob = [4.0]
     fits = []
 
-    @iv.data("config/model/", why="the knobs the fit shape depends on", ext=".json")
+    @iv.step(output="config/model/", why="the knobs the fit shape depends on", ext=".json")
     def model():
         return {"half_life": knob[0]}
 
-    @iv.data("processed/rapm_fit/", why="the fitted model", ext=".pkl")
+    @iv.step(output="processed/rapm_fit/", why="the fitted model", ext=".pkl")
     def fit(m=iv.all_of(model, why="a knob change must refit"),
             poss=iv.all_of(iv._sources["processed/possessions/"], why="the design matrix")):
         fits.append(1)
@@ -646,7 +646,7 @@ def test_a_dataset_asked_about_as_a_whole_is_current_iff_every_shard_is(iv):
     seed(iv, "raw/box/")
     ran = []
 
-    @iv.data("processed/box_features/", why="the box matrix for one season",
+    @iv.step(output="processed/box_features/", why="the box matrix for one season",
              part="season", split=True)
     def build(src=iv.all_of(iv._sources["raw/box/"], why="the upstream")):
         ran.append(1)
@@ -687,14 +687,14 @@ def test_adding_a_dependency_reruns_the_stage(iv):
     ran = []
 
     def one_input():
-        @redeclared(iv).data("processed/mid/", why="mid")
+        @redeclared(iv).step(output="processed/mid/", why="mid")
         def mid(feed=iv.all_of(feed, why="the upstream")):
             ran.append(1)
             return feed
         mid()
 
     def two_inputs():
-        @redeclared(iv).data("processed/mid/", why="mid")
+        @redeclared(iv).step(output="processed/mid/", why="mid")
         def mid(feed=iv.all_of(feed, why="the upstream"),
                 extra=iv.all_of(iv._sources["raw/extra/"], as_paths=True,
                                 why="a dependency added after the first build")):

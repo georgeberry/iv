@@ -60,7 +60,7 @@ arrives from outside:
 ```python
 bios = iv.source("raw/bios/", why="heights and weights, dropped in by hand once a year")
 
-@iv.data(dataset="processed/features/", why="per-season box features", part="season")
+@iv.step(output="processed/features/", why="per-season box features", part="season")
 def features(box=iv.same_part(box_settled, why="this season's box"),
              bio=iv.all_of(bios, as_paths=True, why="the body-shape columns")):
     ...
@@ -81,19 +81,46 @@ And a dataset nothing reads is simply a leaf — `terminal=True` used to be an a
 every dump had to remember to make so a check would not complain about it. The graph knows
 its own consumers.
 
-To read **one output of a multi-output stage**, name the output: `xpm["ratings"]`.
+## Declaring a dataset, and producing one
 
-## Declaring a dataset
+Two words, because they are two statements.
 
-`@iv.data` names a dataset and decorates the function that builds it. Upstreams are
-**parameter defaults**, so the whole declaration — dataset, selector, partition key —
-is readable from the function object with nothing executed and no source text needed:
+`@iv.step` is the function that BUILDS. Its upstreams are **parameter defaults**, so the
+whole declaration — datasets, selectors, partition key — is readable from the function
+object with nothing executed and no source text needed:
 
 ```python
-@iv.data("processed/features/", why="per-season box features", part="season")
-def features(box=iv.same_part("raw/box/", why="raw box for this season")):
+@iv.step(output="processed/features/", why="per-season box features", part="season")
+def features(box=iv.same_part(box_raw, why="raw box for this season")):
     return box.with_columns((pl.col("pts") * 2).alias("z"))
 ```
+
+Most stages write one dataset and declare it inline like that, and a read names the stage:
+`iv.all_of(features, why="...")`.
+
+`iv.data` DECLARES a dataset — a name, a format, a line on what it is for — without saying
+how it is computed. Reach for it when the name has to be said somewhere other than the
+`output=` that produces it, which is what a stage writing several tables needs:
+
+```python
+XPM = iv.data("processed/xpm/", why="a rating per player per season")
+XPM_CAREER = iv.data("processed/xpm_career/", why="one row per player, career to date")
+
+@iv.step(output={"ratings": XPM, "career": XPM_CAREER}, why="the joint fit")
+def xpm(bf=iv.all_of(box_features, why="the box prior, every season at once")):
+    return {"ratings": ..., "career": ...}
+
+def leaderboard(x=iv.all_of(XPM, why="the headline table")):
+```
+
+One expensive fit, two tables, one run. The keys are what the body returns them under;
+`XPM` is what everything else calls it. Naming the stage would not say which, so a read
+names the declaration. (`xpm["ratings"]` is the same dataset by its key, if it was declared
+inline in the dict rather than above.)
+
+Omit `output=` for a stage that writes nothing into the tree — a fetch filling a download
+cache, a publish copying out to a bucket. There is no artifact to be stale against, so it
+runs every time.
 
 `why=` is required everywhere. There is nowhere else for that line to live, which is what
 stops it going stale.
@@ -124,11 +151,11 @@ is not itself partitioned.
 A read names a **dataset path, or the stage that writes it**:
 
 ```python
-@iv.data(dataset="config/today/", why="poll once a day", ext=".json")
+@iv.step(output="config/today/", why="poll once a day", ext=".json")
 def today():
     return {"date": dt.date.today().isoformat()}
 
-@iv.data(dataset="raw/box_live/", why="the season being played", part={"season": LIVE})
+@iv.step(output="raw/box_live/", why="the season being played", part={"season": LIVE})
 def box_live(clock=iv.all_of(today, as_paths=True, why="poll once a day")):
     ...
 ```
@@ -147,7 +174,7 @@ filenames either way, and no comparison this package makes ever opens a file.
 ### Walk-forward, declared
 
 ```python
-@iv.data("processed/cohorts/", why="a fit per cohort, on prior seasons only", part="season")
+@iv.step(output="processed/cohorts/", why="a fit per cohort, on prior seasons only", part="season")
 def cohorts(past=iv.before_part("processed/features/", why="every season before this one")):
     return past.group_by("player").agg(pl.col("z").mean())
 ```
@@ -162,7 +189,7 @@ An asset with no declared upstream — a fetch, a clock, the hyperparameters som
 edited — runs its body every time:
 
 ```python
-@iv.data("config/hyperparams/", why="the knobs the fit answers to", ext=".json")
+@iv.step(output="config/hyperparams/", why="the knobs the fit answers to", ext=".json")
 def hyperparams():
     return {"half_life": 4.0, "seed": 0}
 ```
@@ -189,7 +216,7 @@ happened to be current — parquet refuses it and names one that works:
 For anything else, take an `out` parameter and write the file yourself:
 
 ```python
-@iv.data("dump/page/", why="a rendered page", ext=".html")
+@iv.step(output="dump/page/", why="a rendered page", ext=".html")
 def page(out):
     out.write_text(render())
 ```

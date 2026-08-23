@@ -177,6 +177,16 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                 f"    declared as arriving from outside — {src.why} — and read by no "
                 f"stage. Delete the declaration, or wire it up.")
 
+    produced = set(g.produced)
+    for name, d in sorted(getattr(g.iv, "_datasets", {}).items()):
+        if name not in produced:
+            warns.append(
+                f"DECLARED, NOBODY WRITES  {name}\n"
+                f"    declared with iv.data(...) — {d.why} — and named in no stage's "
+                f"output=, so nothing puts it there. A declaration exists to be pointed "
+                f"at; one nothing produces is a name a rename left behind. Wire it up, "
+                f"delete it, or declare it a source if it arrives from outside.")
+
     cyc = find_cycle(g)
     if cyc:
         errors.append(f"CYCLE  {cyc}")

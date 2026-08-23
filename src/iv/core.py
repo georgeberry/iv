@@ -95,7 +95,7 @@ class Invalidator:
         # DECLARATION time, not at run time, so `why_stale("processed/x/")` answers on its
         # own — the question does not need the stage to have run, only to exist.
         self._declared: dict[str, tuple] = {}
-        # dataset -> the Asset that builds it. Populated by @iv.data at DECLARATION time,
+        # dataset -> the Asset that builds it. Populated by @iv.step at DECLARATION time,
         # so `iv graph` and `iv status` know the pipeline by importing it rather than by
         # parsing it — which is what lets a stage defined in a notebook declare as well as
         # one in a scanned file.
@@ -103,6 +103,10 @@ class Invalidator:
         # dataset -> the Source it arrives as. Declared, not inferred from a path prefix,
         # so every dataset in the pipeline has exactly one declaration somewhere.
         self._sources: dict[str, _assets.Source] = {}
+        #: Datasets declared on their own line with `iv.data(...)`, so a read can name one
+        #: before the stage that writes it exists. A stage's inline `output="..."` is a
+        #: declaration too; it just has nowhere else to be said.
+        self._datasets: dict[str, _assets.Dataset] = {}
 
     def __repr__(self) -> str:
         return f"<Invalidator {self.tree}>"
@@ -457,40 +461,51 @@ class Invalidator:
     between = staticmethod(_decl.between)
     parts = staticmethod(_decl.parts)
     own_last_copy = staticmethod(_decl.own_last_copy)
-    output = staticmethod(_assets.output)
 
-    def data(self, dataset: str, *, why: str, part=None,
-             ext: str = _sh.EXT, allow_missing: bool = False,
-             if_needed: bool = True, once: bool = False, split: bool = False,
-             external=None) -> Callable:
-        """Name a dataset and decorate the function that builds it.
+    def data(self, dataset: str, *, why: str, part=None, ext: str = _sh.EXT,
+             allow_missing: bool = False) -> _assets.Dataset:
+        """Declare a dataset this pipeline writes, so that something can NAME it.
 
-        The upstreams are parameter defaults, which is what makes the whole declaration
-        readable off the function object — no source text, nothing run:
+            XPM = iv.data("processed/xpm/", why="the player ratings")
 
-            @iv.data("processed/cohorts/", why="a fit per cohort", part="season")
-            def cohorts(past=iv.before_part("processed/features/", why="prior seasons")):
-                return past.group_by("player").agg(pl.col("z").mean())
+        This says a dataset exists and how it is stored. It does not say how it is computed
+        — some `@iv.step` does that, by putting this in its `output=`:
+
+            @iv.step(output={"ratings": XPM, "career": XPM_CAREER}, why="the joint fit")
+            def xpm(poss=iv.all_of(possessions, why="the design matrix")):
+                return {"ratings": r, "career": c}
+
+            def wvorp(x=iv.all_of(XPM, why="the headline table")):
+
+        Most stages write ONE dataset, and a declaration on its own line would be a name
+        used once — so `output="processed/box/"` declares it inline and the read names the
+        stage. Reach for this when the name has to be said somewhere else: a stage writing
+        several, or one whose output another stage names before it is written.
         """
-        _why(why, _canon(dataset))          # say so at the decorator, not at its target
-
-        def decorate(fn: Callable) -> _assets.Asset:
-            return self._register(_assets.Asset(
-                self, dataset, fn, why=why, part=part, ext=ext,
-                allow_missing=allow_missing, if_needed=if_needed, once=once, split=split,
-                single=True, external=external))
-        return decorate
+        d = _assets.Dataset(_canon(dataset), ext, allow_missing,
+                            _assets._fixed(part, _canon(dataset)),
+                            _why(why, _canon(dataset)))
+        if d.dataset in self._sources:
+            raise DeclError(
+                f"{d.dataset} was declared a source — something outside this pipeline puts "
+                f"it there. It is one or the other.")
+        self._datasets[d.dataset] = d
+        return d
 
     def source(self, dataset: str, *, why: str, external=None) -> _assets.Source:
         """Declare a dataset that arrives from outside, so a read can name it.
 
             pbp = iv.source("raw/pbp_official/", why="the official play-by-play dump")
 
-            @iv.data(dataset="derived/panel/", why="...", part="season")
+            @iv.step(output="derived/panel/", why="...", part="season")
             def panel(raw=iv.same_part(pbp, why="one season of it")):
                 ...
         """
         src = _assets.Source(dataset, why=why, external=external)
+        if src.dataset in self._datasets:
+            raise DeclError(
+                f"{src.dataset} was declared with iv.data(...) — a dataset this pipeline "
+                f"writes — so it does not arrive from outside. It is one or the other.")
         if src.dataset in self._assets:
             raise DeclError(
                 f"{src.dataset} is built by "
@@ -534,30 +549,33 @@ class Invalidator:
              ext: str = _sh.EXT, allow_missing: bool = False,
              if_needed: bool = True, once: bool = False, split: bool = False,
              external=None) -> Callable:
-        """A stage: what it reads, in its signature, and what it writes, in `output=`.
+        """The function that BUILDS one or more datasets. Its upstreams are its parameters.
 
-        `output=` is one dataset, or a dict naming several — the names are the keys the
-        body returns.
+            @iv.step(output="processed/cohorts/", why="a fit per cohort", part="season")
+            def cohorts(past=iv.before_part(features, why="prior seasons")):
+                return past.group_by("player").agg(pl.col("z").mean())
 
-            @iv.step(output={"ratings": "processed/xpm/",
-                             "summary": "processed/xpm_summary/"}, why="the joint fit")
-            def xpm(poss=iv.all_of("derived/possessions/", why="the design matrix")):
-                ...
-                return {"ratings": r, "summary": s}
+        `output=` is:
 
-        `@iv.data` is the same thing for the common case of one dataset, where the body
-        returns its contents rather than a dict. Omit `output=` for a stage that writes
-        nothing into the tree — a fetch, a publish — and it runs every time, because
-        nothing on disk can say it is done.
+          a path            one dataset, declared right here because nothing else needs to
+                            name it — a read names `cohorts`, the stage. The body returns
+                            its contents.
+          an `iv.data(...)` the same, where the dataset was declared above so that reads
+                            can name it directly.
+          a dict            several, keyed by what the body returns. One expensive fit
+                            produces six tables without being run six times.
+          omitted           nothing lands in the tree — a fetch filling a download cache, a
+                            publish copying out to a bucket. There is no artifact to be
+                            stale against, so it runs every time.
         """
         _why(why, "step")
 
-        def decorate(fn: Callable) -> _assets.Asset:
+        def declared(fn: Callable) -> _assets.Asset:
             return self._register(_assets.Asset(
                 self, output, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
-                split=split, single=isinstance(output, str), external=external))
-        return decorate
+                split=split, single=not isinstance(output, dict), external=external))
+        return declared
 
     def _node_name(self, fn: Callable) -> str:
         """The name the static scan gives this step: `<file>::<function>`.

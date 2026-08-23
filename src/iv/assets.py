@@ -1,11 +1,16 @@
-"""A dataset and the function that builds it, as one object.
+"""Datasets, and the stages that produce them.
 
-`@iv.data` names a dataset and decorates its producer. The upstreams are parameter
-defaults, so the whole declaration — dataset, selector, partition key — is readable from
-the function object with nothing executed and no source text needed.
+Two words, and they are not the same word twice. `iv.data(...)` DECLARES a dataset: a name,
+a format, a line on what it is for. `@iv.step` PRODUCES one or several, and its upstreams
+are parameter defaults, so the whole declaration — datasets, selectors, partition key — is
+readable from the function object with nothing executed and no source text needed.
+
+Most stages write one dataset and declare it inline, which is a string in `output=`. The
+declaration gets its own line when something else needs to NAME it: a stage writing four
+tables from one fit, where a read wants to say WHICH.
 
 Calling the asset is how it gets built. It builds if it is stale and loads if it is not,
-which is the same decision `@iv.step` makes, made per shard.
+made per shard.
 """
 from __future__ import annotations
 
@@ -132,57 +137,71 @@ def check_signature(fn, part_key: str | None, dataset: str) -> None:
 
 
 @dataclass(frozen=True)
-class Output:
-    """One dataset a stage writes, and how.
+class Dataset:
+    """A dataset this pipeline writes: a name, a format, and what it is for.
 
-    `part` is the literal shard THIS output owns, where it differs from the stage's. One
-    computation can produce a whole dataset and one block of a shared one.
+    What `iv.data(...)` returns. It is a DECLARATION and nothing more — it says a dataset
+    exists and how it is stored, not how it is computed. Some `@iv.step` produces it, and
+    reads name it.
+
+    `part` is the literal shard THIS dataset gets out of the stage, where it differs from
+    the stage's own. One computation can produce a whole dataset and one block of a shared
+    one.
     """
     dataset: str
     ext: str = _sh.EXT
     allow_missing: bool = False
     part: tuple = ()
+    why: str = ""
 
-
-def output(dataset: str, *, ext: str = _sh.EXT, allow_missing: bool = False,
-           part: dict | None = None) -> Output:
-    """One output of a multi-output stage, where it differs from the others.
-
-    A joint fit usually has one artifact stored unlike the rest, or one that a run may
-    legitimately not produce:
-
-        output={"ratings": "processed/xpm/",
-                "fit": iv.output("processed/rapm_fit/", ext=".pkl")}
-    """
-    fixed = tuple(sorted((str(k), str(v)) for k, v in part.items())) if part else ()
-    return Output(_decl._canon(dataset), ext, allow_missing, fixed)
+    def __repr__(self) -> str:
+        return f"<iv dataset {self.dataset}>"
 
 
 def _outputs(spec, ext, allow_missing) -> dict:
-    """`output=` as {key: Output}. A bare string is the one-output case.
+    """`output=` as {key: Dataset}.
+
+    A bare string is one dataset declared where it is produced, which is the common case
+    and reads as one line. A `Dataset` is one declared on its own, which is what a stage
+    writing several wants so that a read can name each. A dict is several, keyed by what
+    the body returns.
 
     None is a stage that writes NOTHING — a fetch that fills a download cache, a publish
     that uploads. There is no artifact to be stale, so there is nothing to skip on and it
-    runs every time. Its reads are still declared, so the graph draws the edges and
-    `iv check` can still say the thing it reads has no producer.
+    runs every time. Its reads are still declared, so the graph draws the edges.
     """
     if spec is None:
         return {}
-    if isinstance(spec, str):
-        d = _decl._canon(spec)
-        return {d: Output(d, ext, allow_missing)}
+    if isinstance(spec, (str, Dataset, Source)):
+        d = _dataset(spec, ext, allow_missing)
+        return {d.dataset: d}
     if not isinstance(spec, dict) or not spec:
         raise DeclError(
-            "output= is a dataset, or a dict of {name: dataset} naming each one — "
-            'output={"ratings": "processed/xpm/", "summary": "processed/xpm_summary/"}. '
-            "The names are the keys the body returns.")
-    out = {}
-    for k, v in spec.items():
-        if isinstance(v, Output):
-            out[k] = Output(_decl._canon(v.dataset), v.ext, v.allow_missing, v.part)
-        else:
-            out[k] = Output(_decl._canon(v), ext, allow_missing)
-    return out
+            "output= is one dataset — a path, or an iv.data(...) declared above — or a "
+            'dict of {name: dataset} naming several: output={"ratings": XPM, '
+            '"summary": XPM_SUMMARY}. The names are the keys the body returns.')
+    return {k: _dataset(v, ext, allow_missing) for k, v in spec.items()}
+
+
+def _fixed(part, dataset) -> tuple:
+    """The literal shard a declaration owns, as a sorted tuple."""
+    if not part:
+        return ()
+    if not isinstance(part, dict):
+        raise DeclError(
+            f"{dataset}: part= on a declaration is the literal shard it owns — "
+            f"part={{'source': 'ncaa'}}. Got {part!r}.")
+    return tuple(sorted((str(k), str(v)) for k, v in part.items()))
+
+
+def _dataset(v, ext, allow_missing) -> Dataset:
+    if isinstance(v, Dataset):
+        return Dataset(_decl._canon(v.dataset), v.ext, v.allow_missing, v.part, v.why)
+    if isinstance(v, Source):
+        raise DeclError(
+            f"{v.dataset} was declared a source — something outside this pipeline puts it "
+            f"there — so no stage here writes it. Declare it with iv.data(...) instead.")
+    return Dataset(_decl._canon(v), ext, allow_missing)
 
 
 class Source:
@@ -209,10 +228,10 @@ class Source:
 class Asset:
     """A stage: what it reads, what it writes, and whether it needs to run.
 
-    One object for both shapes. `@iv.data` is the single-output case, where the body
-    returns the value; `@iv.step(output={...})` returns a dict keyed by the names in the
-    declaration, which is how one expensive fit produces six tables without being run six
-    times.
+    One object for all three shapes. `output=` naming ONE dataset is the common case, where
+    the body returns its contents; a dict returns a dict keyed by those names, which is how
+    one expensive fit produces six tables without being run six times; nothing at all is a
+    stage that writes outside the tree.
     """
 
     def __init__(self, pipeline, output, fn, *, why: str,
@@ -257,13 +276,17 @@ class Asset:
         return next(iter(self.outputs.values())).dataset
 
     def __getitem__(self, key: str):
-        """One named output of a multi-output stage, for a read to name.
+        """One named output of a multi-output stage, by the key the body returns it under.
 
-            @iv.step(output={"ratings": "processed/xpm/",
-                             "summary": "processed/xpm_summary/"}, why="the joint fit")
+        Usually the outputs are declared above and a read names the declaration directly,
+        which is the same thing said without needing to know the key:
+
+            XPM = iv.data("processed/xpm/", why="the player ratings")
+
+            @iv.step(output={"ratings": XPM, ...}, why="the joint fit")
             def xpm(...): ...
 
-            def wvorp(x=iv.all_of(xpm["ratings"], why="the headline table")):
+            def wvorp(x=iv.all_of(XPM, why="the headline table")):
         """
         if key not in self.outputs:
             raise DeclError(
@@ -432,7 +455,7 @@ class Asset:
             (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs) = prev
             iv._fresh_scope()
 
-    def _commit(self, o: Output, value, part) -> None:
+    def _commit(self, o: Dataset, value, part) -> None:
         part = dict(o.part) if o.part else part
         with self.pipeline.writes(o.dataset, why=self.why, part=part, ext=o.ext,
                                      allow_missing=o.allow_missing) as staged:

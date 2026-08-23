@@ -8,7 +8,7 @@ be known first is the one piece a running program cannot be asked for.
 
 So it moves to the signature, where it is a value like any other:
 
-    @iv.data("processed/cohorts/", why="a fit per cohort", part="season")
+    @iv.step(output="processed/cohorts/", why="a fit per cohort", part="season")
     def cohorts(past=iv.before_part("processed/features/", why="prior seasons")):
         ...
 
@@ -59,8 +59,9 @@ def _target(dataset) -> str:
     if not isinstance(named, str):
         raise DeclError(
             f"a read names a DECLARED dataset, not a path: {dataset!r}. Every dataset is "
-            f"declared exactly once — one this pipeline builds with @iv.data or @iv.step, "
-            f"one that arrives from outside with iv.source(...) — and read by naming that "
+            f"declared exactly once — one this pipeline writes, named in a @iv.step's "
+            f"output= or declared on its own with iv.data(...), one that arrives from "
+            f"outside with iv.source(...) — and read by naming that "
             f"declaration. A path written a second time is a path a rename can get half "
             f"of, and one the graph cannot tell from a typo.")
     return _canon(named)
@@ -115,7 +116,7 @@ class Read:
             raise DeclError(
                 f"{self.dataset} is read relative to the partition being built, but the "
                 f"stage declares no part=. A partition-relative selector only means "
-                f"something where there is a partition: @iv.data(..., part='season').")
+                f"something where there is a partition: @iv.step(..., part='season').")
         return Read(self.dataset, self.kind, self.body, self.optional, part_key, self.why,
                     self.as_paths)
 

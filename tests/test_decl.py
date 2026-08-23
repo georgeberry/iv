@@ -15,8 +15,9 @@ from iv.decl import PART
 
 
 class _Declared:
-    """What a declaration hands back: something that knows its own dataset. An `Asset` from
-    `@iv.data`, a `Source` from `iv.source` — this module only asks for the attribute."""
+    """What a declaration hands back: something that knows its own dataset. A `Dataset`
+    from `iv.data`, an `Asset` from `@iv.step`, a `Source` from `iv.source` — this module
+    only asks for the attribute."""
     def __init__(self, dataset="processed/features/"):
         self.dataset = dataset
 

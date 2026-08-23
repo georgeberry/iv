@@ -32,11 +32,11 @@ def frame(n=2, extra=0):
 def test_a_derived_asset_builds_then_skips(iv):
     ran = []
 
-    @iv.data("raw/feed/", why="the feed", once=True)
+    @iv.step(output="raw/feed/", why="the feed", once=True)
     def feed():
         return frame()
 
-    @iv.data("processed/out/", why="passthrough")
+    @iv.step(output="processed/out/", why="passthrough")
     def out(feed=iv.all_of(feed, why="the upstream")):
         ran.append(1)
         return feed
@@ -50,11 +50,11 @@ def test_a_moved_upstream_rebuilds(iv):
     n = [2]
     ran = []
 
-    @iv.data("raw/feed/", why="the feed")
+    @iv.step(output="raw/feed/", why="the feed")
     def feed():
         return frame(n[0])
 
-    @iv.data("processed/out/", why="passthrough")
+    @iv.step(output="processed/out/", why="passthrough")
     def out(feed=iv.all_of(feed, why="the upstream")):
         ran.append(1)
         return feed
@@ -71,11 +71,11 @@ def test_a_rebuild_that_does_not_move_the_bytes_stops_there(iv):
     """The early cutoff: an upstream re-runs, produces the same shard, and the tail sits."""
     ran = []
 
-    @iv.data("raw/feed/", why="the feed")
+    @iv.step(output="raw/feed/", why="the feed")
     def feed():
         return frame()
 
-    @iv.data("processed/out/", why="passthrough")
+    @iv.step(output="processed/out/", why="passthrough")
     def out(feed=iv.all_of(feed, why="the upstream")):
         ran.append(1)
         return feed
@@ -93,7 +93,7 @@ def test_a_root_runs_every_time_because_nothing_else_can_notice_the_world(iv):
     ran = []
     n = [2]
 
-    @iv.data("raw/feed/", why="fetched from outside")
+    @iv.step(output="raw/feed/", why="fetched from outside")
     def feed():
         ran.append(1)
         return frame(n[0])
@@ -108,7 +108,7 @@ def test_a_root_runs_every_time_because_nothing_else_can_notice_the_world(iv):
 def test_once_is_how_a_fetch_once_archive_opts_out(iv):
     ran = []
 
-    @iv.data("raw/archive/", why="a one-time backfill", once=True)
+    @iv.step(output="raw/archive/", why="a one-time backfill", once=True)
     def archive():
         ran.append(1)
         return frame()
@@ -118,11 +118,11 @@ def test_once_is_how_a_fetch_once_archive_opts_out(iv):
 
 
 def test_a_root_that_always_runs_is_not_warned_about_as_running_once(iv):
-    @iv.data("raw/feed/", why="fetched from outside")
+    @iv.step(output="raw/feed/", why="fetched from outside")
     def feed():
         return frame()
 
-    @iv.data("dump/site/", why="the app reads it")
+    @iv.step(output="dump/site/", why="the app reads it")
     def site(feed=iv.all_of(feed, why="the feed")):
         return feed
 
@@ -133,11 +133,11 @@ def test_a_root_that_always_runs_is_not_warned_about_as_running_once(iv):
 
 
 def test_once_is_warned_about(iv):
-    @iv.data("raw/archive/", why="a one-time backfill", once=True)
+    @iv.step(output="raw/archive/", why="a one-time backfill", once=True)
     def archive():
         return frame()
 
-    @iv.data("dump/site/", why="the app reads it")
+    @iv.step(output="dump/site/", why="the app reads it")
     def site(a=iv.all_of(archive, why="the backfill")):
         return a
 
@@ -151,17 +151,17 @@ def seasons_pipeline(iv, pts=None):
     pts = pts if pts is not None else {"2024": 10, "2025": 20, "2026": 30}
     ran = []
 
-    @iv.data("raw/box/", why="raw box for one season", part="season")
+    @iv.step(output="raw/box/", why="raw box for one season", part="season")
     def box(season):
         ran.append(f"box:{season}")
         return pl.DataFrame({"player": [1, 2], "pts": [pts[season], pts[season] + 1]})
 
-    @iv.data("processed/features/", why="per-season features", part="season")
+    @iv.step(output="processed/features/", why="per-season features", part="season")
     def features(box=iv.same_part(box, why="this season's box")):
         ran.append("features")
         return box.with_columns((pl.col("pts") * 2).alias("z"))
 
-    @iv.data("processed/cohorts/", why="a fit on prior seasons only", part="season")
+    @iv.step(output="processed/cohorts/", why="a fit on prior seasons only", part="season")
     def cohorts(past=iv.before_part(features, why="every prior season")):
         ran.append("cohorts")
         return past.select(pl.col("z").sum().alias("total"))
@@ -220,7 +220,7 @@ def test_a_partitioned_call_names_its_partition(iv):
 
 
 def test_an_unpartitioned_asset_takes_no_partition(iv):
-    @iv.data("raw/feed/", why="the feed")
+    @iv.step(output="raw/feed/", why="the feed")
     def feed():
         return frame()
 
@@ -233,7 +233,7 @@ def test_an_unpartitioned_asset_takes_no_partition(iv):
 # ── round trip: a cached call returns what the body returned ─────────────────
 
 def test_a_dict_round_trips_through_json(iv):
-    @iv.data("config/knobs/", why="the knobs", ext=".json")
+    @iv.step(output="config/knobs/", why="the knobs", ext=".json")
     def knobs():
         return {"half_life": 4.0, "seed": 0}
 
@@ -245,7 +245,7 @@ def test_a_dict_round_trips_through_json(iv):
 def test_a_dict_is_refused_by_parquet_rather_than_silently_reshaped(iv):
     """The trap this exists to close: dict in, DataFrame out, and the same function then
     gives two types depending on whether the shard happened to be current."""
-    @iv.data("config/knobs/", why="the knobs")
+    @iv.step(output="config/knobs/", why="the knobs")
     def knobs():
         return {"half_life": 4.0}
 
@@ -254,7 +254,7 @@ def test_a_dict_is_refused_by_parquet_rather_than_silently_reshaped(iv):
 
 
 def test_a_frame_round_trips_through_parquet(iv):
-    @iv.data("raw/feed/", why="the feed")
+    @iv.step(output="raw/feed/", why="the feed")
     def feed():
         return frame()
 
@@ -263,7 +263,7 @@ def test_a_frame_round_trips_through_parquet(iv):
 
 
 def test_an_arbitrary_object_round_trips_through_pickle(iv):
-    @iv.data("config/thing/", why="something exotic", ext=".pkl")
+    @iv.step(output="config/thing/", why="something exotic", ext=".pkl")
     def thing():
         return {"a", "b"}
 
@@ -272,7 +272,7 @@ def test_an_arbitrary_object_round_trips_through_pickle(iv):
 
 def test_a_body_may_write_the_file_itself(iv):
     """The escape hatch: take `out` and nothing is inferred about the value."""
-    @iv.data("dump/page/", why="a rendered page", ext=".html")
+    @iv.step(output="dump/page/", why="a rendered page", ext=".html")
     def page(out):
         out.write_text("<h1>hi</h1>")
 
@@ -280,7 +280,7 @@ def test_a_body_may_write_the_file_itself(iv):
 
 
 def test_a_body_that_returns_nothing_and_takes_no_out_is_an_error(iv):
-    @iv.data("processed/out/", why="produces nothing")
+    @iv.step(output="processed/out/", why="produces nothing")
     def out():
         return None
 
@@ -291,22 +291,22 @@ def test_a_body_that_returns_nothing_and_takes_no_out_is_an_error(iv):
 # ── what is refused ───────────────────────────────────────────────────────────
 
 def test_one_dataset_has_one_producer(iv):
-    @iv.data("raw/feed/", why="the feed")
+    @iv.step(output="raw/feed/", why="the feed")
     def feed():
         return frame()
 
     with pytest.raises(DeclError, match="already written by"):
-        @iv.data("raw/feed/", why="the same feed again")
+        @iv.step(output="raw/feed/", why="the same feed again")
         def feed2():
             return frame()
 
 
 def test_building_one_stage_from_inside_another_is_refused(iv):
-    @iv.data("raw/feed/", why="the feed")
+    @iv.step(output="raw/feed/", why="the feed")
     def feed():
         return frame()
 
-    @iv.data("processed/out/", why="reaches for a stage instead of declaring it")
+    @iv.step(output="processed/out/", why="reaches for a stage instead of declaring it")
     def out(unused=iv.all_of(feed, why="declared, but then ignored")):
         return feed()
 
@@ -317,7 +317,7 @@ def test_building_one_stage_from_inside_another_is_refused(iv):
 
 def test_a_parameter_iv_cannot_supply_is_refused(iv):
     with pytest.raises(DeclError, match="not something iv can supply"):
-        @iv.data("processed/out/", why="takes something unexplained")
+        @iv.step(output="processed/out/", why="takes something unexplained")
         def out(mystery):
             return frame()
 
@@ -325,18 +325,18 @@ def test_a_parameter_iv_cannot_supply_is_refused(iv):
 def test_a_partition_relative_read_needs_a_partitioned_stage(iv):
     box = iv.source("raw/box/", why="arrives from outside")
     with pytest.raises(DeclError, match="only means something where there is a partition"):
-        @iv.data(dataset="processed/out/", why="not partitioned, reads as if it were")
+        @iv.step(output="processed/out/", why="not partitioned, reads as if it were")
         def out(b=iv.same_part(box, why="this season")):
             return b
 
 
 def test_an_undeclared_read_of_the_tree_is_still_caught(iv):
-    @iv.data("raw/feed/", why="the feed")
+    @iv.step(output="raw/feed/", why="the feed")
     def feed():
         return frame()
     feed()
 
-    @iv.data("processed/out/", why="reads behind iv's back")
+    @iv.step(output="processed/out/", why="reads behind iv's back")
     def out():
         return pl.read_parquet(list(iv.resolve_out("raw/feed/").iterdir())[0])
 
@@ -345,7 +345,7 @@ def test_an_undeclared_read_of_the_tree_is_still_caught(iv):
 
 
 def test_loading_a_shard_that_was_never_built_says_so(iv):
-    @iv.data("raw/feed/", why="the feed")
+    @iv.step(output="raw/feed/", why="the feed")
     def feed():
         return frame()
 
@@ -359,11 +359,11 @@ def test_a_stage_may_read_the_copy_it_is_about_to_overwrite(iv):
     """Excluded from the comparison, or the stage is permanently stale against itself."""
     day = ["day1"]
 
-    @iv.data("config/today/", why="the clock", ext=".json")
+    @iv.step(output="config/today/", why="the clock", ext=".json")
     def today():
         return {"date": day[0]}
 
-    @iv.data("raw/log/", why="a running log, appended once a day")
+    @iv.step(output="raw/log/", why="a running log, appended once a day")
     def log(today=iv.all_of(today, why="append once a day"),
             prior=iv.own_last_copy(why="yesterday's copy")):
         old = prior if prior is not None else pl.DataFrame(schema={"date": pl.Utf8})
@@ -383,7 +383,7 @@ def test_a_stage_may_read_the_copy_it_is_about_to_overwrite(iv):
 def test_a_stage_with_several_outputs_runs_once(iv):
     ran = []
 
-    @iv.data("raw/feed/", why="the feed")
+    @iv.step(output="raw/feed/", why="the feed")
     def feed():
         return frame()
 
@@ -405,7 +405,7 @@ def test_losing_any_one_output_brings_the_whole_stage_back(iv):
     import shutil
     ran = []
 
-    @iv.data("raw/feed/", why="the feed", once=True)
+    @iv.step(output="raw/feed/", why="the feed", once=True)
     def feed():
         return frame()
 
@@ -440,7 +440,8 @@ def test_a_missing_output_is_refused_unless_allowed(iv):
 
 def test_allow_missing_lets_an_output_stay_absent(iv):
     @iv.step(output={"a": "processed/a/",
-                      "b": iv.output("processed/b/", allow_missing=True)},
+                      "b": iv.data("processed/b/", why="the optional table",
+                                   allow_missing=True)},
              why="the second table is not always producible")
     def fit():
         return {"a": frame()}
@@ -461,7 +462,7 @@ def test_a_dataset_nothing_reads_is_terminal_without_being_told(iv):
     def fit(f=iv.all_of(feed, why="the upstream")):
         return {"read_by_someone": f, "read_by_a_person": f}
 
-    @iv.data(dataset="dump/site/", why="the app reads it")
+    @iv.step(output="dump/site/", why="the app reads it")
     def site(a=iv.all_of(fit["read_by_someone"], why="the table a stage reads")):
         return a
 
@@ -472,15 +473,15 @@ def test_a_dataset_nothing_reads_is_terminal_without_being_told(iv):
     assert errors == [], errors
 
 def test_two_stages_may_share_a_dataset_by_writing_different_partitions(iv):
-    @iv.data("raw/feed/", why="the feed", once=True)
+    @iv.step(output="raw/feed/", why="the feed", once=True)
     def feed():
         return frame()
 
-    @iv.data("derived/blocks/", why="the first block", part={"source": "a"})
+    @iv.step(output="derived/blocks/", why="the first block", part={"source": "a"})
     def block_a(feed=iv.all_of(feed, why="the upstream")):
         return frame(2)
 
-    @iv.data("derived/blocks/", why="the second block", part={"source": "b"})
+    @iv.step(output="derived/blocks/", why="the second block", part={"source": "b"})
     def block_b(feed=iv.all_of(feed, why="the upstream")):
         return frame(3)
 
@@ -491,18 +492,18 @@ def test_two_stages_may_share_a_dataset_by_writing_different_partitions(iv):
 
 
 def test_the_same_shard_written_twice_is_refused(iv):
-    @iv.data("derived/blocks/", why="the first block", part={"source": "a"})
+    @iv.step(output="derived/blocks/", why="the first block", part={"source": "a"})
     def block_a():
         return frame()
 
     with pytest.raises(DeclError, match="different partitions"):
-        @iv.data("derived/blocks/", why="the same shard again", part={"source": "a"})
+        @iv.step(output="derived/blocks/", why="the same shard again", part={"source": "a"})
         def block_a2():
             return frame()
 
 
 def test_a_fixed_partition_takes_no_call_argument(iv):
-    @iv.data("derived/blocks/", why="one block", part={"source": "a"})
+    @iv.step(output="derived/blocks/", why="one block", part={"source": "a"})
     def block():
         return frame()
 
@@ -515,11 +516,11 @@ def test_a_fixed_partition_takes_no_call_argument(iv):
 def test_split_writes_a_shard_per_returned_key(iv):
     ran = []
 
-    @iv.data("raw/feed/", why="the feed", once=True)
+    @iv.step(output="raw/feed/", why="the feed", once=True)
     def feed():
         return pl.DataFrame({"season": ["2024", "2024", "2025"], "pts": [1, 2, 3]})
 
-    @iv.data("derived/features/", why="built in one pass, split by season",
+    @iv.step(output="derived/features/", why="built in one pass, split by season",
              part="season", split=True)
     def features(feed=iv.all_of(feed, why="every season at once")):
         ran.append(1)
@@ -533,7 +534,7 @@ def test_split_writes_a_shard_per_returned_key(iv):
 
 
 def test_a_split_stage_must_return_a_mapping(iv):
-    @iv.data("derived/features/", why="split, but returns a frame",
+    @iv.step(output="derived/features/", why="split, but returns a frame",
              part="season", split=True)
     def features():
         return frame()
@@ -544,7 +545,7 @@ def test_a_split_stage_must_return_a_mapping(iv):
 
 def test_split_needs_a_partition_key(iv):
     with pytest.raises(DeclError, match="needs a partition key"):
-        @iv.data("derived/features/", why="split with nothing to split on", split=True)
+        @iv.step(output="derived/features/", why="split with nothing to split on", split=True)
         def features():
             return {"a": frame()}
 
@@ -552,11 +553,11 @@ def test_split_needs_a_partition_key(iv):
 # ── external sources ──────────────────────────────────────────────────────────
 
 def test_an_external_source_is_declared_and_drawn(iv):
-    @iv.data(dataset="config/today/", why="the clock", ext=".json")
+    @iv.step(output="config/today/", why="the clock", ext=".json")
     def today():
         return {"date": "2026-08-22"}
 
-    @iv.data(dataset="raw/feed/", why="fetched from an API",
+    @iv.step(output="raw/feed/", why="fetched from an API",
              external={"espn/feeds": "ESPN's season files"})
     def feed(clock=iv.all_of(today, as_paths=True, why="poll once a day")):
         return frame()
@@ -574,7 +575,7 @@ def test_a_stage_may_write_nothing_and_still_declare_what_it_reads(iv):
     still worth declaring, or the graph cannot draw the edge."""
     ran = []
 
-    @iv.data("dump/site/", why="the payload")
+    @iv.step(output="dump/site/", why="the payload")
     def site():
         return frame()
 
@@ -610,18 +611,18 @@ def test_a_stage_that_writes_nothing_has_no_partition(iv):
 # ── as_paths: what the parameter is handed ────────────────────────────────────
 
 def test_as_paths_hands_back_paths_and_the_default_hands_back_contents(iv):
-    @iv.data(dataset="raw/feed/", why="the feed", once=True)
+    @iv.step(output="raw/feed/", why="the feed", once=True)
     def feed():
         return frame()
 
     got = {}
 
-    @iv.data(dataset="processed/contents/", why="wants the frame")
+    @iv.step(output="processed/contents/", why="wants the frame")
     def contents(f=iv.all_of(feed, why="the upstream")):
         got["contents"] = f
         return f
 
-    @iv.data(dataset="processed/paths/", why="wants the paths")
+    @iv.step(output="processed/paths/", why="wants the paths")
     def paths(f=iv.all_of(feed, as_paths=True, why="the upstream")):
         got["paths"] = f
         return frame()
@@ -637,7 +638,7 @@ def test_an_optional_read_that_selects_nothing_is_empty_either_way(iv):
     for their side: `[]` concatenates with another path list, `None` tests with `is None`."""
     got = {}
 
-    @iv.data(dataset="processed/out/", why="reads what may not be there")
+    @iv.step(output="processed/out/", why="reads what may not be there")
     def out(p=iv.all_of(iv.source("raw/absent/", why="arrives from outside"), optional=True, as_paths=True, why="maybe"),
             c=iv.all_of(iv.source("raw/absent/", why="arrives from outside"), optional=True, why="maybe")):
         got.update(paths=p, contents=c)
@@ -650,11 +651,11 @@ def test_an_optional_read_that_selects_nothing_is_empty_either_way(iv):
 # ── a read names the stage that writes it ─────────────────────────────────────
 
 def test_naming_the_stage_builds_the_same_graph_as_naming_the_path(iv):
-    @iv.data(dataset="raw/feed/", why="the feed", once=True)
+    @iv.step(output="raw/feed/", why="the feed", once=True)
     def feed():
         return frame()
 
-    @iv.data(dataset="processed/out/", why="passthrough")
+    @iv.step(output="processed/out/", why="passthrough")
     def out(f=iv.all_of(feed, why="the upstream")):
         return f
 
@@ -679,11 +680,11 @@ def test_a_bare_own_last_copy_means_this_stage_s_own_output(iv):
     day = ["day1"]
     ran = []
 
-    @iv.data(dataset="config/today/", why="the clock", ext=".json")
+    @iv.step(output="config/today/", why="the clock", ext=".json")
     def today():
         return {"date": day[0]}
 
-    @iv.data(dataset="raw/log/", why="a running log, appended once a day")
+    @iv.step(output="raw/log/", why="a running log, appended once a day")
     def log(clock=iv.all_of(today, as_paths=True, why="append once a day"),
             prior=iv.own_last_copy(why="yesterday's copy")):
         ran.append(1)
@@ -705,3 +706,63 @@ def test_a_bare_own_last_copy_on_a_multi_output_stage_is_refused(iv):
         @iv.step(output={"a": "out/a/", "b": "out/b/"}, why="two tables")
         def two(prior=iv.own_last_copy(why="which one?")):
             return {"a": frame(), "b": frame()}
+
+
+
+# ── declaring a dataset, and producing one ───────────────────────────────────
+
+def test_a_declared_dataset_is_produced_by_naming_it_in_output(iv):
+    """`iv.data` says a dataset EXISTS. `@iv.step` says what computes it. They are two
+    statements because a stage writing four tables has one body and four datasets, and
+    saying which is which inside `output=` is the only place the names can meet."""
+    feed = iv.source("raw/feed/", why="arrives from outside")
+    ratings = iv.data("processed/ratings/", why="one row per player")
+    summary = iv.data("processed/summary/", why="one row per season")
+
+    @iv.step(output={"r": ratings, "s": summary}, why="the joint fit")
+    def fit(f=iv.all_of(feed, why="the design matrix")):
+        return {"r": frame(), "s": frame()}
+
+    assert set(fit.datasets) == {"processed/ratings/", "processed/summary/"}
+    assert iv._datasets["processed/ratings/"].why == "one row per player"
+
+
+def test_a_read_names_the_declaration_rather_than_the_key_it_arrives_under(iv):
+    """`xpm["ratings"]` needs you to know the key the body returns it under. The
+    declaration is the same dataset said without that."""
+    feed = iv.source("raw/feed/", why="arrives from outside")
+    ratings = iv.data("processed/ratings/", why="one row per player")
+
+    @iv.step(output={"r": ratings}, why="the fit")
+    def fit(f=iv.all_of(feed, why="the design matrix")):
+        return {"r": frame()}
+
+    assert iv.all_of(ratings, why="x") == iv.all_of(fit["r"], why="x")
+
+
+def test_one_output_needs_no_declaration_of_its_own(iv):
+    """A name used once does not need a line to itself: the read names the STAGE."""
+    feed = iv.source("raw/feed/", why="arrives from outside")
+
+    @iv.step(output="processed/mid/", why="the middle")
+    def mid(f=iv.all_of(feed, why="the feed")):
+        return frame()
+
+    assert mid.dataset == "processed/mid/"
+    assert mid.single and not mid.acts_only
+
+
+def test_a_dataset_is_declared_once_as_one_thing_or_the_other(iv):
+    iv.data("processed/mid/", why="this pipeline writes it")
+    with pytest.raises(DeclError, match="one or the other"):
+        iv.source("processed/mid/", why="no it does not")
+
+
+def test_a_source_cannot_be_named_as_something_a_stage_writes(iv):
+    """A read may name a source; an `output=` may not. Otherwise a dataset would have two
+    declarations disagreeing about where it comes from."""
+    feed = iv.source("raw/feed/", why="arrives from outside")
+    with pytest.raises(DeclError, match="declared a source"):
+        @iv.step(output=feed, why="writing what arrives from outside")
+        def clobber():
+            return frame()

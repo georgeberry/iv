@@ -42,7 +42,7 @@ know first is the one thing a running program can't be asked for.
 So the declaration moved into the signature, where it's just a value:
 
 ```python
-@iv.data("processed/cohorts/", why="a fit per cohort", part="season")
+@iv.step(output="processed/cohorts/", why="a fit per cohort", part="season")
 def cohorts(past=iv.before_part("processed/features/", why="every prior season")):
     return past.group_by("player").agg(pl.col("z").mean())
 ```
