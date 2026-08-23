@@ -54,7 +54,9 @@ ran = []
 
 
 @iv.data(
-    "config/today/", why="the day, so a polled feed re-fetches once a day", ext=".json"
+    dataset="config/today/",
+    why="the day, so a polled feed re-fetches once a day",
+    ext=".json",
 )
 def today():
     """No upstream, so nothing on disk could say the date moved — it runs every time.
@@ -65,7 +67,7 @@ def today():
     return {"date": TODAY.isoformat()}
 
 
-@iv.data("config/model/", why="the knobs the fit shape depends on", ext=".json")
+@iv.data(dataset="config/model/", why="the knobs the fit shape depends on", ext=".json")
 def model_config():
     """Not a version string, not a label — a shard, declared as an upstream by whoever
     answers to it. `iv graph` draws the edge; a change moves exactly those stages."""
@@ -82,7 +84,7 @@ def model_config():
 
 
 @iv.data(
-    "raw/box_settled/",
+    dataset="raw/box_settled/",
     why="raw box scores for one finished season",
     part="season",
     once=True,
@@ -99,7 +101,7 @@ def box_settled(season):
 
 
 @iv.data(
-    "raw/box_live/",
+    dataset="raw/box_live/",
     why="raw box scores for the season being played",
     part={"season": LIVE},
     external={"espn/feeds": "ESPN's live feed"},
@@ -113,7 +115,7 @@ def box_live(clock=iv.all_of("config/today/", load=False, why="poll once a day")
     )
 
 
-@iv.data("raw/box/", why="one season of box scores, from whichever half has it",
+@iv.data(dataset="raw/box/", why="one season of box scores, from whichever half has it",
          part="season")
 def box(
     season,
@@ -133,7 +135,7 @@ def box(
 
 
 @iv.data(
-    "derived/schedule/",
+    dataset="derived/schedule/",
     why="one row per game, with scores patched in as they land",
     external={"espn/scoreboard": "final scores, which land all day"},
 )
@@ -159,7 +161,7 @@ def schedule(
 
 
 @iv.data(
-    "derived/box_features/",
+    dataset="derived/box_features/",
     why="the per-(season, player) box matrix",
     part="season",
     split=True,
@@ -182,7 +184,7 @@ def box_features(
 
 
 @iv.data(
-    "derived/college/",
+    dataset="derived/college/",
     why="the NCAA block of the college feature table",
     part={"source": "ncaa"},
 )
@@ -196,14 +198,14 @@ def ncaa_block(
     return pl.DataFrame({"source": ["ncaa"], "n": [bf.height]})
 
 
-@iv.data("derived/college/", why="the G-League block", part={"source": "gleague"})
+@iv.data(dataset="derived/college/", why="the G-League block", part={"source": "gleague"})
 def gleague_block(bf=iv.all_of("derived/box_features/", why="the pro side")):
     ran.append("gleague")
     return pl.DataFrame({"source": ["gleague"], "n": [1]})
 
 
 @iv.data(
-    "derived/college/",
+    dataset="derived/college/",
     why="the international block",
     part={"source": "intl"},
     external={"basketball-reference/international": "the international player pages"},
@@ -217,7 +219,7 @@ def intl_block(bf=iv.all_of("derived/box_features/", why="the pro side")):
 
 
 @iv.step(
-    outputs={
+    output={
         "ratings": "processed/xpm/",
         "career": iv.output("processed/xpm_career/", terminal=True),
         "summary": iv.output("processed/xpm_summary/", terminal=True),
@@ -249,7 +251,7 @@ def xpm(
 
 
 @iv.data(
-    "processed/rapm_fit/",
+    dataset="processed/rapm_fit/",
     why="the fitted model object, so nothing refits it twice",
     ext=".pkl",
 )
@@ -266,7 +268,7 @@ def rapm_fit(
 
 
 @iv.data(
-    "processed/xpm_eoy/",
+    dataset="processed/xpm_eoy/",
     why="one end-of-year rating per season, frozen once it ends",
     part="season",
 )
@@ -285,7 +287,7 @@ def xpm_eoy(
 
 
 @iv.data(
-    "processed/rookie/",
+    dataset="processed/rookie/",
     why="a projection per cohort, on prior seasons only",
     part="season",
 )
@@ -304,7 +306,7 @@ def rookie(
 
 
 @iv.data(
-    "processed/predictions/",
+    dataset="processed/predictions/",
     why="one predicted margin per game already played",
     part={"completed": "true"},
 )
@@ -317,7 +319,7 @@ def predict_played(
 
 
 @iv.data(
-    "processed/predictions/",
+    dataset="processed/predictions/",
     why="one predicted margin per game not yet played",
     part={"completed": "false"},
 )
@@ -330,7 +332,7 @@ def predict_upcoming(
 
 
 @iv.data(
-    "processed/calibration/",
+    dataset="processed/calibration/",
     why="the sigma the predictions are calibrated with",
     allow_missing=True,
 )
@@ -353,7 +355,8 @@ def calibration(
 # ── terminal, written through `out` ──────────────────────────────────────────
 
 
-@iv.data("dump/site/", why="the payload the app renders", ext=".json", terminal=True)
+@iv.data(dataset="dump/site/", why="the payload the app renders", ext=".json",
+         terminal=True)
 def site(
     out,
     x=iv.all_of("processed/xpm/", why="the leaderboard"),
@@ -490,7 +493,7 @@ def shows(label, fn):
 
 
 def dict_to_parquet():
-    @iv.data("processed/bad_knobs/", why="a dict, but no ext=")
+    @iv.data(dataset="processed/bad_knobs/", why="a dict, but no ext=")
     def bad_knobs():
         return {"a": 1}
 
@@ -498,24 +501,26 @@ def dict_to_parquet():
 
 
 def part_relative_with_no_partition():
-    @iv.data("processed/bad_bound/", why="not partitioned, but reads as if it were")
+    @iv.data(dataset="processed/bad_bound/",
+             why="not partitioned, but reads as if it were")
     def bad_bound(bf=iv.same_part("derived/box_features/", why="this season")):
         return bf
 
 
 def a_second_writer_of_the_same_shard():
-    @iv.data("derived/college/", why="a second NCAA block", part={"source": "ncaa"})
+    @iv.data(dataset="derived/college/", why="a second NCAA block",
+             part={"source": "ncaa"})
     def ncaa_again(bf=iv.all_of("derived/box_features/", why="the pro side")):
         return bf
 
 
 def an_output_that_was_not_returned():
-    @iv.data("processed/two_out/", why="declares two, returns one")
+    @iv.data(dataset="processed/two_out/", why="declares two, returns one")
     def _unused():
         return None
 
     @iv.step(
-        outputs={"a": "processed/out_a/", "b": "processed/out_b/"},
+        output={"a": "processed/out_a/", "b": "processed/out_b/"},
         why="declares two outputs and returns one",
     )
     def two(bf=iv.all_of("derived/box_features/", why="the box prior")):
@@ -525,7 +530,8 @@ def an_output_that_was_not_returned():
 
 
 def building_a_stage_from_inside_one():
-    @iv.data("processed/reaches/", why="reaches for a stage instead of declaring it")
+    @iv.data(dataset="processed/reaches/",
+             why="reaches for a stage instead of declaring it")
     def reaches(unused=iv.all_of("config/today/", why="declared, then ignored")):
         return box("2024")
 
@@ -533,7 +539,7 @@ def building_a_stage_from_inside_one():
 
 
 def a_parameter_iv_cannot_supply():
-    @iv.data("processed/mystery/", why="takes something unexplained")
+    @iv.data(dataset="processed/mystery/", why="takes something unexplained")
     def mystery(what_is_this):
         return what_is_this
 

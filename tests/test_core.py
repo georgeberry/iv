@@ -89,7 +89,7 @@ def test_a_stage_with_several_outputs_is_checked_on_all_of_them(iv):
     seed(iv, "raw/feed/")
     ran = []
 
-    @iv.step(outputs={"ratings": "out/ratings/", "careers": "out/careers/",
+    @iv.step(output={"ratings": "out/ratings/", "careers": "out/careers/",
                       "summary": "out/summary/"},
              why="one computation, three outputs")
     def build(feed=iv.all_of("raw/feed/", why="the upstream")):

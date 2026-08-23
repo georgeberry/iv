@@ -507,20 +507,23 @@ class Invalidator:
         name = _canon(dataset)
         return [a for a in self._assets.values() if name in a.datasets]
 
-    def step(self, *, why: str, outputs=None, part=None,
+    def step(self, output=None, *, why: str, part=None,
              ext: str = _sh.EXT, terminal: bool = False, allow_missing: bool = False,
              if_needed: bool = True, once: bool = False, split: bool = False,
              external=None) -> Callable:
-        """A stage: what it reads, in its signature, and what it writes, in `outputs=`.
+        """A stage: what it reads, in its signature, and what it writes, in `output=`.
 
-            @iv.step(outputs={"ratings": "processed/xpm/",
-                              "summary": "processed/xpm_summary/"}, why="the joint fit")
+        `output=` is one dataset, or a dict naming several — the names are the keys the
+        body returns.
+
+            @iv.step(output={"ratings": "processed/xpm/",
+                             "summary": "processed/xpm_summary/"}, why="the joint fit")
             def xpm(poss=iv.all_of("derived/possessions/", why="the design matrix")):
                 ...
                 return {"ratings": r, "summary": s}
 
         `@iv.data` is the same thing for the common case of one dataset, where the body
-        returns its contents rather than a dict. Omit `outputs=` for a stage that writes
+        returns its contents rather than a dict. Omit `output=` for a stage that writes
         nothing into the tree — a fetch, a publish — and it runs every time, because
         nothing on disk can say it is done.
         """
@@ -528,9 +531,9 @@ class Invalidator:
 
         def decorate(fn: Callable) -> _assets.Asset:
             return self._register(_assets.Asset(
-                self, outputs, fn, why=why, part=part, ext=ext, terminal=terminal,
+                self, output, fn, why=why, part=part, ext=ext, terminal=terminal,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
-                split=split, single=isinstance(outputs, str), external=external))
+                split=split, single=isinstance(output, str), external=external))
         return decorate
 
     def _node_name(self, fn: Callable) -> str:

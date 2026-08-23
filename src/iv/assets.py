@@ -146,7 +146,7 @@ def output(dataset: str, *, ext: str = _sh.EXT, terminal: bool = False,
     A joint fit usually has one table something downstream reads and several that only a
     person does — so `terminal` belongs to the output, not to the stage:
 
-        outputs={"ratings": "processed/xpm/",
+        output={"ratings": "processed/xpm/",
                  "summary": iv.output("processed/xpm_summary/", terminal=True)}
     """
     fixed = tuple(sorted((str(k), str(v)) for k, v in part.items())) if part else ()
@@ -154,7 +154,7 @@ def output(dataset: str, *, ext: str = _sh.EXT, terminal: bool = False,
 
 
 def _outputs(spec, ext, terminal, allow_missing) -> dict:
-    """`outputs=` as {key: Output}. A bare string is the one-output case.
+    """`output=` as {key: Output}. A bare string is the one-output case.
 
     None is a stage that writes NOTHING — a fetch that fills a download cache, a publish
     that uploads. There is no artifact to be stale, so there is nothing to skip on and it
@@ -168,8 +168,8 @@ def _outputs(spec, ext, terminal, allow_missing) -> dict:
         return {d: Output(d, ext, terminal, allow_missing)}
     if not isinstance(spec, dict) or not spec:
         raise DeclError(
-            "outputs= is a dataset, or a dict of {name: dataset} naming each one — "
-            'outputs={"ratings": "processed/xpm/", "summary": "processed/xpm_summary/"}. '
+            "output= is a dataset, or a dict of {name: dataset} naming each one — "
+            'output={"ratings": "processed/xpm/", "summary": "processed/xpm_summary/"}. '
             "The names are the keys the body returns.")
     out = {}
     for k, v in spec.items():
@@ -185,18 +185,18 @@ class Asset:
     """A stage: what it reads, what it writes, and whether it needs to run.
 
     One object for both shapes. `@iv.data` is the single-output case, where the body
-    returns the value; `@iv.step(outputs={...})` returns a dict keyed by the names in the
+    returns the value; `@iv.step(output={...})` returns a dict keyed by the names in the
     declaration, which is how one expensive fit produces six tables without being run six
     times.
     """
 
-    def __init__(self, pipeline, outputs, fn, *, why: str,
+    def __init__(self, pipeline, output, fn, *, why: str,
                  part=None, ext: str = _sh.EXT, terminal: bool = False,
                  allow_missing: bool = False, if_needed: bool = True,
                  once: bool = False, split: bool = False, single: bool = True,
                  external=None) -> None:
         self.pipeline = pipeline
-        self.outputs = _outputs(outputs, ext, terminal, allow_missing)
+        self.outputs = _outputs(output, ext, terminal, allow_missing)
         self.single = single
         self.fn = fn
         self.acts_only = not self.outputs

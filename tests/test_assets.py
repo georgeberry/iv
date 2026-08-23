@@ -386,7 +386,7 @@ def test_a_stage_with_several_outputs_runs_once(iv):
     def feed():
         return frame()
 
-    @iv.step(outputs={"a": "processed/a/", "b": "processed/b/", "c": "processed/c/"},
+    @iv.step(output={"a": "processed/a/", "b": "processed/b/", "c": "processed/c/"},
              why="one computation, three tables")
     def fit(feed=iv.all_of("raw/feed/", why="the upstream")):
         ran.append(1)
@@ -408,7 +408,7 @@ def test_losing_any_one_output_brings_the_whole_stage_back(iv):
     def feed():
         return frame()
 
-    @iv.step(outputs={"a": "processed/a/", "b": "processed/b/"}, why="two tables")
+    @iv.step(output={"a": "processed/a/", "b": "processed/b/"}, why="two tables")
     def fit(feed=iv.all_of("raw/feed/", why="the upstream")):
         ran.append(1)
         return {"a": feed, "b": feed.head(1)}
@@ -420,7 +420,7 @@ def test_losing_any_one_output_brings_the_whole_stage_back(iv):
 
 
 def test_an_undeclared_output_is_refused(iv):
-    @iv.step(outputs={"a": "processed/a/"}, why="returns something it did not declare")
+    @iv.step(output={"a": "processed/a/"}, why="returns something it did not declare")
     def fit():
         return {"a": frame(), "surprise": frame()}
 
@@ -429,7 +429,7 @@ def test_an_undeclared_output_is_refused(iv):
 
 
 def test_a_missing_output_is_refused_unless_allowed(iv):
-    @iv.step(outputs={"a": "processed/a/", "b": "processed/b/"}, why="returns one of two")
+    @iv.step(output={"a": "processed/a/", "b": "processed/b/"}, why="returns one of two")
     def fit():
         return {"a": frame()}
 
@@ -438,7 +438,7 @@ def test_a_missing_output_is_refused_unless_allowed(iv):
 
 
 def test_allow_missing_lets_an_output_stay_absent(iv):
-    @iv.step(outputs={"a": "processed/a/",
+    @iv.step(output={"a": "processed/a/",
                       "b": iv.output("processed/b/", allow_missing=True)},
              why="the second table is not always producible")
     def fit():
@@ -454,7 +454,7 @@ def test_terminal_belongs_to_the_output_not_the_stage(iv):
     def feed():
         return frame()
 
-    @iv.step(outputs={"read_by_someone": "processed/a/",
+    @iv.step(output={"read_by_someone": "processed/a/",
                       "read_by_a_person": iv.output("processed/b/", terminal=True)},
              why="one fit, one table nothing downstream reads")
     def fit(feed=iv.all_of("raw/feed/", why="the upstream")):
