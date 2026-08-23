@@ -93,7 +93,8 @@ def test_every_kind_has_a_distinct_shape():
 def test_the_states_are_the_ones_status_reports():
     """`states` is shared with the CLI so the picture and the report cannot drift into
     naming the same three things differently."""
-    got = _viz.states({"a/": None, "b/": "its inputs moved", "c/": None}, maybe={"c/"})
+    got = _viz.states({"a/": {"": None}, "b/": {"": "its inputs moved"}, "c/": {"": None}},
+                      maybe={("c/", "")})
     assert got == {"a/": "current", "b/": "stale", "c/": "maybe"}
     assert set(got.values()) <= set(_viz.STATUS)
 
@@ -102,8 +103,7 @@ def test_a_dataset_with_no_producer_is_not_coloured_as_an_answer(iv):
     """A source has no stage to ask, so `iv status` does not report it and the picture
     does not pretend to know — it is grey."""
     g = built(iv)
-    reasons = {n: None for n in g.produced}
-    status = _viz.states(reasons, maybe=set())
+    status = _viz.states({n: {"": None} for n in g.produced}, maybe=set())
     assert "raw/feed/" not in status
     assert _viz.STATUS["source"] not in {_viz.STATUS[s] for s in ("current", "maybe", "stale")}
 
@@ -116,7 +116,7 @@ def test_every_state_has_a_distinct_colour():
 
 def test_draw_writes_a_picture(iv, tmp_path):
     g = built(iv)
-    status = _viz.states({n: None for n in g.produced}, maybe=set())
+    status = _viz.states({n: {"": None} for n in g.produced}, maybe=set())
     out = _viz.draw(g, tmp_path / "dag.png", status=status)
     assert out.exists() and out.stat().st_size > 1000
 
@@ -155,7 +155,7 @@ def test_a_shard_takes_the_colour_of_its_dataset(iv, tmp_path):
         return frame()
 
     g = _graph.build(iv)
-    status = _viz.states({"processed/preds/": "its inputs moved"}, maybe=set())
+    status = _viz.states({"processed/preds/": {"": "its inputs moved"}}, maybe=set())
     colours = {_viz.STATUS[status.get(n[0], "source")] for n in _viz.to_networkx(g)}
     assert _viz.STATUS["stale"] in colours, "both shards take the dataset's answer"
     assert _viz.STATUS["source"] in colours, "and raw/feed/ has no answer to take"

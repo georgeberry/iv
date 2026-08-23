@@ -254,6 +254,17 @@ def matches(value: str, rule: object) -> bool:
     return value in {str(v) for v in values}
 
 
+def covers(where: dict[str, object] | None, part: dict[str, str]) -> bool:
+    """Would a read with this `where` pick up a shard with this partition?
+
+    The same test `select` applies to a directory, asked of one partition — the downstream
+    trace needs it per shard and has no `Shard` to hand. No selector means the whole
+    dataset, so everything in it.
+    """
+    return all(k in part and matches(part[k], rule)
+               for k, rule in (where or {}).items())
+
+
 def select(shards: dict[str, Shard], where: dict[str, object] | None = None,
            *, dataset: str = "") -> list[Shard]:
     picked = list(shards.values())
@@ -272,7 +283,7 @@ def select(shards: dict[str, Shard], where: dict[str, object] | None = None,
                     f"{dataset or 'dataset'} has no shard for {key}={', '.join(missing)}. "
                     f"Present: {', '.join(sorted(have)) or 'none'}. An explicit list is a "
                     f"coverage claim, so this is an error rather than a shorter read.")
-        picked = [s for s in picked if key in s.part and matches(s.part[key], rule)]
+        picked = [s for s in picked if covers({key: rule}, s.part)]
     return sorted(picked, key=lambda s: sort_key(s.part_str))
 
 

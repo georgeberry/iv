@@ -101,14 +101,23 @@ SHAPE = {
 }
 
 
-def states(reasons: dict, maybe: set) -> dict:
-    """`iv status`'s answer per dataset, as the names `STATUS` colours.
+def states(state: dict, maybe: set) -> dict:
+    """`iv status`'s answer per DATASET, as the names `STATUS` colours.
 
-    Here rather than in the CLI so the picture and the report cannot drift into naming the
-    same three things differently.
+    A node here is a dataset, and `iv status` answers per shard, so the shards are rolled up
+    to their worst — one stale shard makes the dataset stale in the picture. Rolled up here
+    rather than in the CLI so the picture and the report cannot drift into naming the same
+    three things differently.
     """
-    return {name: ("stale" if why else "maybe" if name in maybe else "current")
-            for name, why in reasons.items()}
+    out = {}
+    for name, shards in state.items():
+        if any(why for why in shards.values()):
+            out[name] = "stale"
+        elif any((name, p) in maybe for p in shards):
+            out[name] = "maybe"
+        else:
+            out[name] = "current"
+    return out
 
 
 def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:

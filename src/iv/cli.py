@@ -187,105 +187,112 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
     status = {}
     if not plain:
         with _sh.snapshot():
-            reasons, stale = _staleness(iv, g)
-        status = _viz.states(reasons, _downstream_of(g, stale))
+            state = _staleness(iv, g)
+            maybe = _downstream_of(g, state)
+        status = _viz.states(state, maybe)
     typer.echo(f"wrote {_viz.draw(g, out, full=full, status=status)}")
 
 
 def _staleness(iv, g):
-    """The CLI has no running step to ask, so it reads each stage's declared upstreams off
-    the static scan — the same `(dataset, selector, optional)` triples `reads_in` takes off
-    the source at runtime, arrived at the other way round.
+    """Per SHARD: {dataset: {part_str: reason or None}}.
 
-    It must NOT fall back to the runtime registry: `_load()` imports the module holding the
-    Invalidator, not the module holding the steps, so nothing would be registered and every
-    dataset would look like a root — which reads as `current` for anything with a file on
-    disk. A green that means "I could not find the question" is worse than a red."""
-    # WHICH STAGE OWNS WHICH SHARD. Two stages may share a dataset by writing different
-    # partitions of it — the played and the unplayed half of a prediction table, three
-    # blocks of a college feature table — and each has its own upstreams. This used to take
-    # the first writer in the order and judge every shard of the dataset against it, so most
-    # of them were answered with the wrong question: a shard reported stale against inputs
-    # that do not build it, or current against inputs that never move.
+    The CLI has no running stage to ask, so it reads each stage's declared upstreams off
+    the graph — the same triples the run takes off the decorated function, arrived at the
+    other way round.
+
+    WHICH STAGE OWNS WHICH SHARD. Two stages may share a dataset by writing different
+    partitions of it — the played and the unplayed half of a prediction table, three blocks
+    of a college feature table — and each has its own upstreams. This used to take the first
+    writer in the order and judge every shard against it, so most of them were answered with
+    the wrong question.
+    """
     writers: dict[str, list[tuple]] = {}
     for node in g.order():
         inputs = tuple((s.dataset, s.sel, s.optional) for s in g.stages[node].triggers)
         for site in g.stages[node].outputs:
             writers.setdefault(site.dataset, []).append((tuple(site.part), inputs))
 
-    out, stale = {}, set()
+    out: dict[str, dict] = {}
     for name, owners in writers.items():
-        d = iv.resolve_out(name)
-        parts = sorted(_sh.current_shards(d)) or [""]
-        reasons = []
-        for p in parts:
+        shards = {}
+        for p in (sorted(_sh.current_shards(iv.resolve_out(name))) or [""]):
             part = _sh.decode_part(p) or None
-            reasons.append((p, iv.why_stale(name, part, inputs=_owner(owners, part))))
-        out[name] = _summarise(reasons)
-        if out[name] is not None:
-            stale.add(name)
-    return out, stale
+            shards[p] = iv.why_stale(name, part, inputs=_owner(owners, part))
+        out[name] = shards
+    return out
+
+
+def _stale_shards(state: dict) -> set:
+    return {(ds, p) for ds, shards in state.items()
+            for p, why in shards.items() if why}
 
 
 def _which(parts: list[str], total: int) -> str:
     """Name the shards, compactly: a list while it is readable, a range when it is not."""
     named = sorted(parts, key=_sh.sort_key)
     if total == 1:
-        return named[0]                      # one shard, so say which rather than count it
+        return named[0] or "(one shard)"
     if len(named) == total:
-        return f"all {total} shards"
+        return f"all {total}"
     shown = ", ".join(named[:3]) if len(named) <= 3 else f"{named[0]}..{named[-1]}"
-    return f"{len(named)}/{total} shards ({shown})"
+    return f"{len(named)}/{total} ({shown})"
 
 
-def _summarise(reasons: list[tuple]) -> str | None:
-    """One line per dataset, naming WHICH shards are stale and why.
+def _line(shards: dict, maybe: set, dataset: str) -> tuple:
+    """One dataset's line: its worst state, and the shard counts behind it.
 
-    It used to report `13/21 shards` and whichever reason it found first. That says a
-    rebuild is coming without saying what of — and the two cases it runs together are the
-    ones worth telling apart. A clock moving makes every partition that reads it stale at
-    once, and there the count IS the story; a season backfilled makes one stale, and there
-    the count is the least useful part of it. Shards stale for different reasons are
-    grouped, because "not built yet" and "its inputs moved" are different work.
+    A dataset is rarely all one thing. One season of a panel is stale because its own feed
+    moved and the other twenty may follow because they share a crosswalk — reporting only
+    the worst of those loses the number that says how much work is coming.
     """
-    bad = [(p, r) for p, r in reasons if r]
-    if not bad:
-        return None
-    if len(reasons) == 1 and not bad[0][0]:
-        return bad[0][1]                     # one unpartitioned shard: nothing to name
-    groups: dict[str, list[str]] = {}
-    for part, reason in bad:
-        groups.setdefault(reason, []).append(part or "(one shard)")
-    return "; ".join(f"{_which(parts, len(reasons))}: {reason}"
-                     for reason, parts in groups.items())
+    total = len(shards)
+    bad = {p: why for p, why in shards.items() if why}
+    soft = [p for p in shards if not shards[p] and (dataset, p) in maybe]
+    if not bad and not soft:
+        return "current", f"{total} shard(s)"
+
+    parts = []
+    if bad:
+        groups: dict[str, list[str]] = {}
+        for p, why in bad.items():
+            groups.setdefault(why, []).append(p)
+        parts += [f"{_which(ps, total)} stale: {why}" for why, ps in groups.items()]
+    if soft:
+        parts.append(f"{_which(soft, total)} may follow")
+    return ("stale" if bad else "maybe"), "; ".join(parts)
 
 
-def _downstream_of(g, stale: set) -> set:
-    """Datasets that read something being rebuilt: current now, and possibly not after.
+def _downstream_of(g, state: dict, iv=None) -> set:
+    """Shards that read something being rebuilt: current now, and possibly not after.
 
     POSSIBLY, not certainly, which is the whole reason this is a third state rather than
     more red. A rebuild that produces the same bytes commits the same shard and stops
-    there, so most of a long tail survives an ordinary daily run untouched — the poll
-    re-fetches, the fetch writes what it wrote yesterday, and nothing below it moves.
-    Reporting that as stale would be a wall of red that is mostly wrong by morning.
+    there, so on an ordinary day the poll re-fetches, writes what it wrote yesterday, and
+    nothing below it moves.
 
-    Transitive: the second stage down reads the first and the question is the same one.
-    `order()` is topological, so one pass decides every parent before its children.
+    PER SHARD, because that is the question worth answering. A cohort fit on seasons
+    before 2010 cannot see a shard of 2026, and saying so is the difference between "this
+    dataset may move" and "these three of its twenty-one may". The selector is data, so it
+    can be resolved for each of a stage's own partitions and asked whether it reaches a
+    shard that is moving — which is exactly what `select` asks of a directory.
     """
-    writers: dict[str, set] = {}
-    for node, st in g.stages.items():
+    from .core import _resolve_sel
+    moving = _stale_shards(state)
+    for node in g.order():                      # topological: parents decided first
+        st = g.stages[node]
         for site in st.outputs:
-            writers.setdefault(site.dataset, set()).add(node)
-    moving = {n for d in stale for n in writers.get(d, ())}
-    parents = g.parent_map()
-    out = set()
-    for node in g.order():
-        if node in moving:
-            continue
-        if any(p in moving for p in parents.get(node, ())):
-            moving.add(node)
-            out.update(s.dataset for s in g.stages[node].outputs if s.dataset not in stale)
-    return out
+            fixed = dict(site.part) or None
+            for p in state.get(site.dataset, {""}):
+                if (site.dataset, p) in moving:
+                    continue
+                part = _sh.decode_part(p) or fixed
+                for t in st.triggers:
+                    where = _resolve_sel(t.sel, part, t.dataset)
+                    if any(_sh.covers(where, _sh.decode_part(q) or {})
+                           for (d, q) in moving if d == t.dataset):
+                        moving.add((site.dataset, p))
+                        break
+    return moving - _stale_shards(state)
 
 
 def _owner(owners, part) -> tuple:
@@ -312,22 +319,21 @@ def status():
     # Nothing here writes, so one view of the tree answers every question — without it the
     # same input directory is re-listed once per partition of every dataset that reads it.
     with _sh.snapshot():
-        reasons, stale = _staleness(iv, g)
-        counts = {name: (len(_sh.current_shards(iv.resolve_out(name))) if not why else 0)
-                  for name, why in reasons.items()}
-    maybe = _downstream_of(g, stale)
-    for name, why in reasons.items():
-        if why:
-            typer.secho(f"  stale    {name:<44} {why}", fg="yellow")
-        elif name in maybe:
-            typer.secho(f"  maybe    {name:<44} {counts[name]} shard(s), and reads "
-                        f"something being rebuilt", fg="cyan")
-        else:
-            typer.secho(f"  current  {name:<44} {counts[name]} shard(s)", fg="green")
-    settled = len(reasons) - len(stale) - len(maybe)
-    tail = f", {len(maybe)} may follow" if maybe else ""
-    typer.echo(f"\n{settled}/{len(reasons)} current{tail}")
-    if stale:
+        state = _staleness(iv, g)
+        maybe = _downstream_of(g, state)
+
+    tally = {"current": 0, "maybe": 0, "stale": 0}
+    for name, shards in state.items():
+        tier, note = _line(shards, maybe, name)
+        typer.secho(f"  {tier:<8} {name:<44} {note}",
+                    fg={"current": "green", "maybe": "cyan", "stale": "yellow"}[tier])
+        for p, why in shards.items():
+            tally["stale" if why else "maybe" if (name, p) in maybe else "current"] += 1
+
+    total = sum(tally.values())
+    typer.echo(f"\n{total} shard(s): {tally['stale']} stale, "
+               f"{tally['maybe']} may follow, {tally['current']} current")
+    if tally["stale"]:
         raise typer.Exit(1)
 
 
@@ -383,16 +389,19 @@ def plan():
     iv = _load()
     g = _graph_of()
     with _sh.snapshot():
-        reasons, stale = _staleness(iv, g)
-    if not stale:
+        state = _staleness(iv, g)
+        maybe = _downstream_of(g, state)
+    if not _stale_shards(state):
         typer.echo("nothing to do")
         return
-    downstream = _downstream_of(g, stale)
-    for name, r in reasons.items():
-        if r:
-            typer.secho(f"  rebuild  {name:<44} {r}", fg="yellow")
-    for name in sorted(downstream):
-        typer.secho(f"  maybe    {name:<44} (reads something being rebuilt)", fg="cyan")
+    for name, shards in state.items():
+        tier, note = _line(shards, maybe, name)
+        if tier == "stale":
+            typer.secho(f"  rebuild  {name:<44} {note}", fg="yellow")
+    for name, shards in state.items():
+        tier, note = _line(shards, maybe, name)
+        if tier == "maybe":
+            typer.secho(f"  maybe    {name:<44} {note}", fg="cyan")
 
 
 @app.command()

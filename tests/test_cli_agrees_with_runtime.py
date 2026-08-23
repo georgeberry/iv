@@ -14,7 +14,7 @@ import polars as pl
 import pytest
 
 from iv import graph as _graph
-from iv.cli import _downstream_of, _staleness
+from iv.cli import _downstream_of, _stale_shards, _staleness
 from iv.core import Invalidator
 
 from tests.conftest import write_stage
@@ -84,8 +84,8 @@ def cli_says(iv):
     Produced datasets only. A root nothing declares as an output has no stage to ask, so
     it is not in the report — `raw/feed/` here.
     """
-    reasons, _ = _staleness(iv, _graph.build(iv))
-    return {k: v is not None for k, v in reasons.items()}
+    state = _staleness(iv, _graph.build(iv))
+    return {ds: any(why for why in shards.values()) for ds, shards in state.items()}
 
 
 def run_says(iv):
@@ -216,9 +216,9 @@ def test_one_dataset_read_at_two_call_sites_gets_one_answer(tmp_path, monkeypatc
     branchy.build()
     assert branchy.build.is_current(), "the run considers it current"
 
-    reasons, _ = _staleness(p.iv, _graph.build(p.iv))
-    assert reasons["processed/mid/"] is None, (
-        f"the CLI disagrees with the run: {reasons['processed/mid/']}")
+    state = _staleness(p.iv, _graph.build(p.iv))
+    assert not any(state["processed/mid/"].values()), (
+        f"the CLI disagrees with the run: {state['processed/mid/']}")
 
     for m in ("p", "branchy"):
         sys.modules.pop(m, None)
@@ -318,18 +318,78 @@ def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkey
 
     today(); feed(); mid(); site()
     g = _graph.build(iv)
-    _, stale = _staleness(iv, g)
-    assert stale == set() and _downstream_of(g, stale) == set()
+    state = _staleness(iv, g)
+    assert _stale_shards(state) == set() and _downstream_of(g, state) == set()
 
     day[0] = "day2"
     today()                      # the clock is a root; running it is how the day lands
-    reasons, stale = _staleness(iv, g)
-    maybe = _downstream_of(g, stale)
-    assert stale == {"raw/feed/"}, "only the thing that reads the clock is stale"
-    assert maybe == {"processed/mid/", "dump/site/"}, "the tail is transitive, and a maybe"
-    assert reasons["processed/mid/"] is None, "a maybe is still current on disk"
+    state = _staleness(iv, g)
+    maybe = _downstream_of(g, state)
+    assert _stale_shards(state) == {("raw/feed/", "")}, \
+        "only the thing that reads the clock is stale"
+    assert maybe == {("processed/mid/", ""), ("dump/site/", "")}, \
+        "the tail is transitive, per shard, and a maybe"
+    assert not any(state["processed/mid/"].values()), "a maybe is still current on disk"
 
     feed()                       # re-polls, writes the same bytes, and stops there
-    _, stale = _staleness(iv, g)
-    assert stale == set() and _downstream_of(g, stale) == set(), \
+    state = _staleness(iv, g)
+    assert _stale_shards(state) == set() and _downstream_of(g, state) == set(), \
         "the maybe was right to be a maybe"
+
+
+def test_only_the_shards_a_selector_reaches_may_follow(tmp_path, monkeypatch):
+    """One season moves, and the cohorts that cannot see it do not follow.
+
+    This is the whole point of answering per shard. `cohort[2025]` is fit on seasons
+    strictly before 2025, so a change to 2025 is not its business — and saying "this
+    dataset may move" would have made it look like it was.
+    """
+    for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
+        monkeypatch.delenv(var, raising=False)
+    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+                     project=tmp_path)
+
+    @iv.data(dataset="raw/box/", why="one season", part="season")
+    def box(season, f=iv.same_part("raw/feed/", why="this season's feed")):
+        return f
+
+    @iv.data(dataset="processed/cohort/", why="a fit on prior seasons only", part="season")
+    def cohort(past=iv.before_part(box, why="strictly earlier seasons")):
+        return past
+
+    for s in ("2024", "2025", "2026"):
+        with iv.writes("raw/feed/", why="the feed", part={"season": s}) as out:
+            pl.DataFrame({"a": [int(s)]}).write_parquet(out)
+    box.for_each(["2024", "2025", "2026"])
+    cohort.for_each(["2025", "2026"])
+
+    g = _graph.build(iv)
+    assert _stale_shards(_staleness(iv, g)) == set()
+
+    # 2025's feed moves. box[2025] goes stale; nothing else has.
+    with iv.writes("raw/feed/", why="the feed", part={"season": "2025"}) as out:
+        pl.DataFrame({"a": [999]}).write_parquet(out)
+
+    state = _staleness(iv, g)
+    assert _stale_shards(state) == {("raw/box/", "season=2025")}
+
+    maybe = _downstream_of(g, state)
+    assert ("processed/cohort/", "season=2026") in maybe, "2026 is fit on 2024 and 2025"
+    assert ("processed/cohort/", "season=2025") not in maybe, \
+        "2025 is fit on 2024 alone and cannot see 2025 move"
+
+
+def test_a_dataset_reports_its_stale_and_its_following_shards_separately(tmp_path,
+                                                                        monkeypatch):
+    """A panel with one season stale and twenty that share a crosswalk is the ordinary
+    case, and the counts either side of that are the whole story of how much work is due."""
+    from iv.cli import _line
+    shards = {"season=2024": None, "season=2025": None,
+              "season=2026": "its inputs moved"}
+    maybe = {("d/", "season=2024"), ("d/", "season=2025")}
+    tier, note = _line(shards, maybe, "d/")
+    assert tier == "stale"
+    assert "1/3 (season=2026) stale" in note and "2/3 (season=2024, season=2025) may follow" in note
+
+    tier, note = _line({"": None}, set(), "d/")
+    assert (tier, note) == ("current", "1 shard(s)")
