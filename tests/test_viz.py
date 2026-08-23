@@ -47,11 +47,41 @@ def built(iv):
 
 def test_every_dataset_gets_one_of_the_three_kinds(iv):
     d = _viz.to_networkx(built(iv))
-    kinds = {n: d.nodes[n]["kind"] for n in d}
+    kinds = {ds: d.nodes[n]["kind"] for n in d for ds, _ in [n]}
     assert kinds == {"raw/feed/": "root",
                      "processed/mid/": "derived",
                      "dump/site/": "terminal"}
     assert set(kinds.values()) <= set(_viz.SHAPE), "a kind with no shape draws as nothing"
+
+
+def test_two_stages_writing_one_dataset_are_two_nodes(iv):
+    """The played and unplayed halves of a prediction table are different shards. Drawn as
+    one node they are the same thing, and a stage that reads one and writes the other reads
+    as a cycle it does not have — which is what `iv check` correctly said it did not."""
+    @iv.data("processed/preds/", part={"completed": "true"}, why="played")
+    def played(feed=iv.all_of("raw/feed/", why="the feed")):
+        return frame()
+
+    @iv.data("processed/pre/", why="the preseason nets")
+    def pre(p=iv.parts("processed/preds/", completed=["true"], why="played games only")):
+        return frame()
+
+    @iv.data("processed/preds/", part={"completed": "false"}, why="not yet played")
+    def upcoming(t=iv.all_of("processed/pre/", why="the team ratings")):
+        return frame()
+
+    g = _graph.build(iv)
+    assert _graph.find_cycle(g) is None, "the checks say this is fine"
+    d = _viz.to_networkx(g)
+    assert _viz.find_cycle(d) is None, "and so must the picture"
+    assert ("processed/preds/", (("completed", "true"),)) in d
+    assert ("processed/preds/", (("completed", "false"),)) in d
+
+
+def test_a_shard_is_labelled_with_the_partition_it_is(iv):
+    assert _viz.short(("processed/preds/", (("completed", "true"),))) == \
+        "preds [completed=true]"
+    assert _viz.short(("processed/mid/", ())) == "mid"
 
 
 def test_every_kind_has_a_distinct_shape():
@@ -110,3 +140,22 @@ def test_a_cycle_is_cut_to_lay_out_rather_than_crashing(iv, tmp_path):
 
     out = _viz.draw(_graph.build(iv), tmp_path / "cyclic.png")
     assert out.exists()
+
+
+def test_a_shard_takes_the_colour_of_its_dataset(iv, tmp_path):
+    """Nodes are (dataset, shard) since a dataset can have several writers, and `iv status`
+    answers per dataset — so the lookup has to go through the dataset, or every node is
+    grey and the picture says nothing."""
+    @iv.data("processed/preds/", part={"completed": "true"}, why="played")
+    def played(feed=iv.all_of("raw/feed/", why="the feed")):
+        return frame()
+
+    @iv.data("processed/preds/", part={"completed": "false"}, why="not yet played")
+    def upcoming(feed=iv.all_of("raw/feed/", why="the feed")):
+        return frame()
+
+    g = _graph.build(iv)
+    status = _viz.states({"processed/preds/": "its inputs moved"}, maybe=set())
+    colours = {_viz.STATUS[status.get(n[0], "source")] for n in _viz.to_networkx(g)}
+    assert _viz.STATUS["stale"] in colours, "both shards take the dataset's answer"
+    assert _viz.STATUS["source"] in colours, "and raw/feed/ has no answer to take"

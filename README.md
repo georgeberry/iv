@@ -206,8 +206,11 @@ some do.
 `iv viz` draws the same three answers `iv status` gives, in the same colours — green
 current, cyan maybe, amber stale, grey for a source nothing here produces. Shape is a
 separate question: square for a dataset that arrives from outside, diamond for one read
-outside the pipeline, circle for one built and read here. `--plain` skips reading the tree
-and leaves every node grey, which is what you want when the data is somewhere slow.
+outside the pipeline, circle for one built and read here. A dataset several stages write is drawn as one node per shard —
+`game_predictions [completed=true]` and `[completed=false]` are different things, and
+collapsing them invents a cycle between the stage that reads one and the stage that writes
+the other. `--plain` skips reading the tree and leaves every node grey, which is what you
+want when the data is somewhere slow.
 
 Set `IV_TRACE=<path>` on a run to record it for `iv drift`.
 

@@ -7,20 +7,54 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt             # noqa: E402
 import networkx as nx                       # noqa: E402
 
-from .errors import IvError  # noqa: E402
+from .errors import IvError          # noqa: E402
+from .graph import _overlaps        # noqa: E402
 
 
 def to_networkx(g) -> nx.DiGraph:
+    """The dataset graph, at the granularity the CHECKS reason about.
+
+    A dataset several stages write, each naming a literal partition, is one node PER
+    PARTITION. Collapsed into one, the played and unplayed halves of a prediction table
+    become the same thing — and a pair of stages that reads one half and writes the other
+    reads as a cycle it does not have. `parent_map` avoids that with `_overlaps`, so this
+    uses the same test: an edge only where the read could actually see the write.
+
+    Getting this wrong meant `iv check` said the graph was clean while the picture drew a
+    cycle in it and announced cutting an edge to lay it out. Of the two, the picture was
+    the one lying.
+    """
     d = nx.DiGraph()
+    writes: dict[str, list] = {}
+    for node, stage in g.stages.items():
+        for site in stage.outputs:
+            writes.setdefault(site.dataset, []).append(site)
+
+    def ident(site):
+        peers = writes.get(site.dataset, ())
+        return (site.dataset, site.part if len(peers) > 1 and site.part else ())
+
     for ds in g.datasets:
-        d.add_node(ds, kind="root" if not g.producers_of(ds)
-                   else "terminal" if g.is_terminal(ds) else "derived")
+        peers = writes.get(ds, [])
+        if not peers:
+            d.add_node((ds, ()), kind="root")
+            continue
+        kind = "terminal" if g.is_terminal(ds) else "derived"
+        for site in peers:
+            d.add_node(ident(site), kind=kind)
+
     for node, stage in g.stages.items():
         for out in stage.outputs:
-            for inp in stage.inputs:
-                if inp.dataset == out.dataset or inp.update_file_on_disk:
+            for inp in stage.triggers:
+                if inp.dataset == out.dataset:
                     continue
-                d.add_edge(inp.dataset, out.dataset, stage=node)
+                producers = writes.get(inp.dataset)
+                if not producers:
+                    d.add_edge((inp.dataset, ()), ident(out), stage=node)
+                    continue
+                for src in producers:
+                    if _overlaps(inp, src):
+                        d.add_edge(ident(src), ident(out), stage=node)
     return d
 
 
@@ -40,8 +74,12 @@ def _layers(d: nx.DiGraph) -> dict[str, int]:
     return depth
 
 
-def short(node: str) -> str:
-    return node.rstrip("/").rsplit("/", 1)[-1]
+def short(node) -> str:
+    """The dataset's last segment, and the shard it is if the dataset has more than one
+    stage writing it."""
+    ds, part = node if isinstance(node, tuple) else (node, ())
+    name = ds.rstrip("/").rsplit("/", 1)[-1]
+    return f"{name} [{','.join(f'{k}={v}' for k, v in part)}]" if part else name
 
 
 #: COLOUR is status, and these are the colours `iv status` prints — green current, cyan
@@ -137,7 +175,8 @@ def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:
         nx.draw_networkx_nodes(
             d, pos, ax=ax, nodelist=group, node_shape=marker, node_size=260,
             edgecolors="#ffffff", linewidths=0.8,
-            node_color=[STATUS.get(status.get(n, "source"), STATUS["source"])
+            # A node is (dataset, shard) now, and `iv status` answers per dataset.
+            node_color=[STATUS.get(status.get(n[0], "source"), STATUS["source"])
                         for n in group])
     for n, (x, y) in pos.items():
         # Offset in POINTS, not data units: the node is drawn at a fixed size in points, so
