@@ -160,8 +160,30 @@ class Dataset:
     #: writing "processed/x/" again is two declarations that can disagree.
     standalone: bool = False
 
+    def shard(self, **part) -> "Dataset":
+        """The one shard of this dataset a stage writes, where the stage cannot say it.
+
+            @iv.step(output={"raw": INTL_RAW,
+                             "features": COLLEGE_FEATURES.shard(source="intl")}, ...)
+
+        A stage writing ONE dataset says which shard with its own `part=`. A stage writing
+        several cannot: `part=` there would claim the same shard of every output, and the
+        stage above writes all of `derived_data/intl/` and one block of a table three
+        stages share. So the claim moves to the output it is about.
+
+        It is not a second declaration — the dataset is declared once, and this is that
+        declaration with the shard named.
+        """
+        if not part:
+            raise DeclError(
+                f"{self.dataset}: shard() names the literal partition this stage writes — "
+                f"shard(source='intl').")
+        return Dataset(self.dataset, self.ext, self.allow_missing,
+                       _fixed(part, self.dataset), self.why, self.standalone)
+
     def __repr__(self) -> str:
-        return f"<iv dataset {self.dataset}>"
+        p = " " + ",".join(f"{k}={v}" for k, v in self.part) if self.part else ""
+        return f"<iv dataset {self.dataset}{p}>"
 
 
 def _outputs(spec, ext, allow_missing) -> dict:

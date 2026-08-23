@@ -918,3 +918,42 @@ def test_a_source_is_filled_through_iv_writes_which_is_still_allowed(iv):
         return b
 
     assert y().height == 2
+
+
+def test_a_stage_writing_several_names_the_shard_on_the_output(iv):
+    """A stage writing ONE dataset says which shard with its own `part=`. One writing
+    several cannot — `part=` there would claim the same shard of every output — so the
+    claim moves to the output it is about."""
+    college = iv.dataset("derived/college/", why="one row per amateur source")
+    intl_raw = iv.dataset("derived/intl/", why="the scraped international stats")
+
+    @iv.step(output={"raw": intl_raw, "features": college.shard(source="intl")},
+             why="one scrape, two artifacts, and only one is a block of a shared table")
+    def intl():
+        return {"raw": frame(), "features": frame()}
+
+    assert intl.part_for("derived/college/") == (("source", "intl"),)
+    assert not intl.part_for("derived/intl/"), "the whole dataset, not a shard of one"
+
+
+def test_naming_a_shard_is_not_a_second_declaration(iv):
+    """`shard()` returns the declaration with the partition named, so the declare-once
+    check still sees one declaration — otherwise the shape above would be unwritable."""
+    college = iv.dataset("derived/college/", why="one row per amateur source")
+
+    @iv.data(dataset=college, why="the NCAA block", part={"source": "ncaa"})
+    def ncaa():
+        return frame()
+
+    @iv.step(output={"raw": "derived/intl/", "features": college.shard(source="intl")},
+             why="the international block, plus the scrape it came from")
+    def intl():
+        return {"raw": frame(), "features": frame()}
+
+    assert _graph.check(_graph.build(iv))[0] == []
+
+
+def test_shard_with_no_partition_is_refused(iv):
+    college = iv.dataset("derived/college/", why="one row per amateur source")
+    with pytest.raises(DeclError, match="names the literal partition"):
+        college.shard()
