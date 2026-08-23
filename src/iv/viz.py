@@ -7,6 +7,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt             # noqa: E402
 import networkx as nx                       # noqa: E402
 
+from .errors import IvError  # noqa: E402
+
 
 def to_networkx(g) -> nx.DiGraph:
     d = nx.DiGraph()
@@ -42,7 +44,43 @@ def short(node: str) -> str:
     return node.rstrip("/").rsplit("/", 1)[-1]
 
 
-def draw(g, out: Path, full: bool = False) -> Path:
+#: COLOUR is status, and these are the colours `iv status` prints — green current, cyan
+#: maybe, yellow stale — so the picture and the report say the same thing in the same way.
+#: A dataset with no producer has no stage to ask, so it is not coloured, it is grey.
+STATUS = {
+    "current": "#2a9d8f",
+    "maybe": "#3aa8c1",
+    "stale": "#e0a458",
+    "source": "#9aa0a6",
+}
+
+#: SHAPE is what KIND of thing it is, which is a different question from whether it is
+#: current — so it gets a different channel rather than fighting for the same one.
+SHAPE = {
+    "root": "s",          # arrives from outside; nothing here produces it
+    "terminal": "D",      # read by something outside this pipeline
+    "derived": "o",       # built here and read here
+}
+
+
+def states(reasons: dict, maybe: set) -> dict:
+    """`iv status`'s answer per dataset, as the names `STATUS` colours.
+
+    Here rather than in the CLI so the picture and the report cannot drift into naming the
+    same three things differently.
+    """
+    return {name: ("stale" if why else "maybe" if name in maybe else "current")
+            for name, why in reasons.items()}
+
+
+def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:
+    """The DAG, coloured by status and shaped by kind.
+
+    Two channels, because they are two questions. `iv status` answers "is this current",
+    and that is the colour, in the colours it prints. What KIND of dataset it is — arrives
+    from outside, built here, read by something else — does not change day to day, and it
+    is the shape.
+    """
     d = to_networkx(g)
     if not full:
         if find_cycle(d) is None:
@@ -50,10 +88,17 @@ def draw(g, out: Path, full: bool = False) -> Path:
             reduced.add_nodes_from(d.nodes(data=True))
             d = reduced
 
+    # Which edge to cut is decided by run order — and `order()` is a toposort, so it
+    # raises on exactly the graph this loop exists to handle. A cycle is when the picture
+    # is most wanted, so fall back to declaration order rather than crashing on it.
+    try:
+        order = {n: i for i, n in enumerate(g.order())}
+    except IvError:
+        order = {n: i for i, n in enumerate(g.stages)}
+
     broken = []
     while (cycle := find_cycle(d)):
         pairs = [(cycle[i], cycle[i + 1]) for i in range(len(cycle) - 1)]
-        order = {n: i for i, n in enumerate(g.order())}
         a, b = max(pairs, key=lambda e: order.get(d.edges[e].get("stage"), 0))
         broken.append((a, b, d.edges[a, b].get("stage")))
         d.remove_edge(a, b)
@@ -63,31 +108,64 @@ def draw(g, out: Path, full: bool = False) -> Path:
     for n, k in depth.items():
         by_layer.setdefault(k, []).append(n)
 
+    status = status or {}
+
+    # A COLUMN IS AS WIDE AS ITS OWN LONGEST LABEL. Sizing every column for the longest
+    # label in the whole graph is most of a page of white space, because one dataset called
+    # possessions_with_lineups should not set the gap between two called xpm and wvorp.
+    # One data unit is about one inch, so the figure can be sized from the same numbers.
+    CHAR, GAP = 0.092, 0.78
+    xs, x = {}, 0.0
+    for k in sorted(by_layer):
+        xs[k] = x
+        x += CHAR * max(len(short(n)) for n in by_layer[k]) + GAP
+    total = x
+
     pos = {}
     for k, nodes in by_layer.items():
         for i, n in enumerate(sorted(nodes)):
-            pos[n] = (k, -i + (len(nodes) - 1) / 2)
+            pos[n] = (xs[k], (-i + (len(nodes) - 1) / 2) * 0.34)
 
-    colors = {"root": "#2a9d8f", "terminal": "#e76f51", "derived": "#4a6fa5"}
-    node_colors = [colors[d.nodes[n].get("kind", "derived")] for n in d]
-
-    width = max(8, 2.4 * (max(by_layer) + 1))
-    height = max(4, 1.1 * max(len(v) for v in by_layer.values()))
-    fig, ax = plt.subplots(figsize=(width, height))
-    nx.draw_networkx_edges(d, pos, ax=ax, edge_color="#b8b8b8", arrows=True,
-                           arrowsize=11, node_size=140)
-    nx.draw_networkx_nodes(d, pos, ax=ax, node_color=node_colors, node_size=140)
+    tallest = max(len(v) for v in by_layer.values())
+    fig, ax = plt.subplots(figsize=(total + 0.8, max(4.0, 0.34 * tallest + 1.6)))
+    nx.draw_networkx_edges(d, pos, ax=ax, edge_color="#c9c9c9", arrows=True,
+                           arrowsize=10, node_size=260, width=1.1)
+    for kind, marker in SHAPE.items():
+        group = [n for n in d if d.nodes[n].get("kind", "derived") == kind]
+        if not group:
+            continue
+        nx.draw_networkx_nodes(
+            d, pos, ax=ax, nodelist=group, node_shape=marker, node_size=260,
+            edgecolors="#ffffff", linewidths=0.8,
+            node_color=[STATUS.get(status.get(n, "source"), STATUS["source"])
+                        for n in group])
     for n, (x, y) in pos.items():
-        ax.text(x + 0.055, y, short(n), fontsize=8, va="center", ha="left")
+        # Offset in POINTS, not data units: the node is drawn at a fixed size in points, so
+        # a gap measured in data units closes up whenever the graph is small enough for the
+        # figure to be stretched to fit the legend.
+        ax.annotate(short(n), (x, y), textcoords="offset points", xytext=(12, 0),
+                    fontsize=11, va="center", ha="left", color="#222")
+
+    from matplotlib.lines import Line2D
+    key = [Line2D([], [], color=c, marker="o", linestyle="", markersize=8, label=name)
+           for name, c in STATUS.items()]
+    key += [Line2D([], [], color="#666", marker=m, linestyle="", markersize=8, label=k)
+            for k, m in SHAPE.items()]
+    # Capped, so a small graph is not stretched sideways to fit one row of legend — and
+    # anchored ABOVE the axes rather than inside them, where it lands on the first column.
+    ncol = min(len(key), 4)
+    ax.legend(handles=key, loc="lower left", bbox_to_anchor=(0, 1.0), ncol=ncol,
+              frameon=False, fontsize=9, handletextpad=0.3, columnspacing=1.1)
+    rows = -(-len(key) // ncol)
 
     title = "left to right is dependency order — an edge pointing LEFT is a bug"
     if broken:
         title += "\n" + "\n".join(
             f"cut to lay out (amended later by {st}): {short(a)} -> {short(b)}"
             for a, b, st in broken)
-    ax.set_title(title, fontsize=9, color="#555")
+    ax.set_title(title, fontsize=9, color="#555", pad=14 + 15 * rows)
     ax.axis("off")
-    ax.set_xlim(-0.4, max(by_layer) + 1.1)
+    ax.set_xlim(-0.35, total + 0.15)
     fig.tight_layout()
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)

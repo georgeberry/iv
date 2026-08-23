@@ -176,9 +176,20 @@ def drift(trace: Path = typer.Option(None, "--trace")):
 
 
 @app.command()
-def viz(out: Path = typer.Option(Path("dag.png"), "--out")):
+def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
+        full: bool = typer.Option(False, "--full", help="every edge, not the reduction"),
+        plain: bool = typer.Option(False, "--plain",
+                                   help="do not read the tree; leave every node grey")):
+    """Draw the DAG: colour is `iv status`, shape is what kind of dataset it is."""
     from . import viz as _viz
-    typer.echo(f"wrote {_viz.draw(_graph_of(), out)}")
+    iv = _load()
+    g = _graph.build(iv)
+    status = {}
+    if not plain:
+        with _sh.snapshot():
+            reasons, stale = _staleness(iv, g)
+        status = _viz.states(reasons, _downstream_of(g, stale))
+    typer.echo(f"wrote {_viz.draw(g, out, full=full, status=status)}")
 
 
 def _staleness(iv, g):

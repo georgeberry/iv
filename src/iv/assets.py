@@ -17,6 +17,7 @@ from pathlib import Path
 from . import decl as _decl
 from . import shards as _sh
 from .errors import DeclError, StateError
+from .paths import mkpath
 
 
 # ── turning a returned value into a file, and back ────────────────────────────
@@ -76,7 +77,7 @@ def load_value(paths, ext: str):
             f"a {ext} dataset was selected across {len(paths)} shards. Only .parquet is "
             f"concatenated on read; everything else is one shard at a time — select a "
             f"single partition, or store it as parquet.")
-    p = Path(str(paths[0]))
+    p = mkpath(paths[0], None)
     if ext == ".json":
         return json.loads(p.read_text())
     if ext == ".pkl":

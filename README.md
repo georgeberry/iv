@@ -184,7 +184,7 @@ instance = "mypkg.pipeline:iv"
 | `iv drift` | does the code still agree with the last recorded run? |
 | `iv verify` | re-fingerprint every shard, confirm it matches its name |
 | `iv gc` | drop superseded shards |
-| `iv viz --out dag.png` | draw the DAG |
+| `iv viz --out dag.png` | draw the DAG — colour is status, shape is kind |
 
 `iv status` has three answers, not two:
 
@@ -202,6 +202,12 @@ that is wrong by the time you read it.
 A stale partitioned dataset names **which** shards, so `3/18 shards (season=2024,
 season=2025, season=2026)` tells you which cohorts need refitting rather than only that
 some do.
+
+`iv viz` draws the same three answers `iv status` gives, in the same colours — green
+current, cyan maybe, amber stale, grey for a source nothing here produces. Shape is a
+separate question: square for a dataset that arrives from outside, diamond for one read
+outside the pipeline, circle for one built and read here. `--plain` skips reading the tree
+and leaves every node grey, which is what you want when the data is somewhere slow.
 
 Set `IV_TRACE=<path>` on a run to record it for `iv drift`.
 
