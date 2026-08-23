@@ -30,20 +30,31 @@ from pathlib import Path
 from . import shards as _sh
 from . import viz as _viz
 
-#: Pulled at open time. Vendoring them would make this a 1.2MB file per graph; both are
-#: pinned to an exact version so a page that worked keeps working.
-CDN = (
-    "https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js",
-    "https://unpkg.com/dagre@0.8.5/dist/dagre.min.js",
-    "https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js",
-)
+#: Pulled at open time, pinned to an exact version so a page that worked keeps working.
+#: Just the one: the LAYOUT is computed here (see `_positions`), so the page needs a
+#: renderer and not a layout engine.
+CDN = ("https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js",)
+
+#: One row, and one character of a label, in px at the page's 11px font. The column gap is
+#: what is left over once the widest label in a column has been paid for.
+ROW, CHAR, MARKER, GAP = 44.0, 6.3, 24.0, 46.0
 
 
 def payload(g, status: dict | None = None, state: dict | None = None,
-            maybe: set | None = None) -> dict:
+            maybe: set | None = None, reduce: bool = False) -> dict:
     """Everything the page shows, as JSON. No presentation, no layout — those are the
     template's, so what is asserted about this can be asserted about a dict."""
-    d = _viz.to_networkx(g)
+    whole = _viz.to_networkx(g)
+    # EVERY DECLARED EDGE, because every one of them is a read someone wrote down. The PNG
+    # drops the ones a longer path implies — box -> site is not news when box -> features
+    # -> xpm -> site is already drawn — which is right for a still picture that has to be
+    # legible at a glance and wrong here, where the point is to see what a stage actually
+    # reads. `--reduce` puts the PNG's behaviour back.
+    #
+    # It costs the layout nothing: an implied edge cannot lengthen the longest path to its
+    # own target, so the COLUMNS are identical either way. Only the within-column ordering
+    # sees the extra edges, and it should — they are crossings that are really there.
+    d = _reduced(whole) if reduce else whole
     status = status or {}
     state = state or {}
     maybe = maybe or set()
@@ -89,12 +100,83 @@ def payload(g, status: dict | None = None, state: dict | None = None,
                         "maybe": (ds, p) in maybe}
                        for p, why in sorted(shards.items())],
             "externals": [e for w in writers for e in stages[w]["externals"]],
+            # From the WHOLE graph, never the reduced one. The reduction drops an edge that
+            # a longer path already implies, which is fine for drawing and wrong for this:
+            # xpm declares a read of box_features, and the panel saying otherwise because
+            # box_features also reaches it through the college blocks is a lie about the
+            # code. Reachability is what the reduction preserves, so the highlighted CONE
+            # is still the drawn graph's — it is only the direct neighbours that are not.
+            "reads": sorted({_nid(m) for m in whole.predecessors(n)}),
+            "readBy": sorted({_nid(m) for m in whole.successors(n)}),
         })
 
     edges = [{"source": _nid(u), "target": _nid(v), "stage": d.edges[u, v].get("stage", "")}
              for u, v in d.edges]
+    at = _positions(d)
+    for n in nodes:
+        n["position"] = at[n["id"]]
     return {"nodes": nodes, "edges": edges, "stages": stages,
-            "counts": _counts(nodes)}
+            "counts": _counts(nodes), "reduced": reduce}
+
+
+def _positions(d) -> dict:
+    """Where each node goes: the PNG's layout, with the crossings taken out.
+
+    THE COLUMN IS THE POINT. A node sits in the column of its longest route from a root, so
+    every edge points right and how far right a thing is means how deep in the pipeline it
+    is. `viz._layers` has always done this and the PNG has always looked organised because
+    of it.
+
+    dagre will not do this. Its `longest-path` ranker is as-LATE-as-possible — it ranks
+    backwards from the sinks — so `processed/xpm_career/`, which nothing reads, is pushed to
+    the last column while `processed/xpm/`, written by the same stage from the same inputs,
+    stays in the middle. Four outputs of one fit end up in two columns, with the edges to
+    prove it crossing everything between. Its default ranker minimises total edge length,
+    which is tidy on average and puts nothing anywhere in particular.
+
+    WITHIN a column the PNG sorts by name, which is stable and ignores the edges. Here the
+    order is swept by BARYCENTRE instead — repeatedly, put each node at the average height
+    of its neighbours in the column before — which is the standard way to take crossings out
+    of a layered graph, and the one thing this does that the PNG does not.
+    """
+    depth = _viz._layers(d)
+    cols: dict[int, list] = {}
+    for n, k in sorted(depth.items(), key=lambda kv: (kv[1], _viz.short(kv[0]))):
+        cols.setdefault(k, []).append(n)
+
+    order = {n: i for c in cols.values() for i, n in enumerate(c)}
+    for sweep in range(8):
+        keys = sorted(cols)
+        for k in (keys if sweep % 2 == 0 else keys[::-1]):
+            near = (d.predecessors if sweep % 2 == 0 else d.successors)
+            def bary(n):
+                ns = [order[m] for m in near(n) if m in order]
+                return sum(ns) / len(ns) if ns else order[n]
+            cols[k] = sorted(cols[k], key=bary)
+            order.update({n: i for i, n in enumerate(cols[k])})
+
+    pos, x = {}, 0.0
+    for k in sorted(cols):
+        # A COLUMN IS AS WIDE AS ITS OWN LONGEST LABEL, so one dataset called
+        # possessions_with_lineups does not set the gap between two called xpm and wvorp.
+        width = MARKER + CHAR * max(len(_viz.short(n)) for n in cols[k]) + GAP
+        for i, n in enumerate(cols[k]):
+            pos[_nid(n)] = {"x": round(x, 1),
+                            "y": round((i - (len(cols[k]) - 1) / 2) * ROW, 1)}
+        x += width
+    return pos
+
+
+def _reduced(d):
+    """Transitive reduction, or the graph unchanged if it has a cycle to be reduced."""
+    import networkx as nx
+    if _viz.find_cycle(d) is not None:
+        return d
+    r = nx.transitive_reduction(d)
+    r.add_nodes_from(d.nodes(data=True))
+    for u, v in r.edges:
+        r.edges[u, v].update(d.edges[u, v])
+    return r
 
 
 def _owns(part: tuple, shard_key: str) -> bool:
@@ -118,10 +200,10 @@ def _nid(node) -> str:
 
 
 def write(g, out: Path, status: dict | None = None, state: dict | None = None,
-          maybe: set | None = None, title: str = "iv") -> Path:
+          maybe: set | None = None, title: str = "iv", reduce: bool = False) -> Path:
     out = Path(out)
     out.write_text(_PAGE.replace("__DATA__", json.dumps(
-        payload(g, status, state, maybe), indent=None))
+        payload(g, status, state, maybe, reduce), indent=None))
         .replace("__TITLE__", title)
         .replace("__COLOURS__", json.dumps(_viz.STATUS))
         .replace("__SCRIPTS__", "\n".join(
@@ -185,6 +267,8 @@ Click a node. Its <b style="color:var(--up)">upstreams</b> and
 far back, and everything a rebuild would carry forward.</p></div>
 <script>
 const DATA = __DATA__, C = __COLOURS__;
+// Every node arrives with a position, so there is nothing to lay out — see `_positions`.
+const LAYOUT = {name:'preset', fit:true, padding:36};
 const byId = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
 
 document.getElementById('legend').innerHTML = ['stale','maybe','current','source']
@@ -194,7 +278,7 @@ document.getElementById('legend').innerHTML = ['stale','maybe','current','source
 const cy = cytoscape({
   container: document.getElementById('cy'),
   elements: [
-    ...DATA.nodes.map(n => ({data: n})),
+    ...DATA.nodes.map(n => ({data: n, position: {...n.position}})),
     ...DATA.edges.map((e,i) => ({data: {...e, id: 'e'+i}})),
   ],
   style: [
@@ -209,7 +293,11 @@ const cy = cytoscape({
     }},
     {selector:'edge', style:{
       'width':1.2,'line-color':'var(--line)','target-arrow-color':'var(--line)',
-      'target-arrow-shape':'triangle','arrow-scale':.8,'curve-style':'bezier',
+      'target-arrow-shape':'triangle','arrow-scale':.8,
+      // A long edge spanning several columns is drawn as an arc rather than a chord, so it
+      // reads as going AROUND the columns it passes rather than through them.
+      'curve-style':'unbundled-bezier','control-point-distances':[-18],
+      'control-point-weights':[.5],
     }},
     {selector:'.faded', style:{'opacity':.12,'text-opacity':0}},
     {selector:'node.sel', style:{'border-width':3,'border-color':'var(--sel)',
@@ -219,9 +307,10 @@ const cy = cytoscape({
     {selector:'edge.up', style:{'line-color':'var(--up)','target-arrow-color':'var(--up)','width':2}},
     {selector:'edge.down', style:{'line-color':'var(--down)','target-arrow-color':'var(--down)','width':2}},
   ],
-  layout: {name:'dagre', rankDir:'LR', nodeSep:14, rankSep:110, edgeSep:6},
+  layout: LAYOUT,
   wheelSensitivity:.2,
 });
+cy.ready(() => cy.fit(undefined, 40));
 
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML}
 
@@ -238,8 +327,6 @@ function select(node, fit){
 
 function panel(node, up, down){
   const d = node.data();
-  const nb = dir => cy.edges().filter(e => e[dir==='in'?'target':'source']().id()===d.id)
-      .map(e => e[dir==='in'?'source':'target']().id());
   const list = ids => ids.length
     ? `<ul>${[...new Set(ids)].sort().map(i =>
         `<li><a onclick="pick('${esc(i)}')">${esc(byId[i].label)}</a>
@@ -268,8 +355,8 @@ function panel(node, up, down){
         <div class="ok">${esc(e[1])}</div></li>`).join('')}</ul>` : ''}
     <div class="sec">shards — ${d.shards.filter(s=>s.reason).length} stale of ${d.shards.length}</div>
     ${shards}
-    <div class="sec">reads directly (${nb('in').length})</div>${list(nb('in'))}
-    <div class="sec">read directly by (${nb('out').length})</div>${list(nb('out'))}
+    <div class="sec">reads directly (${d.reads.length})</div>${list(d.reads)}
+    <div class="sec">read directly by (${d.readBy.length})</div>${list(d.readBy)}
     <div class="sec">upstream in all (${up.length}) · downstream in all (${down.length})</div>
     <p class="ok">a rebuild of this carries into ${down.length} node(s).</p>
   </div>`;

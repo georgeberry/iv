@@ -136,9 +136,39 @@ def test_upstream_and_downstream_are_reachable_from_the_edges(built):
     ids = {n["id"] for n in p["nodes"]}
     for e in p["edges"]:
         assert e["source"] in ids and e["target"] in ids
+    assert len(p["nodes"]) == _viz.to_networkx(g).number_of_nodes()
+
+
+def test_every_declared_edge_is_drawn_and_reduce_drops_the_implied_ones(iv):
+    """Every edge is a read someone wrote down, so the page draws all of them. The PNG
+    drops the ones a longer path implies, which is right for a still picture and wrong
+    where the point is seeing what a stage reads. `--reduce` puts that behaviour back."""
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+
+    @iv.data(dataset="processed/mid/", why="the middle")
+    def mid(f=iv.all_of(feed, why="the feed")):
+        return frame()
+
+    @iv.data(dataset="processed/end/", why="reads both, so feed->end is implied")
+    def end(f=iv.all_of(feed, why="the feed"), m=iv.all_of(mid, why="the middle")):
+        return frame()
+
+    g = _graph.build(iv)
+    assert _viz.to_networkx(g).number_of_edges() == 3
+    assert len(_web.payload(g)["edges"]) == 3, "every declared read is drawn"
+    assert len(_web.payload(g, reduce=True)["edges"]) == 2, "feed -> end is implied"
+
+
+def test_a_cone_is_unchanged_by_the_reduction(built):
+    """Reachability is what the highlight is, and a reduction preserves it exactly — so
+    dropping the implied edges cannot change which nodes light up."""
+    import networkx as nx
+    g, _, _, _ = load(built)
     d = _viz.to_networkx(g)
-    assert len(p["edges"]) == d.number_of_edges()
-    assert len(p["nodes"]) == d.number_of_nodes()
+    r = _web._reduced(d)
+    for n in d:
+        assert nx.descendants(d, n) == nx.descendants(r, n)
+        assert nx.ancestors(d, n) == nx.ancestors(r, n)
 
 
 def test_the_counts_add_up_to_the_nodes(built):
@@ -164,3 +194,99 @@ def test_the_page_is_one_file(built, tmp_path):
     g, _, _, _ = load(built)
     _web.write(g, tmp_path / "dag.html")
     assert [f.name for f in tmp_path.iterdir() if f.is_file()] == ["dag.html"]
+
+
+# ── the layout ────────────────────────────────────────────────────────────────
+
+def test_every_edge_points_right(built):
+    """The one thing that makes a layered graph readable: a column is how deep in the
+    pipeline a thing is, so an edge pointing left would be a lie about the order.
+
+    dagre cannot give this. Its longest-path ranker is as-LATE-as-possible, so a terminal
+    output gets pushed to the last column while its sibling from the same stage stays where
+    it was; its default ranker minimises edge length and puts nothing anywhere in
+    particular.
+    """
+    g, _, _, p = load(built)
+    at = {n["id"]: n["position"] for n in p["nodes"]}
+    for e in p["edges"]:
+        assert at[e["source"]]["x"] < at[e["target"]]["x"], \
+            f"{e['source']} -> {e['target']} does not point right"
+
+
+def test_outputs_of_one_stage_share_a_column(iv):
+    """They are written by one body from one set of inputs, so they are the same depth.
+    Split across columns, the edges between their shared upstream and each of them cross
+    everything in between — which is what the ALAP ranker did."""
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+
+    @iv.step(output={"a": "processed/a/", "b": "processed/b/", "c": "processed/c/"},
+             why="one fit, three tables")
+    def fit(f=iv.all_of(feed, why="the feed")):
+        return {"a": frame(), "b": frame(), "c": frame()}
+
+    p = _web.payload(_graph.build(iv))
+    xs = {n["position"]["x"] for n in p["nodes"] if n["dataset"] != "raw/feed/"}
+    assert len(xs) == 1, "three outputs of one stage, three columns"
+
+
+def test_a_column_is_as_wide_as_its_own_longest_label(iv):
+    """Sizing every column for the longest label in the graph is most of a page of white
+    space, because one dataset called possessions_with_lineups should not set the gap
+    between two called xpm and wvorp."""
+    feed = iv.source("raw/x/", why="short name")
+
+    @iv.data(dataset="processed/a_very_long_dataset_name_indeed/", why="long")
+    def long_one(f=iv.all_of(feed, why="the feed")):
+        return frame()
+
+    @iv.data(dataset="processed/b/", why="short")
+    def short_one(f=iv.all_of(long_one, why="the long one")):
+        return frame()
+
+    at = {n["dataset"]: n["position"]["x"] for n in _web.payload(_graph.build(iv))["nodes"]}
+    wide = at["processed/b/"] - at["processed/a_very_long_dataset_name_indeed/"]
+    narrow = at["processed/a_very_long_dataset_name_indeed/"] - at["raw/x/"]
+    assert wide > narrow, "the long name's own column pays for it, not the one before"
+
+
+def test_the_page_needs_only_a_renderer(built, tmp_path):
+    """The layout is computed in Python, so the page pulls one script rather than three."""
+    g, _, _, _ = load(built)
+    text = _web.write(g, tmp_path / "dag.html").read_text()
+    assert text.count("<script src=") == 1
+    assert "dagre" not in text
+
+
+def test_the_panel_lists_the_reads_the_code_declares_not_the_drawn_ones(iv):
+    """The reduction drops an edge a longer path implies. That is right for drawing and
+    wrong for the panel: `end` declares a read of `feed`, and saying otherwise because
+    `feed` also reaches it through `mid` misdescribes the code."""
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+
+    @iv.data(dataset="processed/mid/", why="the middle")
+    def mid(f=iv.all_of(feed, why="the feed")):
+        return frame()
+
+    @iv.data(dataset="processed/end/", why="reads both")
+    def end(f=iv.all_of(feed, why="the feed"), m=iv.all_of(mid, why="the middle")):
+        return frame()
+
+    p = _web.payload(_graph.build(iv))
+    node, = [n for n in p["nodes"] if n["dataset"] == "processed/end/"]
+    assert node["reads"] == ["processed/mid/", "raw/feed/"]
+    r = _web.payload(_graph.build(iv), reduce=True)
+    assert len(r["edges"]) == 2, "the drawn edge is dropped under --reduce"
+    assert [n for n in r["nodes"] if n["dataset"] == "processed/end/"][0]["reads"] == \
+        ["processed/mid/", "raw/feed/"], "but the panel still says what the code declares"
+    src, = [n for n in p["nodes"] if n["dataset"] == "raw/feed/"]
+    assert src["readBy"] == ["processed/end/", "processed/mid/"]
+
+
+def test_the_columns_are_the_same_with_and_without_the_reduction(built):
+    """An implied edge cannot lengthen the longest path to its own target, so dropping it
+    cannot move a node's column. Drawing every edge costs the layout nothing."""
+    g, _, _, _ = load(built)
+    full = {n["id"]: n["position"]["x"] for n in _web.payload(g)["nodes"]}
+    cut = {n["id"]: n["position"]["x"] for n in _web.payload(g, reduce=True)["nodes"]}
+    assert full == cut

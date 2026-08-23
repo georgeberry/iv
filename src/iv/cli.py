@@ -181,7 +181,9 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
         plain: bool = typer.Option(False, "--plain",
                                    help="do not read the tree; leave every node grey"),
         html: bool = typer.Option(False, "--html",
-                                  help="an interactive page instead of a picture")):
+                                  help="an interactive page instead of a picture"),
+        reduce: bool = typer.Option(False, "--reduce",
+                                    help="--html: hide edges a longer path implies")):
     """Draw the DAG: colour is `iv status`, shape is what kind of dataset it is.
 
     `--html` writes a page instead: click a node for what it is for, what is stale about
@@ -201,7 +203,7 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
         if out.suffix == ".png":
             out = out.with_suffix(".html")
         got = _web.write(g, out, status=status, state=state, maybe=maybe,
-                         title=iv.tree.name)
+                         title=iv.tree.name, reduce=reduce)
         typer.echo(f"wrote {got} — open it")
         return
     typer.echo(f"wrote {_viz.draw(g, out, full=full, status=status)}")
