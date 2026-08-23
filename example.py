@@ -11,12 +11,14 @@ tidy ones:
     raw/box/                 the two halves, per season, put together
     derived/schedule/        an UPDATE: read the copy on disk, amend it, write it back
     derived/box_features/    ONE computation, split into a shard per season
-    derived/college/         THREE stages, three blocks, one dataset
-    processed/xpm/ + 3 more  ONE joint fit, four tables, three of them terminal
+    derived/college/         THREE stages, three blocks, one dataset — declared once
+    processed/xpm/ + 3 more  ONE joint fit, four tables — each declared, so reads can name
+                             them without knowing which key the body returns them under
     processed/rapm_fit/      not every artifact is a table: a pickled model object
     processed/xpm_eoy/       walk-forward, INCLUSIVE: fit through the end of season T
     processed/rookie/        walk-forward, EXCLUSIVE: fit on seasons strictly before T
-    processed/predictions/   two stages, the played and unplayed halves
+    processed/predictions/   two stages, the played and unplayed halves — declared once,
+                             so a reader says which half by SELECTOR, not by writer
     dump/site/               terminal JSON, written through `out`
 
 THERE IS NO INDEX. A derived shard is named `<part>.<key>.<fp>`: the key is a digest of the
@@ -25,9 +27,16 @@ key from the declared upstreams and the files on disk and asks whether that name
 so the record cannot go missing, go stale, or disagree with the tree.
 
 WHAT IS DECLARED. Upstreams are parameter defaults, so `inspect.signature` reads the whole
-declaration — dataset, selector, partition key — with nothing executed and no source text
+declaration — datasets, selector, partition key — with nothing executed and no source text
 needed. The walk-forward bounds below are DATA, which is what lets a shard's key be
 computed before its body runs.
+
+DECLARING AND PRODUCING ARE TWO WORDS. `@iv.step` is the function that builds; most write
+one dataset and name it inline, and a read names the stage. `iv.data(...)` declares a
+dataset on its own — a name, a format, a line on what it is for — for the two cases where
+the name has to be said somewhere no single stage can say it: a stage with more outputs
+than it has names for (`processed/xpm/` and its three siblings), and a dataset with more
+writers than any one of them speaks for (`derived/college/`, `processed/predictions/`).
 """
 
 import datetime as dt
@@ -198,14 +207,20 @@ def box_features(
 
 # ── three stages, three blocks, one dataset ──────────────────────────────────
 #
-# A read of `derived/college/` names one of the three, because all three declare that same
-# dataset and a read of it takes every shard. Naming `ncaa_block` for a read that gets all
-# three blocks is the one place this reads oddly — the dataset has no declaration of its
-# own, only its writers do.
+# No stage owns this one, so it is declared on its own line and the three writers name it.
+# That is what `iv.data` is for the second time: the first was a stage with more outputs
+# than it has names, this is a dataset with more writers than any one of them speaks for.
+#
+# Without it a read has to name one of the three — `iv.all_of(ncaa_block, ...)` — which
+# collects all three blocks anyway, because a read of a dataset takes every shard of it.
+# So the name said one thing and the read did another, and which of the three you happened
+# to name was arbitrary.
+
+COLLEGE = iv.data("derived/college/", why="one row per amateur source, ranked on the pros")
 
 
 @iv.step(
-    output="derived/college/",
+    output=COLLEGE,
     why="the NCAA block of the college feature table",
     part={"source": "ncaa"},
 )
@@ -219,14 +234,14 @@ def ncaa_block(
     return pl.DataFrame({"source": ["ncaa"], "n": [bf.height]})
 
 
-@iv.step(output="derived/college/", why="the G-League block", part={"source": "gleague"})
+@iv.step(output=COLLEGE, why="the G-League block", part={"source": "gleague"})
 def gleague_block(bf=iv.all_of(box_features, why="the pro side")):
     ran.append("gleague")
     return pl.DataFrame({"source": ["gleague"], "n": [1]})
 
 
 @iv.step(
-    output="derived/college/",
+    output=COLLEGE,
     why="the international block",
     part={"source": "intl"},
     external={"basketball-reference/international": "the international player pages"},
@@ -261,7 +276,7 @@ XPM_LEVELS = iv.data("processed/xpm_levels/", why="the level each season sits at
 def xpm(
     knobs=iv.all_of(model_config, why="a knob change must refit"),
     bf=iv.all_of(box_features, why="the box prior, every season at once"),
-    college=iv.all_of(ncaa_block, why="the college block, all three sources"),
+    college=iv.all_of(COLLEGE, why="the college block, all three sources"),
 ):
     """ONE expensive computation, four tables. Declaring them together is what stops the fit
     being run once per output — and losing any one of them brings the whole fit back.
@@ -324,7 +339,7 @@ def xpm_eoy(
 )
 def rookie(
     bf=iv.before_part(box_features, why="strictly before this cohort"),
-    college=iv.all_of(ncaa_block, why="the college block"),
+    college=iv.all_of(COLLEGE, why="the college block"),
 ):
     """EXCLUSIVE: `lt`. The bound picks FILES, so a cohort physically cannot open its own
     season or a later one. A season backfilled BELOW the bound is picked up; one added
@@ -334,10 +349,17 @@ def rookie(
 
 
 # ── two stages, the played and unplayed halves of one dataset ────────────────
+#
+# The same shape as the college blocks, and the same reason to declare it: two writers,
+# neither of which speaks for the dataset. Below, `site` wants both halves and `calibration`
+# wants one — and with the dataset declared, each says which by SELECTOR rather than by
+# picking a writer's name and hoping it lines up.
+
+PREDICTIONS = iv.data("processed/predictions/", why="one predicted margin per game")
 
 
 @iv.step(
-    output="processed/predictions/",
+    output=PREDICTIONS,
     why="one predicted margin per game already played",
     part={"completed": "true"},
 )
@@ -350,7 +372,7 @@ def predict_played(
 
 
 @iv.step(
-    output="processed/predictions/",
+    output=PREDICTIONS,
     why="one predicted margin per game not yet played",
     part={"completed": "false"},
 )
@@ -369,7 +391,7 @@ def predict_upcoming(
 )
 def calibration(
     played=iv.parts(
-        predict_played,
+        PREDICTIONS,
         completed=["true"],
         why="played games only — an unplayed one has no residual",
     )
@@ -393,7 +415,7 @@ def site(
     fit=iv.all_of(rapm_fit, why="the fit, for the ridge it used"),
     eoy=iv.all_of(xpm_eoy, why="the end-of-year column"),
     rk=iv.all_of(rookie, why="the rookie projections"),
-    preds=iv.all_of(predict_played, why="today's games"),
+    preds=iv.all_of(PREDICTIONS, why="every game, played and upcoming"),
     cal=iv.all_of(calibration, optional=True, why="the sigma, once there is one"),
 ):
     """A body that takes `out` writes the file itself, and nothing is inferred about a
