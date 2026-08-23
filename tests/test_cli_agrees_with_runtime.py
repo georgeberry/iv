@@ -26,22 +26,26 @@ from iv.core import Invalidator
 HERE = pathlib.Path(__file__).resolve().parent
 iv = Invalidator(tree=HERE / "data", code=["stages"], project=HERE,
                  stage_dir=HERE / "stage")
+feed = iv.source("raw/feed/", why="a fetcher drops it here")
 '''
 
 MID = '''
-from p import iv
+from p import feed, iv
 
-@iv.data("processed/mid/", why="the middle")
-def build(feed=iv.all_of("raw/feed/", why="the feed")):
-    return feed
+@iv.data(dataset="processed/mid/", why="the middle")
+def build(f=iv.all_of(feed, why="the feed")):
+    return f
 '''
 
+# A read reaching ACROSS modules: `end` imports `mid` and names the stage in it. The
+# import order that makes the reference resolvable is the same order the stages run in.
 END = '''
+import mid
 from p import iv
 
-@iv.data("dump/site/", why="the app reads it", terminal=True)
-def build(mid=iv.all_of("processed/mid/", why="the middle")):
-    return mid.head(1)
+@iv.data(dataset="dump/site/", why="the app reads it")
+def build(m=iv.all_of(mid.build, why="the middle")):
+    return m.head(1)
 '''
 
 
@@ -184,11 +188,11 @@ def test_the_cli_answer_does_not_change_under_a_snapshot(project):
 
 
 BRANCHY = '''
-from p import iv
+from p import feed, iv
 
-@iv.data("processed/mid/", why="the middle")
-def build(one=iv.all_of("raw/feed/", why="the upstream, one way"),
-          other=iv.all_of("raw/feed/", as_paths=True, why="the upstream, the other way")):
+@iv.data(dataset="processed/mid/", why="the middle")
+def build(one=iv.all_of(feed, why="the upstream, one way"),
+          other=iv.all_of(feed, as_paths=True, why="the upstream, the other way")):
     return one
 '''
 
@@ -226,11 +230,11 @@ def test_one_dataset_read_at_two_call_sites_gets_one_answer(tmp_path, monkeypatc
 
 SHARED_A = '''
 import polars as pl
-from p import iv
+from p import feed, iv
 
 @iv.data("processed/preds/", part={"completed": "true"},
          why="one row per game played")
-def played(df=iv.all_of("raw/feed/", why="the played upstream")):
+def played(df=iv.all_of(feed, why="the played upstream")):
     return df
 '''
 
@@ -238,9 +242,11 @@ SHARED_B = '''
 import polars as pl
 from p import iv
 
+other = iv.source("raw/other/", why="a second feed, dropped in from outside")
+
 @iv.data("processed/preds/", part={"completed": "false"},
          why="one row per game not yet played")
-def upcoming(df=iv.all_of("raw/other/", why="the unplayed upstream")):
+def upcoming(df=iv.all_of(other, why="the unplayed upstream")):
     return df
 '''
 
@@ -305,15 +311,15 @@ def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkey
         return {"date": day[0]}
 
     @iv.data("raw/feed/", why="a polled feed")
-    def feed(clock=iv.all_of("config/today/", as_paths=True, why="poll once a day")):
+    def feed(clock=iv.all_of(today, as_paths=True, why="poll once a day")):
         return pl.DataFrame({"a": [1]})
 
     @iv.data("processed/mid/", why="the middle")
-    def mid(f=iv.all_of("raw/feed/", why="the feed")):
+    def mid(f=iv.all_of(feed, why="the feed")):
         return f
 
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(m=iv.all_of("processed/mid/", why="the middle")):
+    @iv.data("dump/site/", why="the app reads it")
+    def site(m=iv.all_of(mid, why="the middle")):
         return m
 
     today(); feed(); mid(); site()
@@ -348,9 +354,10 @@ def test_only_the_shards_a_selector_reaches_may_follow(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
                      project=tmp_path)
+    feed = iv.source("raw/feed/", why="one season of raw feed, dropped in")
 
     @iv.data(dataset="raw/box/", why="one season", part="season")
-    def box(season, f=iv.same_part("raw/feed/", why="this season's feed")):
+    def box(season, f=iv.same_part(feed, why="this season's feed")):
         return f
 
     @iv.data(dataset="processed/cohort/", why="a fit on prior seasons only", part="season")

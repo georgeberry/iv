@@ -140,26 +140,25 @@ class Output:
     """
     dataset: str
     ext: str = _sh.EXT
-    terminal: bool = False
     allow_missing: bool = False
     part: tuple = ()
 
 
-def output(dataset: str, *, ext: str = _sh.EXT, terminal: bool = False,
-           allow_missing: bool = False, part: dict | None = None) -> Output:
+def output(dataset: str, *, ext: str = _sh.EXT, allow_missing: bool = False,
+           part: dict | None = None) -> Output:
     """One output of a multi-output stage, where it differs from the others.
 
-    A joint fit usually has one table something downstream reads and several that only a
-    person does — so `terminal` belongs to the output, not to the stage:
+    A joint fit usually has one artifact stored unlike the rest, or one that a run may
+    legitimately not produce:
 
         output={"ratings": "processed/xpm/",
-                 "summary": iv.output("processed/xpm_summary/", terminal=True)}
+                "fit": iv.output("processed/rapm_fit/", ext=".pkl")}
     """
     fixed = tuple(sorted((str(k), str(v)) for k, v in part.items())) if part else ()
-    return Output(_decl._canon(dataset), ext, terminal, allow_missing, fixed)
+    return Output(_decl._canon(dataset), ext, allow_missing, fixed)
 
 
-def _outputs(spec, ext, terminal, allow_missing) -> dict:
+def _outputs(spec, ext, allow_missing) -> dict:
     """`output=` as {key: Output}. A bare string is the one-output case.
 
     None is a stage that writes NOTHING — a fetch that fills a download cache, a publish
@@ -171,7 +170,7 @@ def _outputs(spec, ext, terminal, allow_missing) -> dict:
         return {}
     if isinstance(spec, str):
         d = _decl._canon(spec)
-        return {d: Output(d, ext, terminal, allow_missing)}
+        return {d: Output(d, ext, allow_missing)}
     if not isinstance(spec, dict) or not spec:
         raise DeclError(
             "output= is a dataset, or a dict of {name: dataset} naming each one — "
@@ -180,11 +179,31 @@ def _outputs(spec, ext, terminal, allow_missing) -> dict:
     out = {}
     for k, v in spec.items():
         if isinstance(v, Output):
-            out[k] = Output(_decl._canon(v.dataset), v.ext, v.terminal, v.allow_missing,
-                            v.part)
+            out[k] = Output(_decl._canon(v.dataset), v.ext, v.allow_missing, v.part)
         else:
-            out[k] = Output(_decl._canon(v), ext, terminal, allow_missing)
+            out[k] = Output(_decl._canon(v), ext, allow_missing)
     return out
+
+
+class Source:
+    """A dataset that arrives from OUTSIDE: a fetch, a hand-placed file, another system.
+
+    Nothing here builds it, so there is no body and no skip check — but it is declared all
+    the same, so a read can name it and the graph knows every dataset the pipeline has
+    rather than only the ones something here writes. That is what replaced a `sources=`
+    list of path prefixes on the Invalidator: a prefix said "do not ask what writes
+    anything under here", which is a rule about paths, where this is a statement about one
+    dataset that can be pointed at.
+    """
+
+    def __init__(self, dataset: str, *, why: str, external=None) -> None:
+        self.dataset = _decl._canon(dataset)
+        self.why = _decl._why(why, self.dataset)
+        self.externals = _externals(external, self.dataset)
+        self.__name__ = self.dataset.rstrip("/").rsplit("/", 1)[-1]
+
+    def __repr__(self) -> str:
+        return f"<iv source {self.dataset}>"
 
 
 class Asset:
@@ -197,12 +216,11 @@ class Asset:
     """
 
     def __init__(self, pipeline, output, fn, *, why: str,
-                 part=None, ext: str = _sh.EXT, terminal: bool = False,
-                 allow_missing: bool = False, if_needed: bool = True,
+                 part=None, ext: str = _sh.EXT, allow_missing: bool = False, if_needed: bool = True,
                  once: bool = False, split: bool = False, single: bool = True,
                  external=None) -> None:
         self.pipeline = pipeline
-        self.outputs = _outputs(output, ext, terminal, allow_missing)
+        self.outputs = _outputs(output, ext, allow_missing)
         self.single = single
         self.fn = fn
         self.acts_only = not self.outputs
@@ -238,6 +256,20 @@ class Asset:
             return getattr(self.fn, "__name__", "<stage>")
         return next(iter(self.outputs.values())).dataset
 
+    def __getitem__(self, key: str):
+        """One named output of a multi-output stage, for a read to name.
+
+            @iv.step(output={"ratings": "processed/xpm/",
+                             "summary": "processed/xpm_summary/"}, why="the joint fit")
+            def xpm(...): ...
+
+            def wvorp(x=iv.all_of(xpm["ratings"], why="the headline table")):
+        """
+        if key not in self.outputs:
+            raise DeclError(
+                f"{self.__name__} has no output named {key!r}: {sorted(self.outputs)}.")
+        return self.outputs[key]
+
     @property
     def dataset(self) -> str:
         """What `iv.all_of(this_stage, ...)` means: the dataset it writes.
@@ -248,7 +280,9 @@ class Asset:
         if len(self.outputs) != 1:
             raise DeclError(
                 f"{self.__name__} writes {len(self.outputs)} datasets, so naming the stage "
-                f"in a read does not say which: {sorted(self.datasets)}. Name the dataset.")
+                f"in a read does not say which. Name the output: "
+                f"{self.__name__}[{sorted(self.outputs)[0]!r}], one of "
+                f"{sorted(self.outputs)}.")
         return self.primary
 
     @property
@@ -375,7 +409,6 @@ class Asset:
             if self.wants_out:
                 o = next(iter(self.outputs.values()))
                 with iv.writes(o.dataset, why=self.why, part=part, ext=o.ext,
-                               terminal=o.terminal,
                                allow_missing=o.allow_missing) as staged:
                     kw[OUT_PARAM] = staged
                     self.fn(**kw)
@@ -402,8 +435,7 @@ class Asset:
     def _commit(self, o: Output, value, part) -> None:
         part = dict(o.part) if o.part else part
         with self.pipeline.writes(o.dataset, why=self.why, part=part, ext=o.ext,
-                                  terminal=o.terminal,
-                                  allow_missing=o.allow_missing) as staged:
+                                     allow_missing=o.allow_missing) as staged:
             if value is not None:
                 save_value(value, staged, o.ext)
 

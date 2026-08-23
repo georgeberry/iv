@@ -23,8 +23,10 @@ def iv(tmp_path, monkeypatch):
 
 
 def seed(iv, dataset, part=None, n=3, why="an upstream feed"):
+    """Put a shard on disk the way a fetcher would, and declare what it is."""
     with iv.writes(dataset, why=why, part=part) as out:
         pl.DataFrame({"a": range(n)}).write_parquet(out)
+    return iv._sources.get(dataset) or iv.source(dataset, why=why)
 
 
 def counting(monkeypatch):
@@ -43,7 +45,7 @@ def seasons(iv, keys):
     iv._assets.clear()
 
     @iv.data("processed/features/", why="per-season features", part="season")
-    def features(box=iv.same_part("raw/box/", why="this season")):
+    def features(box=iv.same_part(iv._sources["raw/box/"], why="this season")):
         return box
 
     features.for_each(keys)

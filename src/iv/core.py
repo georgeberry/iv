@@ -44,16 +44,16 @@ def _check_declared(target) -> None:
 class Invalidator:
     """What decides whether a stage has to run.
 
-    Four paths, and they used to be called root, out_root, project_root and roots, which is
-    four different things wearing one word:
+    Three paths, and they used to be called root, out_root and project_root, which is
+    three different things wearing one word. A fourth, `roots`, named dataset PREFIXES that
+    arrive from outside — a rule about paths — and is gone: those datasets are declared, one
+    at a time, with `iv.source(...)`.
 
         tree      where the DATA lives. A dataset is named relative to it, which is what
                   lets an id survive the data moving.
         out_tree  where writes GO, if that is somewhere else. Defaults to `tree`.
         project   where the CODE lives. Node names are relative to it, so they read the
                   same however the module was imported.
-        sources   dataset prefixes that arrive from OUTSIDE — a fetch, a hand-placed file.
-                  Nothing here produces them, so `iv check` does not ask what does.
         code      the modules `iv preflight` reads for undefined names and dead imports.
     """
 
@@ -61,7 +61,6 @@ class Invalidator:
                  tree,
                  out_tree=None,
                  code: Sequence[str] = ("src", "scripts"),
-                 sources: Sequence[str] = ("raw/", "config/"),
                  project=None,
                  trace=None,
                  stage_dir=None,
@@ -70,7 +69,6 @@ class Invalidator:
         self.tree = mkpath(tree, self.project)
         self.out_tree = mkpath(out_tree, self.project) if out_tree is not None else self.tree
         self.code = tuple(code)
-        self.sources = tuple(_canon(r) for r in sources)
         self.stage_dir = stage_dir
         self.force = _env_force() if force is None else force
         self.trace_path = _abs_trace(trace)
@@ -102,6 +100,9 @@ class Invalidator:
         # parsing it — which is what lets a stage defined in a notebook declare as well as
         # one in a scanned file.
         self._assets: dict[str, _assets.Asset] = {}
+        # dataset -> the Source it arrives as. Declared, not inferred from a path prefix,
+        # so every dataset in the pipeline has exactly one declaration somewhere.
+        self._sources: dict[str, _assets.Source] = {}
 
     def __repr__(self) -> str:
         return f"<Invalidator {self.tree}>"
@@ -350,7 +351,6 @@ class Invalidator:
 
     @contextmanager
     def writes(self, dataset: str, *, why: str, part: dict | None = None,
-               terminal: bool = False,
                allow_missing: bool = False, ext: str = _sh.EXT):
         name = _canon(dataset)
         _why(why, name)
@@ -460,7 +460,7 @@ class Invalidator:
     output = staticmethod(_assets.output)
 
     def data(self, dataset: str, *, why: str, part=None,
-             ext: str = _sh.EXT, terminal: bool = False, allow_missing: bool = False,
+             ext: str = _sh.EXT, allow_missing: bool = False,
              if_needed: bool = True, once: bool = False, split: bool = False,
              external=None) -> Callable:
         """Name a dataset and decorate the function that builds it.
@@ -476,12 +476,35 @@ class Invalidator:
 
         def decorate(fn: Callable) -> _assets.Asset:
             return self._register(_assets.Asset(
-                self, dataset, fn, why=why, part=part, ext=ext, terminal=terminal,
+                self, dataset, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, if_needed=if_needed, once=once, split=split,
                 single=True, external=external))
         return decorate
 
+    def source(self, dataset: str, *, why: str, external=None) -> _assets.Source:
+        """Declare a dataset that arrives from outside, so a read can name it.
+
+            pbp = iv.source("raw/pbp_official/", why="the official play-by-play dump")
+
+            @iv.data(dataset="derived/panel/", why="...", part="season")
+            def panel(raw=iv.same_part(pbp, why="one season of it")):
+                ...
+        """
+        src = _assets.Source(dataset, why=why, external=external)
+        if src.dataset in self._assets:
+            raise DeclError(
+                f"{src.dataset} is built by "
+                f"{self._assets[src.dataset].__name__!r}, so it does not arrive from "
+                f"outside. A dataset is declared once, as one thing or the other.")
+        self._sources[src.dataset] = src
+        return src
+
     def _register(self, asset: _assets.Asset) -> _assets.Asset:
+        for name in asset.datasets:
+            if name in self._sources:
+                raise DeclError(
+                    f"{name} was declared a source — something outside this pipeline puts "
+                    f"it there — and {asset.__name__!r} writes it. It is one or the other.")
         for name in asset.datasets:
             for other in self._assets.values():
                 if name not in other.datasets or other.fn is asset.fn:
@@ -508,7 +531,7 @@ class Invalidator:
         return [a for a in self._assets.values() if name in a.datasets]
 
     def step(self, output=None, *, why: str, part=None,
-             ext: str = _sh.EXT, terminal: bool = False, allow_missing: bool = False,
+             ext: str = _sh.EXT, allow_missing: bool = False,
              if_needed: bool = True, once: bool = False, split: bool = False,
              external=None) -> Callable:
         """A stage: what it reads, in its signature, and what it writes, in `output=`.
@@ -531,7 +554,7 @@ class Invalidator:
 
         def decorate(fn: Callable) -> _assets.Asset:
             return self._register(_assets.Asset(
-                self, output, fn, why=why, part=part, ext=ext, terminal=terminal,
+                self, output, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
                 split=split, single=isinstance(output, str), external=external))
         return decorate

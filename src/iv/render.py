@@ -154,12 +154,11 @@ def stage_card(node: str, g, color: bool | None = None) -> str:
         lines.append(f"  {_c('1', kind, on)}")
         for s in sorted(sites, key=lambda x: x.dataset):
             flags = "".join(f" {f}" for f, ok in
-                            (("?", s.optional), ("!", s.terminal),
-                             ("~", s.update_file_on_disk)) if ok)
+                            (("?", s.optional), ("~", s.update_file_on_disk)) if ok)
             if kind == "reads":
                 far = g.producers_of(s.dataset)
                 far_s = ("<- " + ", ".join(label(f) for f in far)) if far \
-                    else _c("90", "(a root — fetched outside this pipeline)", on)
+                    else _c("90", "(a source — it arrives from outside)", on)
             else:
                 far = [c for c in g.consumers_of(s.dataset) if c != node]
                 far_s = ("-> " + ", ".join(label(f) for f in far)) if far \

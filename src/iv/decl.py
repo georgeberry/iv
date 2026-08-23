@@ -44,22 +44,25 @@ def _canon(dataset: str) -> str:
 
 
 def _target(dataset) -> str:
-    """What a read names: a dataset path, or the STAGE that writes it.
+    """What a read names: the DECLARATION of the dataset it reads.
 
-    Naming the stage is an ordinary Python reference — `iv.all_of(today, ...)` — so a typo
-    is a NameError where it is written rather than a READ WITH NO PRODUCER the next time
-    someone runs `iv check`, and the path is not spelled out twice for a rename to get half
-    of. A dataset nothing here produces has no stage to name and stays a string.
+    An ordinary Python reference — `iv.all_of(today, ...)` — so a typo is a NameError where
+    it is written rather than a READ WITH NO PRODUCER the next time someone runs `iv check`.
+    Everything is declared, sources included, so there is nothing a read can name that the
+    graph does not already know about, and the checks that used to look for a path with
+    nothing behind it have nothing left to find.
 
     Duck-typed rather than imported: `assets` imports this module, so it cannot be imported
     back.
     """
-    named = getattr(dataset, "dataset", dataset)
+    named = getattr(dataset, "dataset", None)
     if not isinstance(named, str):
         raise DeclError(
-            f"a read names a dataset path — iv.all_of('raw/box/', why='...') — or the "
-            f"stage that writes it — iv.all_of(box, why='...'), where `box` is a function "
-            f"decorated with @iv.data. Got {dataset!r}.")
+            f"a read names a DECLARED dataset, not a path: {dataset!r}. Every dataset is "
+            f"declared exactly once — one this pipeline builds with @iv.data or @iv.step, "
+            f"one that arrives from outside with iv.source(...) — and read by naming that "
+            f"declaration. A path written a second time is a path a rename can get half "
+            f"of, and one the graph cannot tell from a typo.")
     return _canon(named)
 
 

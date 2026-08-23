@@ -37,7 +37,7 @@ def test_a_derived_asset_builds_then_skips(iv):
         return frame()
 
     @iv.data("processed/out/", why="passthrough")
-    def out(feed=iv.all_of("raw/feed/", why="the upstream")):
+    def out(feed=iv.all_of(feed, why="the upstream")):
         ran.append(1)
         return feed
 
@@ -55,7 +55,7 @@ def test_a_moved_upstream_rebuilds(iv):
         return frame(n[0])
 
     @iv.data("processed/out/", why="passthrough")
-    def out(feed=iv.all_of("raw/feed/", why="the upstream")):
+    def out(feed=iv.all_of(feed, why="the upstream")):
         ran.append(1)
         return feed
 
@@ -76,7 +76,7 @@ def test_a_rebuild_that_does_not_move_the_bytes_stops_there(iv):
         return frame()
 
     @iv.data("processed/out/", why="passthrough")
-    def out(feed=iv.all_of("raw/feed/", why="the upstream")):
+    def out(feed=iv.all_of(feed, why="the upstream")):
         ran.append(1)
         return feed
 
@@ -122,8 +122,8 @@ def test_a_root_that_always_runs_is_not_warned_about_as_running_once(iv):
     def feed():
         return frame()
 
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(feed=iv.all_of("raw/feed/", why="the feed")):
+    @iv.data("dump/site/", why="the app reads it")
+    def site(feed=iv.all_of(feed, why="the feed")):
         return feed
 
     errors, warns = _graph.check(_graph.build(iv))
@@ -137,8 +137,8 @@ def test_once_is_warned_about(iv):
     def archive():
         return frame()
 
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(a=iv.all_of("raw/archive/", why="the backfill")):
+    @iv.data("dump/site/", why="the app reads it")
+    def site(a=iv.all_of(archive, why="the backfill")):
         return a
 
     _, warns = _graph.check(_graph.build(iv))
@@ -157,12 +157,12 @@ def seasons_pipeline(iv, pts=None):
         return pl.DataFrame({"player": [1, 2], "pts": [pts[season], pts[season] + 1]})
 
     @iv.data("processed/features/", why="per-season features", part="season")
-    def features(box=iv.same_part("raw/box/", why="this season's box")):
+    def features(box=iv.same_part(box, why="this season's box")):
         ran.append("features")
         return box.with_columns((pl.col("pts") * 2).alias("z"))
 
     @iv.data("processed/cohorts/", why="a fit on prior seasons only", part="season")
-    def cohorts(past=iv.before_part("processed/features/", why="every prior season")):
+    def cohorts(past=iv.before_part(features, why="every prior season")):
         ran.append("cohorts")
         return past.select(pl.col("z").sum().alias("total"))
 
@@ -272,7 +272,7 @@ def test_an_arbitrary_object_round_trips_through_pickle(iv):
 
 def test_a_body_may_write_the_file_itself(iv):
     """The escape hatch: take `out` and nothing is inferred about the value."""
-    @iv.data("dump/page/", why="a rendered page", ext=".html", terminal=True)
+    @iv.data("dump/page/", why="a rendered page", ext=".html")
     def page(out):
         out.write_text("<h1>hi</h1>")
 
@@ -307,7 +307,7 @@ def test_building_one_stage_from_inside_another_is_refused(iv):
         return frame()
 
     @iv.data("processed/out/", why="reaches for a stage instead of declaring it")
-    def out(unused=iv.all_of("raw/feed/", why="declared, but then ignored")):
+    def out(unused=iv.all_of(feed, why="declared, but then ignored")):
         return feed()
 
     feed()
@@ -323,10 +323,11 @@ def test_a_parameter_iv_cannot_supply_is_refused(iv):
 
 
 def test_a_partition_relative_read_needs_a_partitioned_stage(iv):
+    box = iv.source("raw/box/", why="arrives from outside")
     with pytest.raises(DeclError, match="only means something where there is a partition"):
-        @iv.data("processed/out/", why="not partitioned, but reads as if it were")
-        def out(box=iv.same_part("raw/box/", why="this season")):
-            return box
+        @iv.data(dataset="processed/out/", why="not partitioned, reads as if it were")
+        def out(b=iv.same_part(box, why="this season")):
+            return b
 
 
 def test_an_undeclared_read_of_the_tree_is_still_caught(iv):
@@ -363,8 +364,8 @@ def test_a_stage_may_read_the_copy_it_is_about_to_overwrite(iv):
         return {"date": day[0]}
 
     @iv.data("raw/log/", why="a running log, appended once a day")
-    def log(today=iv.all_of("config/today/", why="append once a day"),
-            prior=iv.own_last_copy("raw/log/", why="yesterday's copy")):
+    def log(today=iv.all_of(today, why="append once a day"),
+            prior=iv.own_last_copy(why="yesterday's copy")):
         old = prior if prior is not None else pl.DataFrame(schema={"date": pl.Utf8})
         return pl.concat([old, pl.DataFrame({"date": [today["date"]]})]).unique("date")
 
@@ -388,7 +389,7 @@ def test_a_stage_with_several_outputs_runs_once(iv):
 
     @iv.step(output={"a": "processed/a/", "b": "processed/b/", "c": "processed/c/"},
              why="one computation, three tables")
-    def fit(feed=iv.all_of("raw/feed/", why="the upstream")):
+    def fit(feed=iv.all_of(feed, why="the upstream")):
         ran.append(1)
         return {"a": feed, "b": feed.head(1), "c": feed.tail(1)}
 
@@ -409,7 +410,7 @@ def test_losing_any_one_output_brings_the_whole_stage_back(iv):
         return frame()
 
     @iv.step(output={"a": "processed/a/", "b": "processed/b/"}, why="two tables")
-    def fit(feed=iv.all_of("raw/feed/", why="the upstream")):
+    def fit(feed=iv.all_of(feed, why="the upstream")):
         ran.append(1)
         return {"a": feed, "b": feed.head(1)}
 
@@ -449,26 +450,26 @@ def test_allow_missing_lets_an_output_stay_absent(iv):
     assert not iv.resolve_out("processed/b/").exists()
 
 
-def test_terminal_belongs_to_the_output_not_the_stage(iv):
-    @iv.data("raw/feed/", why="the feed")
-    def feed():
-        return frame()
+def test_a_dataset_nothing_reads_is_terminal_without_being_told(iv):
+    """`terminal=True` used to be an assertion every dump had to remember to make so a
+    check would not complain. With every dataset declared the graph knows its own
+    consumers, and a leaf is a fact rather than a claim."""
+    feed = iv.source("raw/feed/", why="arrives from outside")
 
-    @iv.step(output={"read_by_someone": "processed/a/",
-                      "read_by_a_person": iv.output("processed/b/", terminal=True)},
+    @iv.step(output={"read_by_someone": "processed/a/", "read_by_a_person": "processed/b/"},
              why="one fit, one table nothing downstream reads")
-    def fit(feed=iv.all_of("raw/feed/", why="the upstream")):
-        return {"read_by_someone": feed, "read_by_a_person": feed}
+    def fit(f=iv.all_of(feed, why="the upstream")):
+        return {"read_by_someone": f, "read_by_a_person": f}
 
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(a=iv.all_of("processed/a/", why="the table a stage reads")):
+    @iv.data(dataset="dump/site/", why="the app reads it")
+    def site(a=iv.all_of(fit["read_by_someone"], why="the table a stage reads")):
         return a
 
-    errors, _ = _graph.check(_graph.build(iv))
-    assert not errors, errors
-
-
-# ── two stages, two shards, one dataset ───────────────────────────────────────
+    g = _graph.build(iv)
+    assert g.is_terminal("processed/b/"), "nothing reads it, so it is a leaf"
+    assert not g.is_terminal("processed/a/"), "site reads it"
+    errors, _ = _graph.check(g)
+    assert errors == [], errors
 
 def test_two_stages_may_share_a_dataset_by_writing_different_partitions(iv):
     @iv.data("raw/feed/", why="the feed", once=True)
@@ -476,11 +477,11 @@ def test_two_stages_may_share_a_dataset_by_writing_different_partitions(iv):
         return frame()
 
     @iv.data("derived/blocks/", why="the first block", part={"source": "a"})
-    def block_a(feed=iv.all_of("raw/feed/", why="the upstream")):
+    def block_a(feed=iv.all_of(feed, why="the upstream")):
         return frame(2)
 
     @iv.data("derived/blocks/", why="the second block", part={"source": "b"})
-    def block_b(feed=iv.all_of("raw/feed/", why="the upstream")):
+    def block_b(feed=iv.all_of(feed, why="the upstream")):
         return frame(3)
 
     feed(); block_a(); block_b()
@@ -520,7 +521,7 @@ def test_split_writes_a_shard_per_returned_key(iv):
 
     @iv.data("derived/features/", why="built in one pass, split by season",
              part="season", split=True)
-    def features(feed=iv.all_of("raw/feed/", why="every season at once")):
+    def features(feed=iv.all_of(feed, why="every season at once")):
         ran.append(1)
         return {str(s): rows for (s,), rows in feed.group_by("season", maintain_order=True)}
 
@@ -551,14 +552,14 @@ def test_split_needs_a_partition_key(iv):
 # ── external sources ──────────────────────────────────────────────────────────
 
 def test_an_external_source_is_declared_and_drawn(iv):
-    @iv.data("raw/feed/", why="fetched from an API",
-             external={"espn/feeds": "ESPN's season files"})
-    def feed(clock=iv.all_of("config/today/", why="poll once a day")):
-        return frame()
-
-    @iv.data("config/today/", why="the clock", ext=".json")
+    @iv.data(dataset="config/today/", why="the clock", ext=".json")
     def today():
         return {"date": "2026-08-22"}
+
+    @iv.data(dataset="raw/feed/", why="fetched from an API",
+             external={"espn/feeds": "ESPN's season files"})
+    def feed(clock=iv.all_of(today, as_paths=True, why="poll once a day")):
+        return frame()
 
     g = _graph.build(iv)
     node = next(n for n in g.stages if n.endswith("::feed"))
@@ -573,13 +574,13 @@ def test_a_stage_may_write_nothing_and_still_declare_what_it_reads(iv):
     still worth declaring, or the graph cannot draw the edge."""
     ran = []
 
-    @iv.data("dump/site/", why="the payload", terminal=True)
+    @iv.data("dump/site/", why="the payload")
     def site():
         return frame()
 
     @iv.step(why="copy the payload somewhere outside the tree",
              external={"gs://bucket": "the bucket the app reads"})
-    def publish(payload=iv.all_of("dump/site/", as_paths=True, why="what to upload")):
+    def publish(payload=iv.all_of(site, as_paths=True, why="what to upload")):
         ran.append(list(payload))
 
     site()
@@ -599,9 +600,10 @@ def test_a_stage_may_write_nothing_and_still_declare_what_it_reads(iv):
 
 
 def test_a_stage_that_writes_nothing_has_no_partition(iv):
+    feed = iv.source("raw/feed/", why="arrives from outside")
     with pytest.raises(DeclError, match="no shard for part= to name"):
         @iv.step(why="writes nothing but claims a partition", part="season")
-        def act(x=iv.all_of("raw/feed/", why="something")):
+        def act(x=iv.all_of(feed, why="something")):
             pass
 
 
@@ -636,8 +638,8 @@ def test_an_optional_read_that_selects_nothing_is_empty_either_way(iv):
     got = {}
 
     @iv.data(dataset="processed/out/", why="reads what may not be there")
-    def out(p=iv.all_of("raw/absent/", optional=True, as_paths=True, why="maybe"),
-            c=iv.all_of("raw/absent/", optional=True, why="maybe")):
+    def out(p=iv.all_of(iv.source("raw/absent/", why="arrives from outside"), optional=True, as_paths=True, why="maybe"),
+            c=iv.all_of(iv.source("raw/absent/", why="arrives from outside"), optional=True, why="maybe")):
         got.update(paths=p, contents=c)
         return frame()
 
@@ -652,7 +654,7 @@ def test_naming_the_stage_builds_the_same_graph_as_naming_the_path(iv):
     def feed():
         return frame()
 
-    @iv.data(dataset="processed/out/", why="passthrough", terminal=True)
+    @iv.data(dataset="processed/out/", why="passthrough")
     def out(f=iv.all_of(feed, why="the upstream")):
         return f
 

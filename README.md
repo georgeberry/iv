@@ -48,11 +48,40 @@ iv = Invalidator(
                                         # relative to it, so an id survives a move
     out_tree=None,                      # where writes GO, if that is somewhere else
     project=None,                       # where the CODE lives; node names are relative
-    sources=("raw/", "config/"),        # prefixes that arrive from OUTSIDE — nothing
-                                        # here produces them, so `iv check` does not ask
     code=("src", "scripts"),            # the modules `iv preflight` reads
 )
 ```
+
+## Every dataset is declared
+
+Once, and exactly once — either as something this pipeline builds, or as something that
+arrives from outside:
+
+```python
+bios = iv.source("raw/bios/", why="heights and weights, dropped in by hand once a year")
+
+@iv.data(dataset="processed/features/", why="per-season box features", part="season")
+def features(box=iv.same_part(box_settled, why="this season's box"),
+             bio=iv.all_of(bios, as_paths=True, why="the body-shape columns")):
+    ...
+```
+
+A read **names that declaration**. There is no category of dataset you refer to by writing
+its path a second time, which is what a `sources=("raw/",)` prefix list used to be for.
+
+Three things follow, and none of them is a check any more:
+
+- **A read of something nothing declares** is a `NameError` where it is written, not a
+  `READ WITH NO PRODUCER` the next time someone runs `iv check`.
+- **A cycle cannot be written.** The first stage would have to name the second before the
+  second exists, and Python settles that where it is written.
+- **A consumer cannot be defined before its producer**, for the same reason.
+
+And a dataset nothing reads is simply a leaf — `terminal=True` used to be an assertion
+every dump had to remember to make so a check would not complain about it. The graph knows
+its own consumers.
+
+To read **one output of a multi-output stage**, name the output: `xpm["ratings"]`.
 
 ## Declaring a dataset
 
@@ -160,7 +189,7 @@ happened to be current — parquet refuses it and names one that works:
 For anything else, take an `out` parameter and write the file yourself:
 
 ```python
-@iv.data("dump/page/", why="a rendered page", ext=".html", terminal=True)
+@iv.data("dump/page/", why="a rendered page", ext=".html")
 def page(out):
     out.write_text(render())
 ```

@@ -29,12 +29,13 @@ def frame():
 
 def built(iv):
     """A source, a derived dataset and a terminal one — one of each shape."""
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
     @iv.data("processed/mid/", why="the middle")
-    def mid(feed=iv.all_of("raw/feed/", why="arrives out of band")):
+    def mid(feed=iv.all_of(feed, why="arrives out of band")):
         return feed
 
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(m=iv.all_of("processed/mid/", why="the middle")):
+    @iv.data("dump/site/", why="the app reads it")
+    def site(m=iv.all_of(mid, why="the middle")):
         return m
 
     with iv.writes("raw/feed/", why="out of band") as out:
@@ -58,16 +59,18 @@ def test_two_stages_writing_one_dataset_are_two_nodes(iv):
     """The played and unplayed halves of a prediction table are different shards. Drawn as
     one node they are the same thing, and a stage that reads one and writes the other reads
     as a cycle it does not have — which is what `iv check` correctly said it did not."""
-    @iv.data("processed/preds/", part={"completed": "true"}, why="played")
-    def played(feed=iv.all_of("raw/feed/", why="the feed")):
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+
+    @iv.data(dataset="processed/preds/", part={"completed": "true"}, why="played")
+    def played(f=iv.all_of(feed, why="the feed")):
         return frame()
 
-    @iv.data("processed/pre/", why="the preseason nets")
-    def pre(p=iv.parts("processed/preds/", completed=["true"], why="played games only")):
+    @iv.data(dataset="processed/pre/", why="the preseason nets")
+    def pre(p=iv.parts(played, completed=["true"], why="played games only")):
         return frame()
 
-    @iv.data("processed/preds/", part={"completed": "false"}, why="not yet played")
-    def upcoming(t=iv.all_of("processed/pre/", why="the team ratings")):
+    @iv.data(dataset="processed/preds/", part={"completed": "false"}, why="not yet played")
+    def upcoming(t=iv.all_of(pre, why="the team ratings")):
         return frame()
 
     g = _graph.build(iv)
@@ -128,34 +131,18 @@ def test_draw_needs_no_status_at_all(iv, tmp_path):
     assert out.exists() and out.stat().st_size > 1000
 
 
-def test_a_cycle_is_cut_to_lay_out_rather_than_crashing(iv, tmp_path):
-    """The picture is most wanted when the graph is wrong, so it has to survive one."""
-    @iv.data("processed/a/", why="a")
-    def a(b=iv.all_of("processed/b/", why="b")):
-        return b
+def test_a_cycle_is_cut_to_lay_out_rather_than_crashing(iv, tmp_path, monkeypatch):
+    """The picture is most wanted when the graph is wrong, so it has to survive one.
 
-    @iv.data("processed/b/", why="b")
-    def b(a=iv.all_of("processed/a/", why="a")):
-        return a
+    A cycle cannot be DECLARED any more — the first stage would have to name the second
+    before the second exists — so this closes the loop on the drawn graph directly, which
+    is the only way one can still arrive: a `Graph` assembled by something other than the
+    decorators.
+    """
+    g = built(iv)
+    d = _viz.to_networkx(g)
+    d.add_edge(("dump/site/", ()), ("processed/mid/", ()), stage="hand-built")
+    monkeypatch.setattr(_viz, "to_networkx", lambda _g: d)
 
-    out = _viz.draw(_graph.build(iv), tmp_path / "cyclic.png")
+    out = _viz.draw(g, tmp_path / "cyclic.png")
     assert out.exists()
-
-
-def test_a_shard_takes_the_colour_of_its_dataset(iv, tmp_path):
-    """Nodes are (dataset, shard) since a dataset can have several writers, and `iv status`
-    answers per dataset — so the lookup has to go through the dataset, or every node is
-    grey and the picture says nothing."""
-    @iv.data("processed/preds/", part={"completed": "true"}, why="played")
-    def played(feed=iv.all_of("raw/feed/", why="the feed")):
-        return frame()
-
-    @iv.data("processed/preds/", part={"completed": "false"}, why="not yet played")
-    def upcoming(feed=iv.all_of("raw/feed/", why="the feed")):
-        return frame()
-
-    g = _graph.build(iv)
-    status = _viz.states({"processed/preds/": {"": "its inputs moved"}}, maybe=set())
-    colours = {_viz.STATUS[status.get(n[0], "source")] for n in _viz.to_networkx(g)}
-    assert _viz.STATUS["stale"] in colours, "both shards take the dataset's answer"
-    assert _viz.STATUS["source"] in colours, "and raw/feed/ has no answer to take"

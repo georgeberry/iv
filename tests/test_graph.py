@@ -43,64 +43,44 @@ def check(iv):
 # ── the checks ────────────────────────────────────────────────────────────────
 
 def test_a_clean_pipeline_passes(iv):
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
     @iv.data("processed/mid/", why="the middle")
-    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
+    def mid(feed=iv.all_of(feed, why="the feed")):
         return feed
 
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(m=iv.all_of("processed/mid/", why="the middle")):
+    @iv.data("dump/site/", why="the app reads it")
+    def site(m=iv.all_of(mid, why="the middle")):
         return m
 
     assert check(iv) == ([], [])
 
 
-def test_a_read_with_no_producer_outside_the_roots_is_an_error(iv):
-    @iv.data("processed/mid/", why="the middle", terminal=True)
-    def mid(x=iv.all_of("processed/nobody_writes/", why="nothing produces this")):
-        return x
-
-    errors, _ = check(iv)
-    assert any("READ WITH NO PRODUCER" in e for e in errors)
-
-
-def test_an_optional_read_with_no_producer_is_only_a_warning(iv):
-    @iv.data("processed/mid/", why="the middle", terminal=True)
-    def mid(x=iv.all_of("processed/maybe/", optional=True, why="may not be there")):
-        return x
-
-    errors, warns = check(iv)
-    assert errors == [] and any("READ WITH NO PRODUCER" in w for w in warns)
-
-
 def test_a_root_prefix_is_how_out_of_band_data_is_declared(iv):
     """`raw/` is declared a root, so nothing has to produce it."""
-    @iv.data("processed/mid/", why="the middle", terminal=True)
-    def mid(feed=iv.all_of("raw/feed/", why="arrives out of band")):
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+    @iv.data("processed/mid/", why="the middle")
+    def mid(feed=iv.all_of(feed, why="arrives out of band")):
         return feed
 
     assert check(iv)[0] == []
 
 
-def test_a_write_nobody_reads_needs_terminal(iv):
-    @iv.data("processed/mid/", why="nothing downstream reads this")
-    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
-        return feed
+def test_a_cycle_cannot_be_written(iv):
+    """It used to be a check. It is now a NameError.
 
-    errors, _ = check(iv)
-    assert any("WRITE WITH NO CONSUMER" in e for e in errors)
+    A read names the declaration it reads, so the first stage of a cycle would have to name
+    the second before the second exists. Python settles it where it is written, which is
+    earlier and more precise than a toposort settling it later. `find_cycle` stays because
+    `iv viz` has to lay out a graph that was built by hand.
+    """
+    @iv.data(dataset="processed/a/", why="a")
+    def a():
+        return frame()
 
-
-def test_a_cycle_is_caught(iv):
-    @iv.data("processed/a/", why="a")
-    def a(b=iv.all_of("processed/b/", why="b")):
-        return b
-
-    @iv.data("processed/b/", why="b")
-    def b(a=iv.all_of("processed/a/", why="a")):
-        return a
-
-    errors, _ = check(iv)
-    assert any("CYCLE" in e for e in errors)
+    with pytest.raises(NameError):
+        @iv.data(dataset="processed/b/", why="b")
+        def b(x=iv.all_of(later_stage, why="not defined yet")):   # noqa: F821
+            return x
 
 
 def test_a_stage_with_no_inputs_is_warned_about(iv):
@@ -111,8 +91,8 @@ def test_a_stage_with_no_inputs_is_warned_about(iv):
     def archive():
         return frame()
 
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(a=iv.all_of("raw/archive/", why="the archive")):
+    @iv.data("dump/site/", why="the app reads it")
+    def site(a=iv.all_of(archive, why="the archive")):
         return a
 
     errors, warns = check(iv)
@@ -126,8 +106,8 @@ def test_a_root_that_re_runs_is_not_warned_about(iv):
     def model():
         return frame()
 
-    @iv.data("processed/xpm/", why="the fit", terminal=True)
-    def xpm(m=iv.all_of("config/model/", why="a model change rebuilds this")):
+    @iv.data("processed/xpm/", why="the fit")
+    def xpm(m=iv.all_of(model, why="a model change rebuilds this")):
         return m
 
     assert check(iv) == ([], [])
@@ -140,8 +120,8 @@ def test_an_update_read_does_not_count_as_a_trigger(iv):
     that makes a stage stale — and a stage with nothing else to read is the silent-failure
     case this check exists for.
     """
-    @iv.data("raw/log/", why="a running log", terminal=True, once=True)
-    def log(have=iv.own_last_copy("raw/log/", why="yesterday's copy")):
+    @iv.data(dataset="raw/log/", why="a running log", once=True)
+    def log(have=iv.own_last_copy(why="yesterday's copy")):
         return have if have is not None else frame()
 
     errors, warns = check(iv)
@@ -151,39 +131,26 @@ def test_an_update_read_does_not_count_as_a_trigger(iv):
 
 def test_updating_a_dataset_another_stage_writes_is_an_error(iv):
     """The static half of the rule: caught by `iv check`, without running anything."""
-    @iv.data("processed/draft/", why="the draft table", terminal=True)
-    def draft(prev=iv.own_last_copy("raw/schedule/", why="the previous run's copy")):
-        return prev
+    @iv.data(dataset="raw/schedule/", why="the schedule")
+    def fetch():
+        return frame()
 
-    @iv.data("raw/schedule/", why="the schedule")
-    def fetch(d=iv.all_of("processed/draft/", why="which classes to fetch")):
-        return d
+    @iv.data(dataset="processed/draft/", why="the draft table")
+    def draft(prev=iv.own_last_copy(fetch, why="the previous run's copy")):
+        return prev
 
     errors, _ = check(iv)
     assert any("UPDATES SOMEONE ELSE" in e and "raw/schedule/" in e for e in errors)
 
 
-def test_a_consumer_defined_before_its_producer_in_one_file_is_an_error(iv):
-    """Within a file, definition order IS run order, so this one is decidable."""
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(m=iv.all_of("processed/mid/", why="the middle")):
-        return m
-
-    @iv.data("processed/mid/", why="the middle")
-    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
-        return feed
-
-    errors, _ = check(iv)
-    assert any("ORDER" in e for e in errors)
-
-
 def test_definition_order_is_the_run_order(iv):
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
     @iv.data("processed/mid/", why="the middle")
-    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
+    def mid(feed=iv.all_of(feed, why="the feed")):
         return feed
 
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(m=iv.all_of("processed/mid/", why="the middle")):
+    @iv.data("dump/site/", why="the app reads it")
+    def site(m=iv.all_of(mid, why="the middle")):
         return m
 
     order = _graph.build(iv).order()
@@ -207,16 +174,18 @@ def test_a_second_producer_is_refused_at_declaration(iv):
 
 
 def test_different_partitions_of_one_dataset_are_allowed(iv):
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
     @iv.data("processed/preds/", part={"completed": "true"}, why="played")
-    def played(feed=iv.all_of("raw/feed/", why="the feed")):
+    def played(feed=iv.all_of(feed, why="the feed")):
         return feed
 
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
     @iv.data("processed/preds/", part={"completed": "false"}, why="not yet played")
-    def upcoming(feed=iv.all_of("raw/feed/", why="the feed")):
+    def upcoming(feed=iv.all_of(feed, why="the feed")):
         return feed
 
-    @iv.data("dump/site/", why="the app reads it", terminal=True)
-    def site(p=iv.all_of("processed/preds/", why="both halves")):
+    @iv.data("dump/site/", why="the app reads it")
+    def site(p=iv.all_of(upcoming, why="both halves")):
         return p
 
     assert check(iv) == ([], [])
@@ -225,8 +194,9 @@ def test_different_partitions_of_one_dataset_are_allowed(iv):
 # ── drift: the code against a recorded run ────────────────────────────────────
 
 def test_an_undeclared_read_is_an_error_and_an_unseen_one_is_a_warning(iv):
-    @iv.data("processed/mid/", why="the middle", terminal=True)
-    def mid(feed=iv.all_of("raw/feed/", why="the feed")):
+    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+    @iv.data("processed/mid/", why="the middle")
+    def mid(feed=iv.all_of(feed, why="the feed")):
         return feed
 
     node = next(n for n in _graph.build(iv).stages if n.endswith("::mid"))

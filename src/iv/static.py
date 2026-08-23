@@ -20,7 +20,6 @@ class Site:
     line: int
     optional: bool = False
     update_file_on_disk: bool = False
-    terminal: bool = False
     part: tuple = ()
     where: tuple = ()
     sel: tuple | None = ()

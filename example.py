@@ -3,6 +3,7 @@
 Modelled on a working sports-model pipeline, so the awkward cases are here rather than the
 tidy ones:
 
+    raw/bios/                declared with iv.source: nothing here builds it
     config/today/            the clock, as a file — a "re-run daily" policy, stored
     config/model/            the knobs, as a file — a model version, stored
     raw/box_settled/         finished seasons, fetched once each
@@ -40,7 +41,7 @@ import polars as pl
 from iv import Invalidator
 
 root = pathlib.Path(tempfile.mkdtemp()) / "data"
-iv = Invalidator(tree=root, project=root.parent, sources=("raw/", "config/"))
+iv = Invalidator(tree=root, project=root.parent)
 
 SEASONS = ["2022", "2023", "2024"]
 LIVE = "2024"          # the season being played; the rest have settled
@@ -48,6 +49,19 @@ TODAY = dt.date(2026, 8, 21)
 RIDGE = 4.0
 PTS = {"2022": 10, "2023": 20, "2024": 30, "2025": 40}
 ran = []
+
+
+# ── what arrives from outside ────────────────────────────────────────────────
+#
+# Nothing here builds it, so there is no body and no skip check — but it is declared all
+# the same, and a read names it exactly the way it names a stage. There is no category of
+# dataset you refer to by writing its path a second time.
+
+bios = iv.source(
+    "raw/bios/",
+    why="heights and weights, dropped in by hand once a year",
+    external={"basketball-reference/players": "the player pages"},
+)
 
 
 # ── metadata is a file, and a root always runs ───────────────────────────────
@@ -170,6 +184,7 @@ def schedule(
 def box_features(
     box=iv.all_of(box, why="every season of raw box scores"),
     sched=iv.all_of(schedule, why="which games count"),
+    bio=iv.all_of(bios, as_paths=True, why="the body-shape columns"),
 ):
     """The features have career-cumulative terms, so they are built in ONE pass and split.
 
@@ -182,6 +197,11 @@ def box_features(
 
 
 # ── three stages, three blocks, one dataset ──────────────────────────────────
+#
+# A read of `derived/college/` names one of the three, because all three declare that same
+# dataset and a read of it takes every shard. Naming `ncaa_block` for a read that gets all
+# three blocks is the one place this reads oddly — the dataset has no declaration of its
+# own, only its writers do.
 
 
 @iv.data(
@@ -222,16 +242,16 @@ def intl_block(bf=iv.all_of(box_features, why="the pro side")):
 @iv.step(
     output={
         "ratings": "processed/xpm/",
-        "career": iv.output("processed/xpm_career/", terminal=True),
-        "summary": iv.output("processed/xpm_summary/", terminal=True),
-        "levels": iv.output("processed/xpm_levels/", terminal=True),
+        "career": iv.output("processed/xpm_career/"),
+        "summary": iv.output("processed/xpm_summary/"),
+        "levels": iv.output("processed/xpm_levels/"),
     },
     why="the joint fit and the tables that fall out of it",
 )
 def xpm(
     knobs=iv.all_of(model_config, why="a knob change must refit"),
     bf=iv.all_of(box_features, why="the box prior, every season at once"),
-    college=iv.all_of("derived/college/", why="the college block, all three sources"),
+    college=iv.all_of(ncaa_block, why="the college block, all three sources"),
 ):
     """ONE expensive computation, four tables. Declaring them together is what stops the fit
     being run once per output — and losing any one of them brings the whole fit back.
@@ -277,7 +297,7 @@ def xpm_eoy(
     season,
     knobs=iv.all_of(model_config, why="a knob change must refit this season"),
     bf=iv.before_part(
-        "derived/box_features/",
+        box_features,
         inclusive=True,
         why="the box matrix through the END of this season",
     ),
@@ -294,7 +314,7 @@ def xpm_eoy(
 )
 def rookie(
     bf=iv.before_part(box_features, why="strictly before this cohort"),
-    college=iv.all_of("derived/college/", why="the college block"),
+    college=iv.all_of(ncaa_block, why="the college block"),
 ):
     """EXCLUSIVE: `lt`. The bound picks FILES, so a cohort physically cannot open its own
     season or a later one. A season backfilled BELOW the bound is picked up; one added
@@ -312,7 +332,7 @@ def rookie(
     part={"completed": "true"},
 )
 def predict_played(
-    x=iv.all_of("processed/xpm/", why="the ratings each game is priced off"),
+    x=iv.all_of(xpm["ratings"], why="the ratings each game is priced off"),
     sched=iv.all_of(schedule, why="which games were played"),
 ):
     ran.append("predict_played")
@@ -325,7 +345,7 @@ def predict_played(
     part={"completed": "false"},
 )
 def predict_upcoming(
-    x=iv.all_of("processed/xpm/", why="the ratings"),
+    x=iv.all_of(xpm["ratings"], why="the ratings"),
     sched=iv.all_of(schedule, why="the remaining schedule"),
 ):
     ran.append("predict_upcoming")
@@ -339,7 +359,7 @@ def predict_upcoming(
 )
 def calibration(
     played=iv.parts(
-        "processed/predictions/",
+        predict_played,
         completed=["true"],
         why="played games only — an unplayed one has no residual",
     )
@@ -356,18 +376,15 @@ def calibration(
 # ── terminal, written through `out` ──────────────────────────────────────────
 
 
-@iv.data(dataset="dump/site/", why="the payload the app renders", ext=".json",
-         terminal=True)
+@iv.data(dataset="dump/site/", why="the payload the app renders", ext=".json")
 def site(
     out,
-    x=iv.all_of("processed/xpm/", why="the leaderboard"),
+    x=iv.all_of(xpm["ratings"], why="the leaderboard"),
     fit=iv.all_of(rapm_fit, why="the fit, for the ridge it used"),
     eoy=iv.all_of(xpm_eoy, why="the end-of-year column"),
     rk=iv.all_of(rookie, why="the rookie projections"),
-    preds=iv.all_of("processed/predictions/", why="today's games"),
-    cal=iv.all_of(
-        "processed/calibration/", optional=True, why="the sigma, once there is one"
-    ),
+    preds=iv.all_of(predict_played, why="today's games"),
+    cal=iv.all_of(calibration, optional=True, why="the sigma, once there is one"),
 ):
     """A body that takes `out` writes the file itself, and nothing is inferred about a
     return value. That is the escape hatch for anything the formats do not cover."""
@@ -391,6 +408,9 @@ def site(
 
 
 def build_all():
+    if not (root / "raw/bios").exists():          # a person drops this in; nothing builds it
+        with iv.writes("raw/bios/", why="dropped in by hand") as out:
+            pl.DataFrame({"player": [1, 2], "cm": [180, 191]}).write_parquet(out)
     today()
     model_config()
     box_settled.for_each([s for s in SEASONS if s != LIVE])

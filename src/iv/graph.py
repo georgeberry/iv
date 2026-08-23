@@ -31,8 +31,14 @@ class Graph:
                       if any(s.dataset == dataset for s in st.inputs))
 
     def is_terminal(self, dataset: str) -> bool:
-        return any(s.dataset == dataset and s.terminal
-                   for st in self.stages.values() for s in st.outputs)
+        """Nothing in this pipeline reads it, so something outside does.
+
+        It used to be declared with `terminal=True`, which every dump had to say about
+        itself so that a check could be told not to complain. With every dataset declared
+        the graph knows its own consumers, and a leaf is a fact about the graph rather than
+        an assertion someone had to remember to make.
+        """
+        return not self.consumers_of(dataset)
 
     def parent_map(self) -> dict[str, list[str]]:
         """Who must run before whom — per PARTITION, not per dataset.
@@ -110,8 +116,8 @@ def declared_nodes(iv) -> list[_static.Node]:
         for o in asset.outputs.values():
             sites.append(
                 _static.Site(kind="write", dataset=o.dataset, why=asset.why, file=rel,
-                             line=_line_of(asset.fn), terminal=o.terminal,
-                             part=(o.part or fixed), owner=fn_name))
+                             line=_line_of(asset.fn), part=(o.part or fixed),
+                             owner=fn_name))
         # `guarded` is "has a skip check that could be fooled". A root asset has no
         # upstream to be stale against and runs every time, which is how anything outside
         # the tree gets in — so it is not guarded, and the RUNS ONCE warning below is not
@@ -163,26 +169,13 @@ def find_cycle(g: Graph) -> str | None:
 def check(g: Graph) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warns: list[str] = []
-    sources = tuple(g.iv.sources)
 
-    for name in sorted({s.dataset for st in g.stages.values() for s in st.inputs}):
-        if g.producers_of(name) or name.startswith(sources):
-            continue
-        site = next(s for st in g.stages.values() for s in st.inputs if s.dataset == name)
-        msg = (f"READ WITH NO PRODUCER  {name}\n"
-               f"    read at {site.location} but nothing writes it. Either a stage is "
-               f"missing, or it arrives out of band — put it under one of "
-               f"{list(sources)} or add that prefix to sources=.")
-        (warns if site.optional else errors).append(msg)
-
-    for name in g.produced:
-        if g.consumers_of(name) or g.is_terminal(name):
-            continue
-        site = next(s for st in g.stages.values() for s in st.outputs if s.dataset == name)
-        errors.append(
-            f"WRITE WITH NO CONSUMER  {name}\n"
-            f"    written at {site.location} and read by nothing. Delete the stage, or "
-            f"pass terminal=True if it is consumed outside this pipeline.")
+    for name, src in sorted(getattr(g.iv, "_sources", {}).items()):
+        if not g.consumers_of(name):
+            warns.append(
+                f"SOURCE NOBODY READS  {name}\n"
+                f"    declared as arriving from outside — {src.why} — and read by no "
+                f"stage. Delete the declaration, or wire it up.")
 
     cyc = find_cycle(g)
     if cyc:
@@ -213,13 +206,9 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                 f"dataset it hides a real dependency: run that producer first and read "
                 f"it normally.")
 
-    at = {n: i for i, n in enumerate(g.stages)}
-    for node, ps in g.parent_map().items():
-        for p in ps:
-            if node.split("::")[0] == p.split("::")[0] and at[p] > at[node]:
-                errors.append(
-                    f"ORDER  {node} is defined before {p}, but reads something {p} writes. "
-                    f"Within one file, definition order is run order.")
+    # The ORDER check lived here: a consumer defined before its producer in one file.
+    # A read names the declaration it reads, so that is a NameError where it is written and
+    # there is nothing left for a toposort to notice afterwards.
 
     return errors, warns
 
