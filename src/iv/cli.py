@@ -179,17 +179,31 @@ def drift(trace: Path = typer.Option(None, "--trace")):
 def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
         full: bool = typer.Option(False, "--full", help="every edge, not the reduction"),
         plain: bool = typer.Option(False, "--plain",
-                                   help="do not read the tree; leave every node grey")):
-    """Draw the DAG: colour is `iv status`, shape is what kind of dataset it is."""
+                                   help="do not read the tree; leave every node grey"),
+        html: bool = typer.Option(False, "--html",
+                                  help="an interactive page instead of a picture")):
+    """Draw the DAG: colour is `iv status`, shape is what kind of dataset it is.
+
+    `--html` writes a page instead: click a node for what it is for, what is stale about
+    it, and which nodes are upstream and downstream of it.
+    """
     from . import viz as _viz
     iv = _load()
     g = _graph.build(iv)
-    status = {}
+    status, state, maybe = {}, {}, set()
     if not plain:
         with _sh.snapshot():
             state = _staleness(iv, g)
             maybe = _downstream_of(g, state)
         status = _viz.states(state, maybe)
+    if html:
+        from . import web as _web
+        if out.suffix == ".png":
+            out = out.with_suffix(".html")
+        got = _web.write(g, out, status=status, state=state, maybe=maybe,
+                         title=iv.tree.name)
+        typer.echo(f"wrote {got} — open it")
+        return
     typer.echo(f"wrote {_viz.draw(g, out, full=full, status=status)}")
 
 
