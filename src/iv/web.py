@@ -35,9 +35,14 @@ from . import viz as _viz
 #: renderer and not a layout engine.
 CDN = ("https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js",)
 
-#: One row, and one character of a label, in px at the page's 11px font. The column gap is
+#: One row, and one character of a label, in px at the page's font size. The column gap is
 #: what is left over once the widest label in a column has been paid for.
-ROW, CHAR, MARKER, GAP = 44.0, 6.3, 24.0, 46.0
+#:
+#: These are the layout's half of the page's type and marker sizes, which live in the CSS —
+#: so they move TOGETHER. Bumping the font without CHAR runs labels into the next column;
+#: bumping the marker without ROW puts two of them on the same line.
+FONT, MARKER = 14, 26.0                  # px; must match `font-size` and `width` below
+ROW, CHAR, GAP = 52.0, FONT * 0.56, 30.0
 
 
 def payload(g, status: dict | None = None, state: dict | None = None,
@@ -219,11 +224,11 @@ __SCRIPTS__
 <style>
 :root {
   --bg:#fbfbfa; --panel:#fff; --ink:#1a1a1a; --dim:#6b6b6b; --line:#e3e1dd;
-  --sel:#1a1a1a; --up:#5b8def; --down:#c2410c;
+  --sel:#1a1a1a; --up:#5b8def; --down:#c2410c; --edge:#7a7a7a;
 }
 @media (prefers-color-scheme:dark){:root{
   --bg:#16171a; --panel:#1e2024; --ink:#e8e6e3; --dim:#9a9a9a; --line:#2e3136;
-  --sel:#e8e6e3; --up:#7ba3f5; --down:#f97316;}}
+  --sel:#e8e6e3; --up:#7ba3f5; --down:#f97316; --edge:#8f9298;}}
 *{box-sizing:border-box}
 body{margin:0;height:100vh;display:flex;background:var(--bg);color:var(--ink);
   font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -260,6 +265,7 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);
 <div id="bar">
   <input id="q" placeholder="filter datasets…" autocomplete="off">
   <span class="key" id="legend"></span>
+  <span class="key" id="reset" style="cursor:pointer">reset view</span>
 </div>
 <div id="side"><h1>__TITLE__</h1><p class="hint" id="side-body">
 Click a node. Its <b style="color:var(--up)">upstreams</b> and
@@ -268,7 +274,23 @@ far back, and everything a rebuild would carry forward.</p></div>
 <script>
 const DATA = __DATA__, C = __COLOURS__;
 // Every node arrives with a position, so there is nothing to lay out — see `_positions`.
-const LAYOUT = {name:'preset', fit:true, padding:36};
+const LAYOUT = {name:'preset', fit:false};
+
+// A pipeline is WIDE — nine columns deep and five rows tall here, far more there — so
+// fitting the whole thing into the viewport sets the zoom from the width and the type ends
+// up small however large it was drawn. Making the markers and the font bigger did nothing
+// for exactly this reason: fit cancelled it.
+//
+// So: fit, but not below the point where a label stops being readable. Under that floor
+// the graph starts at its ROOTS, which is the end you read from, and you pan right.
+const FLOOR = 0.8;
+function land(){
+  cy.fit(undefined, 36);
+  if (cy.zoom() >= FLOOR) return;
+  cy.zoom(FLOOR);
+  const b = cy.elements().boundingBox(), h = cy.height();
+  cy.pan({x: 36 - b.x1 * FLOOR, y: h / 2 - (b.y1 + b.h / 2) * FLOOR});
+}
 const byId = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
 
 document.getElementById('legend').innerHTML = ['stale','maybe','current','source']
@@ -284,33 +306,40 @@ const cy = cytoscape({
   style: [
     {selector:'node', style:{
       'background-color': n => C[n.data('status')] || C.source,
-      'label':'data(label)', 'font-size':11, 'color':'var(--ink)',
-      'text-valign':'center','text-halign':'right','text-margin-x':6,
-      'width':16,'height':16,'border-width':0,
+      'label':'data(label)', 'font-size':14, 'color':'var(--ink)',
+      'text-valign':'center','text-halign':'right','text-margin-x':9,
+      'width':26,'height':26,'border-width':0,
       // SHAPE is kind, COLOUR is status — the same two channels the PNG uses, so a
       // reader of one is not learning a second vocabulary for the other.
       'shape': n => ({root:'square', terminal:'diamond'})[n.data('kind')] || 'ellipse',
     }},
     {selector:'edge', style:{
-      'width':1.2,'line-color':'var(--line)','target-arrow-color':'var(--line)',
-      'target-arrow-shape':'triangle','arrow-scale':.8,
+      'width':1.2,'line-color':'var(--edge)','target-arrow-color':'var(--edge)',
+      // Translucent, so a node reads as a node and fifty edges read as texture behind it.
+      // Opacity rather than a paler colour: it stays right in both themes, and a bundle of
+      // edges over the same path darkens, which is information.
+      'opacity':.35,
+      'target-arrow-shape':'triangle','arrow-scale':.9,
       // A long edge spanning several columns is drawn as an arc rather than a chord, so it
       // reads as going AROUND the columns it passes rather than through them.
       'curve-style':'unbundled-bezier','control-point-distances':[-18],
       'control-point-weights':[.5],
     }},
-    {selector:'.faded', style:{'opacity':.12,'text-opacity':0}},
-    {selector:'node.sel', style:{'border-width':3,'border-color':'var(--sel)',
-      'width':22,'height':22,'font-weight':'bold','z-index':99}},
-    {selector:'node.up', style:{'border-width':2,'border-color':'var(--up)'}},
-    {selector:'node.down', style:{'border-width':2,'border-color':'var(--down)'}},
-    {selector:'edge.up', style:{'line-color':'var(--up)','target-arrow-color':'var(--up)','width':2}},
-    {selector:'edge.down', style:{'line-color':'var(--down)','target-arrow-color':'var(--down)','width':2}},
+    {selector:'.faded', style:{'opacity':.07,'text-opacity':0}},
+    {selector:'node.sel', style:{'border-width':4,'border-color':'var(--sel)',
+      'width':34,'height':34,'font-weight':'bold','font-size':15,'z-index':99}},
+    {selector:'node.up', style:{'border-width':3,'border-color':'var(--up)'}},
+    {selector:'node.down', style:{'border-width':3,'border-color':'var(--down)'}},
+    // A highlighted edge is the answer to the question, so it comes back to full strength.
+    {selector:'edge.up', style:{'line-color':'var(--up)','target-arrow-color':'var(--up)',
+      'width':2.2,'opacity':.9,'z-index':10}},
+    {selector:'edge.down', style:{'line-color':'var(--down)','target-arrow-color':'var(--down)',
+      'width':2.2,'opacity':.9,'z-index':10}},
   ],
   layout: LAYOUT,
   wheelSensitivity:.2,
 });
-cy.ready(() => cy.fit(undefined, 40));
+cy.ready(land);
 
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML}
 
@@ -369,6 +398,11 @@ cy.on('tap', e => { if (e.target === cy) {
   document.getElementById('side-body').outerHTML =
     '<p class="hint" id="side-body">Click a node.</p>';
 }});
+
+document.getElementById('reset').onclick = () => {
+  cy.elements().removeClass('faded up down sel');
+  land();
+};
 
 document.getElementById('q').addEventListener('input', e => {
   const q = e.target.value.trim().toLowerCase();

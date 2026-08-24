@@ -290,3 +290,16 @@ def test_the_columns_are_the_same_with_and_without_the_reduction(built):
     full = {n["id"]: n["position"]["x"] for n in _web.payload(g)["nodes"]}
     cut = {n["id"]: n["position"]["x"] for n in _web.payload(g, reduce=True)["nodes"]}
     assert full == cut
+
+
+def test_the_layout_constants_match_the_css_they_are_meant_to_describe():
+    """`_positions` reserves space from FONT and MARKER; the page draws from `font-size`
+    and `width`. They are two statements of one number, and moving one without the other
+    is silent: the labels run into the next column, or two markers land on one line."""
+    import re
+    css = _web._PAGE
+    assert f"'font-size':{_web.FONT}," in css
+    assert f"'width':{int(_web.MARKER)},'height':{int(_web.MARKER)}," in css
+    assert _web.ROW > _web.MARKER, "a row has to be taller than the marker in it"
+    assert _web.CHAR > _web.FONT * 0.5, "labels need most of the font size per character"
+    assert re.search(r"const FLOOR = 0\.\d+;", css), "the zoom floor keeps the type legible"
