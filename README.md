@@ -160,6 +160,27 @@ Partition-relative selectors take their key from the stage's `part=` declaration
 `optional=True` permits a selector to match no shard. `as_paths=True` gives the function
 the selected file paths instead of loaded values.
 
+### Parquet schema contracts
+
+An important sharded dataset can declare its exact Polars schema in Python:
+
+```python
+FEATURES = iv.dataset(
+    "processed/features/",
+    why="model feature matrix",
+    schema={"season": pl.String, "player_id": pl.Int64, "z": pl.Int64},
+)
+```
+
+`schema=` is also available on `iv.source(...)` and `@iv.data(...)`. Every selected shard
+must have the declared ordered columns and types; every `iv.writes(...)` commit is checked
+before it reaches the data tree. The contract's digest is part of the derivation key, so a
+schema change makes existing shards stale without changing the filename format.
+
+Rebuild a partitioned schema migration with `for_each(...)`. New-schema shards commit one
+at a time, but a read spanning an old shard fails until every selected shard conforms. Raw
+datasets without `schema=` retain the permissive union read and `iv verify` drift report.
+
 ### Formats and manual writes
 
 The return value must round-trip: a cached call should receive the same type a fresh call
@@ -183,13 +204,14 @@ def page(out):
 ## Safety guarantees
 
 `iv` prefers an error to a silently incomplete dependency graph. It rejects undeclared I/O
-within the data tree, undeclared function parameters, a second producer for the same shard,
+within the data tree through normal stdlib operations (`open`, `pathlib`, `os`, and
+`shutil`) and optional dataframe readers, undeclared function parameters, a second producer for the same shard,
 partition-relative reads from an unpartitioned stage, non-optional reads that select
 nothing, and stray files in dataset directories. A stage also cannot invoke another stage
 from inside its body; express that relationship as a declared read instead.
 
-Each read requires a short `why=` explanation. It is shown in diagnostics and lives next
-to the dependency it describes.
+Each read requires a short `why=` explanation of at most 280 characters. It is shown in
+diagnostics and lives next to the dependency it describes.
 
 ## CLI
 

@@ -72,11 +72,35 @@ def save_value(value: object, path, ext: str) -> None:
 _WRITERS = (".parquet", ".json", ".pkl", ".html", ".txt")
 
 
+def schema_contract(schema, ext: str, dataset: str) -> tuple | None:
+    """A declared Parquet shape, kept dependency-free until somebody opts into it."""
+    if schema is None:
+        return None
+    if ext != ".parquet":
+        raise DeclError(f"{dataset}: schema= is only for .parquet datasets, not {ext}.")
+    try:
+        import polars as pl
+    except ImportError as e:
+        raise DeclError(f"{dataset}: schema= needs the data extra (polars).") from e
+    try:
+        got = pl.Schema(schema)
+    except (TypeError, ValueError) as e:
+        raise DeclError(
+            f"{dataset}: schema= is a Polars schema or ordered {{column: dtype}} mapping; "
+            f"got {schema!r}.") from e
+    return tuple((str(name), str(dtype)) for name, dtype in got.items())
+
+
 def load_value(paths, ext: str):
     """The other half of the round trip. `paths` is what `Invalidator.reads` handed back."""
     if ext == ".parquet":
         import polars as pl
-        return pl.read_parquet([str(p) for p in paths])
+        files = [str(p) for p in paths]
+        if len(files) == 1:
+            return pl.read_parquet(files[0])
+        return pl.concat(
+            [pl.scan_parquet(f) for f in files], how="diagonal_relaxed"
+        ).collect()
     if len(paths) != 1:
         raise StateError(
             f"a {ext} dataset was selected across {len(paths)} shards. Only .parquet is "
@@ -153,6 +177,7 @@ class Dataset:
     allow_missing: bool = False
     part: tuple = ()
     why: str = ""
+    schema: tuple | None = None
     #: True when this came from `iv.dataset(...)` — a declaration on its own line, which a
     #: stage names rather than restates. False when a stage declared the path inline in its
     #: own `output=`, which is the one-writer case. The difference is what lets a second
@@ -179,14 +204,14 @@ class Dataset:
                 f"{self.dataset}: shard() names the literal partition this stage writes — "
                 f"shard(source='intl').")
         return Dataset(self.dataset, self.ext, self.allow_missing,
-                       _fixed(part, self.dataset), self.why, self.standalone)
+                       _fixed(part, self.dataset), self.why, self.schema, self.standalone)
 
     def __repr__(self) -> str:
         p = " " + ",".join(f"{k}={v}" for k, v in self.part) if self.part else ""
         return f"<iv dataset {self.dataset}{p}>"
 
 
-def _outputs(spec, ext, allow_missing) -> dict:
+def _outputs(spec, ext, allow_missing, schema=None) -> dict:
     """`output=` as {key: Dataset}.
 
     A bare string is one dataset declared where it is produced, which is the common case
@@ -201,7 +226,7 @@ def _outputs(spec, ext, allow_missing) -> dict:
     if spec is None:
         return {}
     if isinstance(spec, (str, Dataset, Source)):
-        d = _dataset(spec, ext, allow_missing)
+        d = _dataset(spec, ext, allow_missing, schema)
         return {d.dataset: d}
     if not isinstance(spec, dict) or not spec:
         raise DeclError(
@@ -222,15 +247,18 @@ def _fixed(part, dataset) -> tuple:
     return tuple(sorted((str(k), str(v)) for k, v in part.items()))
 
 
-def _dataset(v, ext, allow_missing) -> Dataset:
+def _dataset(v, ext, allow_missing, schema=None) -> Dataset:
     if isinstance(v, Dataset):
+        if schema is not None:
+            raise DeclError(f"{v.dataset}: schema= belongs on its iv.dataset declaration.")
         return Dataset(_decl._canon(v.dataset), v.ext, v.allow_missing, v.part, v.why,
-                       v.standalone)
+                       v.schema, v.standalone)
     if isinstance(v, Source):
         raise DeclError(
             f"{v.dataset} was declared a source — something outside this pipeline puts it "
             f"there — so no stage here writes it. Declare it with iv.data(...) instead.")
-    return Dataset(_decl._canon(v), ext, allow_missing)
+    d = _decl._canon(v)
+    return Dataset(d, ext, allow_missing, schema=schema_contract(schema, ext, d))
 
 
 class Source:
@@ -244,9 +272,10 @@ class Source:
     dataset that can be pointed at.
     """
 
-    def __init__(self, dataset: str, *, why: str, external=None) -> None:
+    def __init__(self, dataset: str, *, why: str, external=None, schema=None) -> None:
         self.dataset = _decl._canon(dataset)
         self.why = _decl._why(why, self.dataset)
+        self.schema = schema_contract(schema, _sh.EXT, self.dataset)
         self.externals = _externals(external, self.dataset)
         self.__name__ = self.dataset.rstrip("/").rsplit("/", 1)[-1]
 
@@ -266,9 +295,9 @@ class Asset:
     def __init__(self, pipeline, output, fn, *, why: str,
                  part=None, ext: str = _sh.EXT, allow_missing: bool = False, if_needed: bool = True,
                  once: bool = False, split: bool = False, single: bool = True,
-                 external=None) -> None:
+                 external=None, schema=None) -> None:
         self.pipeline = pipeline
-        self.outputs = _outputs(output, ext, allow_missing)
+        self.outputs = _outputs(output, ext, allow_missing, schema)
         self.single = single
         self.fn = fn
         self.acts_only = not self.outputs
@@ -593,6 +622,7 @@ class Asset:
                 raise StateError(
                     f"{o.dataset} has no shard for "
                     f"{_sh.encode_part(part) or '(one shard)'} — it was not built.")
+            iv._validate_schema(o.dataset, [got])
             return load_value([got.path], got.ext)
 
     def for_each(self, over) -> list[str]:

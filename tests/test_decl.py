@@ -103,6 +103,12 @@ def test_why_is_required():
             make(_Declared("raw/box/"), why="")
 
 
+def test_why_is_one_tweet_or_shorter():
+    with pytest.raises(DeclError, match="280"):
+        decl.all_of(_Declared(), why="x" * 281)
+    assert decl.all_of(_Declared(), why="x" * 280).why == "x" * 280
+
+
 def test_a_dataset_must_be_a_relative_path():
     with pytest.raises(DeclError, match="not a relative dataset path"):
         decl.all_of(_Declared("s3://bucket/box/"), why="x")

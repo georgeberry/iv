@@ -320,12 +320,18 @@ def _move(src: Path, dst) -> None:
 
 
 def schemas_of(shards: Iterable[Shard]) -> dict[tuple, list[str]]:
-    import polars as pl
     out: dict[tuple, list[str]] = {}
     for s in shards:
-        cols = tuple(pl.read_parquet_schema(str(s.path)).items())
+        cols = schema_of_file(s.path)
         out.setdefault(cols, []).append(s.part_str)
     return out
+
+
+def schema_of_file(path) -> tuple:
+    """The ordered Polars schema of a Parquet file, in a stable comparable shape."""
+    import polars as pl
+    schema = pl.read_parquet_schema(str(path))
+    return tuple((str(name), str(dtype)) for name, dtype in schema.items())
 
 
 def gc(dataset_dir, *, keep: set[str] | None = None) -> list[str]:

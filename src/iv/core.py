@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import builtins
+import io
 import os
+import shutil
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -20,6 +23,24 @@ from .paths import mkpath
 _ACTIVE: list = []
 
 
+def _path_text(target) -> str | None:
+    """The path-like arguments stdlib I/O accepts; file descriptors are not paths."""
+    if isinstance(target, int):
+        return None
+    try:
+        return os.fspath(target)
+    except TypeError:
+        return None
+
+
+def _in_tree(target, base) -> bool:
+    s = _path_text(target)
+    if s is None or base is None:
+        return False
+    root = str(base).rstrip("/")
+    return s == root or s.startswith(root + "/")
+
+
 def _check_declared(target) -> None:
     """Reading inside a pipeline's tree without going through `iv.reads()` raises.
 
@@ -27,18 +48,59 @@ def _check_declared(target) -> None:
     change and the artifact never rebuilds. Nothing detects that afterwards: the read
     succeeds and the number is simply wrong.
     """
-    s = str(target)
+    s = _path_text(target)
+    if s is None:
+        return
     for iv in _ACTIVE:
         if s in iv._handed_out or iv._depth:
             return
     for iv in _ACTIVE:
         for base in (iv.out_tree, iv.tree):
-            if base and s.startswith(str(base)):
+            if _in_tree(s, base):
                 raise DeclError(
                     f"{s} is inside the data tree but was not handed back by iv.reads(). "
                     f"An undeclared read is absent from the graph and from the recorded "
                     f"inputs, so its source can change and this will never rebuild. "
                     f"Declare it: iv.reads('<dataset>/', why='...').")
+
+
+def _check_write(target) -> None:
+    """A stage may mutate the data tree only through ``iv.writes()``.
+
+    The check is deliberately about an active stage, not all code in a process: setup and
+    repair tools may create roots before a stage runs. Inside a stage, however, a direct
+    write cannot be named, staged, fingerprinted, or recorded correctly.
+    """
+    s = _path_text(target)
+    if s is None:
+        return
+    for iv in _ACTIVE:
+        if iv._depth or s in iv._staged:
+            return
+    for iv in _ACTIVE:
+        if s in iv._handed_out:
+            raise DeclError(
+                f"{s} was handed back by iv.reads() and is being written to. A shard's "
+                f"name is a fingerprint of its contents, so overwriting one in place makes "
+                f"the name a lie that nothing can detect. Write through iv.writes().")
+        if iv._in_step and any(_in_tree(s, base) for base in (iv.out_tree, iv.tree)):
+            raise DeclError(
+                f"{s} is inside the data tree and is being written outside iv.writes(). "
+                f"A direct write has no declared output, staged commit, or fingerprinted "
+                f"name. Write it through iv.writes(...), or write outside the data tree.")
+
+
+@contextmanager
+def _internal_io():
+    """Let a wrapped stdlib helper perform its own opens after its boundary was checked."""
+    with ExitStack() as stack:
+        for iv in _ACTIVE:
+            stack.enter_context(iv.bookkeeping())
+        yield
+
+
+def _stage_is_running() -> bool:
+    return any(iv._in_step and not iv._depth for iv in _ACTIVE)
 
 
 class Invalidator:
@@ -79,6 +141,7 @@ class Invalidator:
         self._plain: set[str] = set()
         self._externals: list[str] = []
         self._handed_out: set[str] = set()
+        self._staged: set[str] = set()
         # Undeclared I/O against the data tree raises. Not opt-in: an undeclared
         # WRITE makes a shard's fingerprint-name a lie, and an undeclared READ is
         # absent from the recorded inputs, so its source can change forever and
@@ -107,6 +170,8 @@ class Invalidator:
         #: before the stage that writes it exists. A stage's inline `output="..."` is a
         #: declaration too; it just has nowhere else to be said.
         self._datasets: dict[str, _assets.Dataset] = {}
+        # dataset -> its optional, exact Parquet schema contract.
+        self._schemas: dict[str, tuple | None] = {}
 
     def __repr__(self) -> str:
         return f"<Invalidator {self.tree}>"
@@ -180,7 +245,37 @@ class Invalidator:
             self.record("io", op="read", rel=name, why=why, n=len(sel),
                         update_file_on_disk=update_file_on_disk)
         self._handed_out.update(str(s.path) for s in sel)
+        with self.bookkeeping():
+            self._validate_schema(name, sel)
         return [s.path for s in sel]
+
+    def _schema(self, dataset: str) -> tuple | None:
+        return self._schemas.get(_canon(dataset))
+
+    def _validate_schema(self, dataset: str, shards) -> None:
+        """Every selected shard must meet its declared Python contract."""
+        contract = self._schema(dataset)
+        if contract is None:
+            return
+        actual = [(s.part_str, _sh.schema_of_file(s.path)) for s in shards]
+        bad = [(part, got) for part, got in actual if got != contract]
+        if not bad:
+            return
+        parts = ", ".join(p or "(unpartitioned)" for p, _ in bad)
+        raise StateError(
+            f"{_canon(dataset)} has shard(s) outside its declared schema: {parts}. "
+            f"This is a schema migration in progress: rebuild those shard(s) to the "
+            f"schema declared in Python before reading them.")
+
+    def _validate_staged_schema(self, dataset: str, staged) -> None:
+        contract = self._schema(dataset)
+        if contract is None:
+            return
+        actual = _sh.schema_of_file(staged)
+        if actual != contract:
+            raise DeclError(
+                f"{_canon(dataset)} produced a Parquet schema different from its declared "
+                f"schema. Expected {dict(contract)!r}; got {dict(actual)!r}.")
 
     def _check_updates_own(self, name: str) -> None:
         """`update_file_on_disk=` may only name a dataset this same stage writes.
@@ -206,6 +301,7 @@ class Invalidator:
             f"read it normally.")
 
     def _enforce_writes(self) -> None:
+        self._patch_openers()
         owners = [Path]
         try:
             from cloudpathlib import CloudPath
@@ -218,19 +314,91 @@ class Invalidator:
                 if fn is None or getattr(fn, "_iv_checked", False):
                     continue
                 setattr(owner, name, self._checked_write(owner, name, fn))
+        for name in ("remove", "unlink", "rmdir", "mkdir", "makedirs",
+                     "rename", "replace"):
+            fn = getattr(os, name, None)
+            if fn is None or getattr(fn, "_iv_checked", False):
+                continue
+            setattr(os, name, self._checked_os_mutation(name, fn))
+        for name in ("copyfile", "copy", "copy2", "copytree", "move", "rmtree"):
+            fn = getattr(shutil, name, None)
+            if fn is None or getattr(fn, "_iv_checked", False):
+                continue
+            setattr(shutil, name, self._checked_shutil(name, fn))
+
+    @staticmethod
+    def _patch_openers() -> None:
+        """Cover the two common stdlib escape hatches as well as ``Path.open``."""
+        for owner, name in ((builtins, "open"), (io, "open"), (os, "open")):
+            fn = getattr(owner, name)
+            if getattr(fn, "_iv_checked", False):
+                continue
+            if owner is os:
+                patched = Invalidator._checked_os_open(fn)
+            else:
+                patched = Invalidator._checked_open(fn)
+            setattr(owner, name, patched)
 
     @staticmethod
     def _checked_write(owner, name, fn):
         def patched(target, *a, **kw):
-            writing = name != "open" or "w" in (a[0] if a else kw.get("mode", "r")) \
-                or "a" in (a[0] if a else kw.get("mode", "r"))
-            if writing and any(str(target) in iv._handed_out for iv in _ACTIVE):
-                raise DeclError(
-                    f"{target} was handed back by iv.reads() and is being written to. A "
-                    f"shard's name is a fingerprint of its contents, so overwriting one "
-                    f"in place makes the name a lie that nothing can detect. Write "
-                    f"through iv.writes().")
+            mode = a[0] if a else kw.get("mode", "r")
+            if name != "open" or any(flag in mode for flag in ("w", "a", "x", "+")):
+                _check_write(target)
             return fn(target, *a, **kw)
+        patched._iv_checked = True
+        return patched
+
+    @staticmethod
+    def _checked_open(fn):
+        def patched(file, *a, **kw):
+            mode = a[0] if a else kw.get("mode", "r")
+            if any(flag in mode for flag in ("w", "a", "x", "+")):
+                _check_write(file)
+            else:
+                _check_declared(file)
+            return fn(file, *a, **kw)
+        patched._iv_checked = True
+        return patched
+
+    @staticmethod
+    def _checked_os_open(fn):
+        def patched(path, flags, *a, **kw):
+            writing = flags & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC)
+            (_check_write if writing else _check_declared)(path)
+            return fn(path, flags, *a, **kw)
+        patched._iv_checked = True
+        return patched
+
+    @staticmethod
+    def _checked_os_mutation(name, fn):
+        def patched(path, *a, **kw):
+            if not _stage_is_running():
+                return fn(path, *a, **kw)
+            _check_write(path)
+            if name in ("rename", "replace") and a:
+                _check_write(a[0])
+            return fn(path, *a, **kw)
+        patched._iv_checked = True
+        return patched
+
+    @staticmethod
+    def _checked_shutil(name, fn):
+        def patched(src, *a, **kw):
+            if _stage_is_running():
+                if name == "rmtree":
+                    _check_write(src)
+                elif a:
+                    dst = a[0]
+                    _check_declared(src)
+                    _check_write(dst)
+                    if name == "move":
+                        _check_write(src)
+            # shutil implements its public operation with more file operations. Those are
+            # implementation detail, not extra user reads, and have already crossed the
+            # boundary above.
+            with _internal_io():
+                return fn(src, *a, **kw)
         patched._iv_checked = True
         return patched
 
@@ -285,8 +453,17 @@ class Invalidator:
                 if actual != shard.fp:
                     out.append(f"{shard.name}: contents fingerprint {actual}, name says "
                                f"{shard.fp} — the file was changed after it was committed")
-            by_schema = _sh.schemas_of(live.values()) if len(live) > 1 else {}
-            if len(by_schema) > 1:
+            contract = self._schema(dataset)
+            by_schema = _sh.schemas_of(live.values()) if live else {}
+            if contract is not None:
+                bad = [part or "(unpartitioned)" for part, cols in
+                       ((part, _sh.schema_of_file(shard.path)) for part, shard in live.items())
+                       if cols != contract]
+                if bad:
+                    out.append(
+                        f"SCHEMA CONTRACT: {_canon(dataset)} has shard(s) outside the declared schema: "
+                        f"{', '.join(sorted(bad))}.")
+            elif len(by_schema) > 1:
                 groups = sorted(by_schema.items(), key=lambda kv: -len(kv[1]))
                 base = set(c for c, _ in groups[0][0])
                 lines = []
@@ -341,7 +518,8 @@ class Invalidator:
                 raise
             if got:
                 pairs.append((name, _sh.dataset_id(got)))
-        if not inputs:
+        contract = self._schema(dataset)
+        if not inputs and contract is None:
             return ""
         # DEDUPED, because the same upstream can arrive twice. A stage that branches —
         # the W draft and the NBA draft read the same box scores for different reasons —
@@ -350,7 +528,8 @@ class Invalidator:
         # `iv status` called such a stage stale forever while the run, asking the same
         # question the other way round, skipped it. Two answers is one too many.
         body = "|".join(f"{n}={i}" for n, i in sorted(set(pairs)))
-        return _sh._short(f"key:{dataset}|{_sh.encode_part(part)}|{body}")
+        schema = _sh._short(repr(contract)) if contract is not None else ""
+        return _sh._short(f"key:{dataset}|{_sh.encode_part(part)}|schema={schema}|{body}")
 
 
     @contextmanager
@@ -359,8 +538,10 @@ class Invalidator:
         name = _canon(dataset)
         _why(why, name)
         part = self._part if part is None else part
-        staged = _sh.stage(f"{_sh.encode_part(part) or 'all'}-{time.time_ns()}",
-                           self.stage_dir, ext)
+        with self.bookkeeping():
+            staged = _sh.stage(f"{_sh.encode_part(part) or 'all'}-{time.time_ns()}",
+                               self.stage_dir, ext)
+        self._staged.add(str(staged))
         started = time.time()
         try:
             yield staged
@@ -377,6 +558,14 @@ class Invalidator:
                 f"{name} was declared written but nothing was written to {staged}. Pass "
                 f"allow_missing=True if producing nothing is a legitimate outcome — then "
                 f"the shard stays absent and the next run tries again.")
+        with self.bookkeeping():
+            try:
+                self._validate_staged_schema(name, staged)
+            except BaseException:
+                if staged.exists():
+                    staged.unlink()
+                self._staged.discard(str(staged))
+                raise
         # The name is the record, so it has to be a true one. A read this stage really made
         # and did not declare would be absent from the key, which means its source could
         # change forever and nothing would rebuild — the exact failure the index used to
@@ -398,6 +587,7 @@ class Invalidator:
                     key=key, seconds=round(time.time() - started, 2))
         if not self._in_step:
             self._fresh_scope()
+        self._staged.discard(str(staged))
 
 
     def why_stale(self, dataset: str, part: dict | None = None, *,
@@ -463,7 +653,7 @@ class Invalidator:
     own_last_copy = staticmethod(_decl.own_last_copy)
 
     def dataset(self, dataset: str, *, why: str, part=None, ext: str = _sh.EXT,
-                allow_missing: bool = False) -> _assets.Dataset:
+                allow_missing: bool = False, schema=None) -> _assets.Dataset:
         """Declare a dataset without saying how it is built, so something can NAME it.
 
             XPM = iv.dataset("processed/xpm/", why="a rating per player per season")
@@ -491,7 +681,8 @@ class Invalidator:
         """
         d = _assets.Dataset(_canon(dataset), ext, allow_missing,
                             _assets._fixed(part, _canon(dataset)),
-                            _why(why, _canon(dataset)), standalone=True)
+                            _why(why, _canon(dataset)),
+                            _assets.schema_contract(schema, ext, _canon(dataset)), standalone=True)
         if d.dataset in self._sources:
             raise DeclError(
                 f"{d.dataset} was declared a source — something outside this pipeline puts "
@@ -511,11 +702,12 @@ class Invalidator:
                 f"output={dataset.strip('/').rsplit('/', 1)[-1].upper()} — or leave it "
                 f"there and drop this line. Not both.")
         self._datasets[d.dataset] = d
+        self._schemas[d.dataset] = d.schema
         return d
 
     def data(self, dataset, *, why: str, part=None, ext: str = _sh.EXT,
              allow_missing: bool = False, if_needed: bool = True, once: bool = False,
-             split: bool = False, external=None) -> Callable:
+             split: bool = False, external=None, schema=None) -> Callable:
         """The function that builds ONE dataset. The body returns its contents.
 
             @iv.data(dataset="processed/features/", why="per-season box features",
@@ -545,10 +737,10 @@ class Invalidator:
             return self._register(_assets.Asset(
                 self, dataset, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
-                split=split, single=True, external=external))
+                split=split, single=True, external=external, schema=schema))
         return declared
 
-    def source(self, dataset: str, *, why: str, external=None) -> _assets.Source:
+    def source(self, dataset: str, *, why: str, external=None, schema=None) -> _assets.Source:
         """Declare a dataset that arrives from outside, so a read can name it.
 
             pbp = iv.source("raw/pbp_official/", why="the official play-by-play dump")
@@ -557,7 +749,7 @@ class Invalidator:
             def panel(raw=iv.same_part(pbp, why="one season of it")):
                 ...
         """
-        src = _assets.Source(dataset, why=why, external=external)
+        src = _assets.Source(dataset, why=why, external=external, schema=schema)
         if src.dataset in self._sources:
             raise DeclError(
                 f"{src.dataset} is already declared a source: "
@@ -572,6 +764,7 @@ class Invalidator:
                 f"{self._assets[src.dataset].__name__!r}, so it does not arrive from "
                 f"outside. A dataset is declared once, as one thing or the other.")
         self._sources[src.dataset] = src
+        self._schemas[src.dataset] = src.schema
         return src
 
     def _register(self, asset: _assets.Asset) -> _assets.Asset:
@@ -603,9 +796,18 @@ class Invalidator:
                     f"share a dataset only by writing different partitions of it, each "
                     f"declared with a literal part=. Otherwise they race, and whichever "
                     f"runs last wins.")
+        for output in asset.outputs.values():
+            known = self._schemas.get(output.dataset)
+            if known is not None and output.schema is not None and known != output.schema:
+                raise DeclError(
+                    f"{output.dataset} has conflicting declared schemas. A dataset has one "
+                    f"contract, so declare it once with iv.dataset(..., schema=...).")
         self._assets[self._node_name(asset.fn)] = asset
         for name in asset.datasets:
             self._declared[name] = asset.triples()
+        for output in asset.outputs.values():
+            known = self._schemas.get(output.dataset)
+            self._schemas[output.dataset] = output.schema if output.schema is not None else known
         return asset
 
     def producers_of(self, dataset: str) -> list:

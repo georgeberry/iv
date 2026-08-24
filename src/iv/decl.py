@@ -29,6 +29,7 @@ from .errors import DeclError
 #: supply it — and that is what lets a shard's key be computed before its body runs, so
 #: nothing has to be written down.
 PART = "\x00PART"
+WHY_MAX_LEN = 280
 
 
 def _canon(dataset: str) -> str:
@@ -72,6 +73,11 @@ def _why(why: object, dataset: str) -> str:
         raise DeclError(
             f"{dataset} needs why= — one line on what it is for. It is required because "
             f"there is nowhere else for it to live, which is what stops it going stale.")
+    if len(why) > WHY_MAX_LEN:
+        raise DeclError(
+            f"{dataset} has a why= of {len(why)} characters; keep it to "
+            f"{WHY_MAX_LEN} or fewer. A why is the one-line reason for a dependency, "
+            f"not its whole history.")
     return why
 
 

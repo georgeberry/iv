@@ -558,6 +558,104 @@ def test_verify_is_quiet_when_every_shard_agrees(iv):
     assert iv.verify("raw/box/") == []
 
 
+# ── declared Parquet schemas ─────────────────────────────────────────────────
+
+def test_a_declared_schema_is_validated_on_write_and_read(iv):
+    schema = {"player": pl.Int64, "pts": pl.Int64}
+
+    @iv.data(dataset="processed/features/", why="feature matrix", schema=schema)
+    def features():
+        return pl.DataFrame({"player": [1], "pts": [2]})
+
+    assert features().schema == schema
+    assert iv.reads("processed/features/", why="the matrix")
+
+
+def test_a_declared_schema_refuses_a_wrong_output_before_commit(iv):
+    @iv.data(dataset="processed/features/", why="feature matrix",
+             schema={"player": pl.Int64})
+    def features():
+        return pl.DataFrame({"player": ["not an integer"]})
+
+    with pytest.raises(DeclError, match="declared schema"):
+        features()
+    assert not iv.resolve_out("processed/features/").exists()
+
+
+def test_a_source_schema_is_validated_when_filled_through_iv_writes(iv):
+    source = iv.source("raw/feed/", why="incoming feed", schema={"id": pl.Int64})
+
+    with pytest.raises(DeclError, match="declared schema"):
+        with iv.writes(source.dataset, why="received feed") as out:
+            pl.DataFrame({"id": ["wrong"]}).write_parquet(out)
+    assert not iv.resolve_out(source.dataset).exists()
+
+
+def test_each_output_of_a_multi_output_stage_keeps_its_own_schema(iv):
+    ratings = iv.dataset("processed/ratings/", why="player ratings",
+                         schema={"player": pl.Int64, "rating": pl.Float64})
+    summary = iv.dataset("processed/summary/", why="fit summary",
+                         schema={"n": pl.Int64})
+
+    @iv.step(output={"ratings": ratings, "summary": summary}, why="joint fit")
+    def fit():
+        return {"ratings": pl.DataFrame({"player": [1], "rating": [1.5]}),
+                "summary": pl.DataFrame({"n": [1]})}
+
+    assert fit() is True
+    assert iv.reads(ratings.dataset, why="ratings")
+    assert iv.reads(summary.dataset, why="summary")
+
+
+def test_schema_is_refused_for_a_non_parquet_dataset(iv):
+    with pytest.raises(DeclError, match="only for .parquet"):
+        iv.dataset("dump/page/", why="web page", ext=".html", schema={"a": pl.Int64})
+
+
+def test_a_schema_migration_rebuilds_partitions_one_at_a_time(iv, tmp_path):
+    old = {"season": pl.String, "pts": pl.Int64}
+    new = {"season": pl.String, "pts": pl.Int64, "z": pl.Int64}
+
+    @iv.data(dataset="processed/features/", why="feature matrix", part="season",
+             once=True, schema=old)
+    def old_features(season):
+        return pl.DataFrame({"season": [season], "pts": [1]})
+
+    old_features.for_each(["2024", "2025"])
+
+    migrated = Invalidator(tree=iv.tree, stage_dir=tmp_path / "new-stage", project=tmp_path)
+
+    @migrated.data(dataset="processed/features/", why="feature matrix", part="season",
+                   once=True, schema=new)
+    def new_features(season):
+        return pl.DataFrame({"season": [season], "pts": [1], "z": [2]})
+
+    assert new_features.for_each(["2024"]) == ["2024"]
+    with pytest.raises(StateError, match="schema migration"):
+        migrated.reads("processed/features/", why="all features")
+    assert new_features.for_each(["2025"]) == ["2025"]
+    assert len(migrated.reads("processed/features/", why="all features")) == 2
+
+
+def test_a_declared_schema_changes_a_once_artifacts_key(iv, tmp_path):
+    old = {"id": pl.Int64}
+    new = {"id": pl.Int64, "score": pl.Int64}
+
+    @iv.data(dataset="processed/model/", why="model input", once=True, schema=old)
+    def old_model():
+        return pl.DataFrame({"id": [1]})
+
+    old_model()
+    changed = Invalidator(tree=iv.tree, stage_dir=tmp_path / "new-stage", project=tmp_path)
+
+    @changed.data(dataset="processed/model/", why="model input", once=True, schema=new)
+    def new_model():
+        return pl.DataFrame({"id": [1], "score": [2]})
+
+    assert new_model.why_stale() is not None
+    assert new_model().schema == new
+
+
 def test_reading_shards_reproduces_a_total_sort_over_the_merged_frame(iv):
     """The property SVI minibatching depends on, checked rather than reasoned about.
 
@@ -732,6 +830,66 @@ def test_an_undeclared_read_of_the_data_tree_raises(iv):
 
     # Declared, so the same file is fine — and outside the tree is nobody's business.
     assert pl.read_parquet(iv.reads("raw/feed/", why="declared")).height == 3
+
+
+def test_builtin_open_catches_an_undeclared_read_inside_a_stage(iv):
+    seed(iv, "raw/feed/")
+    bare = next((iv.tree / "raw/feed").iterdir())
+
+    @iv.data(dataset="processed/out/", why="opens a file")
+    def build():
+        with open(bare, "rb"):
+            pass
+        return pl.DataFrame()
+
+    with pytest.raises(DeclError, match="not handed back by iv.reads"):
+        build()
+
+
+def test_os_open_catches_an_undeclared_read_inside_a_stage(iv):
+    import os
+
+    seed(iv, "raw/feed/")
+    bare = next((iv.tree / "raw/feed").iterdir())
+
+    @iv.data(dataset="processed/out/", why="opens a file descriptor")
+    def build():
+        fd = os.open(bare, os.O_RDONLY)
+        os.close(fd)
+        return pl.DataFrame()
+
+    with pytest.raises(DeclError, match="not handed back by iv.reads"):
+        build()
+
+
+def test_a_direct_write_inside_a_stage_is_refused(iv):
+    target = iv.tree / "raw/side-effect.txt"
+    target.parent.mkdir(parents=True)
+
+    @iv.data(dataset="processed/out/", why="tries a side write")
+    def build():
+        target.write_text("not a shard")
+        return pl.DataFrame()
+
+    with pytest.raises(DeclError, match="outside iv.writes"):
+        build()
+
+
+def test_shutil_copy_into_the_data_tree_is_refused_inside_a_stage(iv, tmp_path):
+    import shutil
+
+    source = tmp_path / "outside.txt"
+    source.write_text("outside")
+    target = iv.tree / "raw/copied.txt"
+    target.parent.mkdir(parents=True)
+
+    @iv.data(dataset="processed/out/", why="tries a side copy")
+    def build():
+        shutil.copyfile(source, target)
+        return pl.DataFrame()
+
+    with pytest.raises(DeclError, match="outside iv.writes"):
+        build()
 
 
 def test_an_optional_coverage_claim_is_answered_the_same_way_twice(iv):
