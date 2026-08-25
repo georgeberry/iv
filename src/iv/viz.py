@@ -12,18 +12,8 @@ from .graph import _overlaps        # noqa: E402
 
 
 def to_networkx(g) -> nx.DiGraph:
-    """The dataset graph, at the granularity the CHECKS reason about.
 
-    A dataset several stages write, each naming a literal partition, is one node PER
-    PARTITION. Collapsed into one, the played and unplayed halves of a prediction table
-    become the same thing — and a pair of stages that reads one half and writes the other
-    reads as a cycle it does not have. `parent_map` avoids that with `_overlaps`, so this
-    uses the same test: an edge only where the read could actually see the write.
 
-    Getting this wrong meant `iv check` said the graph was clean while the picture drew a
-    cycle in it and announced cutting an edge to lay it out. Of the two, the picture was
-    the one lying.
-    """
     d = nx.DiGraph()
     writes: dict[str, list] = {}
     for node, stage in g.stages.items():
@@ -75,16 +65,13 @@ def _layers(d: nx.DiGraph) -> dict[str, int]:
 
 
 def short(node) -> str:
-    """The dataset's last segment, and the shard it is if the dataset has more than one
-    stage writing it."""
+
+
     ds, part = node if isinstance(node, tuple) else (node, ())
     name = ds.rstrip("/").rsplit("/", 1)[-1]
     return f"{name} [{','.join(f'{k}={v}' for k, v in part)}]" if part else name
 
 
-#: COLOUR is status, and these are the colours `iv status` prints — green current, cyan
-#: maybe, yellow stale — so the picture and the report say the same thing in the same way.
-#: A dataset with no producer has no stage to ask, so it is not coloured, it is grey.
 STATUS = {
     "current": "#2a9d8f",
     "maybe": "#3aa8c1",
@@ -92,23 +79,17 @@ STATUS = {
     "source": "#9aa0a6",
 }
 
-#: SHAPE is what KIND of thing it is, which is a different question from whether it is
-#: current — so it gets a different channel rather than fighting for the same one.
+
 SHAPE = {
-    "root": "s",          # arrives from outside; nothing here produces it
-    "terminal": "D",      # read by something outside this pipeline
-    "derived": "o",       # built here and read here
+    "root": "s",
+    "terminal": "D",
+    "derived": "o",
 }
 
 
 def states(state: dict, maybe: set) -> dict:
-    """`iv status`'s answer per DATASET, as the names `STATUS` colours.
 
-    A node here is a dataset, and `iv status` answers per shard, so the shards are rolled up
-    to their worst — one stale shard makes the dataset stale in the picture. Rolled up here
-    rather than in the CLI so the picture and the report cannot drift into naming the same
-    three things differently.
-    """
+
     out = {}
     for name, shards in state.items():
         if any(why for why in shards.values()):
@@ -121,13 +102,8 @@ def states(state: dict, maybe: set) -> dict:
 
 
 def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:
-    """The DAG, coloured by status and shaped by kind.
 
-    Two channels, because they are two questions. `iv status` answers "is this current",
-    and that is the colour, in the colours it prints. What KIND of dataset it is — arrives
-    from outside, built here, read by something else — does not change day to day, and it
-    is the shape.
-    """
+
     d = to_networkx(g)
     if not full:
         if find_cycle(d) is None:
@@ -135,9 +111,7 @@ def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:
             reduced.add_nodes_from(d.nodes(data=True))
             d = reduced
 
-    # Which edge to cut is decided by run order — and `order()` is a toposort, so it
-    # raises on exactly the graph this loop exists to handle. A cycle is when the picture
-    # is most wanted, so fall back to declaration order rather than crashing on it.
+
     try:
         order = {n: i for i, n in enumerate(g.order())}
     except IvError:
@@ -157,10 +131,7 @@ def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:
 
     status = status or {}
 
-    # A COLUMN IS AS WIDE AS ITS OWN LONGEST LABEL. Sizing every column for the longest
-    # label in the whole graph is most of a page of white space, because one dataset called
-    # possessions_with_lineups should not set the gap between two called xpm and wvorp.
-    # One data unit is about one inch, so the figure can be sized from the same numbers.
+
     CHAR, GAP = 0.092, 0.78
     xs, x = {}, 0.0
     for k in sorted(by_layer):
@@ -184,13 +155,12 @@ def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:
         nx.draw_networkx_nodes(
             d, pos, ax=ax, nodelist=group, node_shape=marker, node_size=260,
             edgecolors="#ffffff", linewidths=0.8,
-            # A node is (dataset, shard) now, and `iv status` answers per dataset.
+
             node_color=[STATUS.get(status.get(n[0], "source"), STATUS["source"])
                         for n in group])
     for n, (x, y) in pos.items():
-        # Offset in POINTS, not data units: the node is drawn at a fixed size in points, so
-        # a gap measured in data units closes up whenever the graph is small enough for the
-        # figure to be stretched to fit the legend.
+
+
         ax.annotate(short(n), (x, y), textcoords="offset points", xytext=(12, 0),
                     fontsize=11, va="center", ha="left", color="#222")
 
@@ -199,8 +169,8 @@ def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:
            for name, c in STATUS.items()]
     key += [Line2D([], [], color="#666", marker=m, linestyle="", markersize=8, label=k)
             for k, m in SHAPE.items()]
-    # Capped, so a small graph is not stretched sideways to fit one row of legend — and
-    # anchored ABOVE the axes rather than inside them, where it lands on the first column.
+
+
     ncol = min(len(key), 4)
     ax.legend(handles=key, loc="lower left", bbox_to_anchor=(0, 1.0), ncol=ncol,
               frameon=False, fontsize=9, handletextpad=0.3, columnspacing=1.1)

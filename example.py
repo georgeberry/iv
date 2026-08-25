@@ -1,57 +1,4 @@
-"""Every shape a real pipeline uses, in one file. Run it: `uv run python example.py`
 
-Modelled on a working sports-model pipeline, so the awkward cases are here rather than the
-tidy ones:
-
-    raw/bios/                declared with iv.source: nothing here builds it
-    config/today/            the clock, as a file — a "re-run daily" policy, stored
-    config/model/            the knobs, as a file — a model version, stored
-    raw/box_settled/         finished seasons, fetched once each
-    raw/box_live/            the season being played, polled — ONE shard
-    raw/box/                 the two halves, per season, put together
-    derived/schedule/        an UPDATE: read the copy on disk, amend it, write it back
-    derived/box_features/    ONE computation, split into a shard per season
-    derived/college/         THREE stages, three blocks, one dataset — declared once
-    processed/xpm/ + 3 more  ONE joint fit, four tables — each declared, so reads can name
-                             them without knowing which key the body returns them under
-    processed/rapm_fit/      not every artifact is a table: a pickled model object
-    processed/xpm_eoy/       walk-forward, INCLUSIVE: fit through the end of season T
-    processed/rookie/        walk-forward, EXCLUSIVE: fit on seasons strictly before T
-    processed/predictions/   two stages, the played and unplayed halves — declared once,
-                             so a reader says which half by SELECTOR, not by writer
-    dump/site/               terminal JSON, written through `out`
-
-THERE IS NO INDEX. A derived shard is named `<part>.<key>.<fp>`: the key is a digest of the
-upstreams it was built from, the fp a digest of its bytes. "Is it current" recomputes the
-key from the declared upstreams and the files on disk and asks whether that name is here —
-so the record cannot go missing, go stale, or disagree with the tree.
-
-WHAT IS DECLARED. Upstreams are parameter defaults, so `inspect.signature` reads the whole
-declaration — datasets, selector, partition key — with nothing executed and no source text
-needed. The walk-forward bounds below are DATA, which is what lets a shard's key be
-computed before its body runs.
-
-THREE WORDS, AND WHICH ONE YOU REACH FOR IS NOT A STYLE CHOICE.
-
-    @iv.data     builds ONE dataset. The body returns its contents, and a read names the
-                 STAGE — `iv.all_of(box_features, why="...")`. Almost everything is this.
-
-    @iv.step     builds SEVERAL, or none. `output=` is a dict and the body returns one
-                 keyed the same way, so one expensive fit produces four tables without
-                 being run four times.
-
-    iv.dataset   declares a dataset and says nothing about how it is built. For the two
-                 cases where no single stage speaks for the name:
-
-                 a stage with more OUTPUTS than names. `xpm` writes four tables, so a read
-                 cannot name the stage — and the keys ("ratings") are labels private to
-                 what that one body returns, not names the datasets have. `xpm["ratings"]`
-                 works, and says what this stage calls the thing rather than what it is.
-
-                 a dataset with more WRITERS than one. Three stages write derived/college/
-                 and two write processed/predictions/; naming any one of them for a read
-                 that takes every shard says one thing and does another.
-"""
 
 import datetime as dt
 import json
@@ -67,18 +14,12 @@ root = pathlib.Path(tempfile.mkdtemp()) / "data"
 iv = Invalidator(tree=root, project=root.parent)
 
 SEASONS = ["2022", "2023", "2024"]
-LIVE = "2024"          # the season being played; the rest have settled
+LIVE = "2024"
 TODAY = dt.date(2026, 8, 21)
 RIDGE = 4.0
 PTS = {"2022": 10, "2023": 20, "2024": 30, "2025": 40}
 ran = []
 
-
-# ── what arrives from outside ────────────────────────────────────────────────
-#
-# Nothing here builds it, so there is no body and no skip check — but it is declared all
-# the same, and a read names it exactly the way it names a stage. There is no category of
-# dataset you refer to by writing its path a second time.
 
 bios = iv.source(
     "raw/bios/",
@@ -87,37 +28,22 @@ bios = iv.source(
 )
 
 
-# ── metadata is a file, and a root always runs ───────────────────────────────
-
-
 @iv.data(
     dataset="config/today/",
     why="the day, so a polled feed re-fetches once a day",
     ext=".json",
 )
 def today():
-    """No upstream, so nothing on disk could say the date moved — it runs every time.
 
-    That is what lets the outside world in. The commit is content-addressed, so a run on
-    the same day writes the same bytes and moves nothing downstream.
-    """
+
     return {"date": TODAY.isoformat()}
 
 
 @iv.data(dataset="config/model/", why="the knobs the fit shape depends on", ext=".json")
 def model_config():
-    """Not a version string, not a label — a shard, declared as an upstream by whoever
-    answers to it. `iv graph` draws the edge; a change moves exactly those stages."""
+
+
     return {"ridge": RIDGE, "epochs": 300, "seed": 0}
-
-
-# ── the settled half and the live half, and putting them together ─────────────
-#
-# A feed has two halves that behave nothing alike, and the shape below is the whole reason
-# a daily run stays cheap. A FINISHED season never changes: fetch it once. The season being
-# played changes all day: poll it. Declared as one partitioned dataset reading the clock,
-# every season would be stale the moment the day turned — twenty years of history rebuilt
-# to pick up one afternoon. Declared as two datasets, the clock touches exactly one shard.
 
 
 @iv.data(
@@ -128,8 +54,8 @@ def model_config():
     external={"espn/feeds": "ESPN's per-season files"},
 )
 def box_settled(season):
-    """`once=True` is PER SHARD: a season already fetched is left alone, one added to the
-    list is fetched. Nothing polls it, because nothing about it moves."""
+
+
     ran.append(f"settled:{season}")
     return pl.DataFrame(
         {"season": [season] * 2, "player": [1, 2],
@@ -144,8 +70,8 @@ def box_settled(season):
     external={"espn/feeds": "ESPN's live feed"},
 )
 def box_live(clock=iv.all_of(today, as_paths=True, why="poll once a day")):
-    """ONE shard, named outright with a literal `part=`. It reads the clock, so it re-fetches
-    when the day turns — and it is the only thing that does."""
+
+
     ran.append("live")
     return pl.DataFrame(
         {"season": [LIVE] * 2, "player": [1, 2], "pts": [PTS[LIVE], PTS[LIVE] + 5]}
@@ -159,16 +85,10 @@ def box(
     settled=iv.same_part(box_settled, optional=True, why="a finished season"),
     live=iv.same_part(box_live, optional=True, why="the season being played"),
 ):
-    """Both halves are declared and one is used. A declaration resolves every read before
-    the body runs, so the half this season is not in has to be optional rather than absent —
-    and because the selector is `same_part`, a season only ever depends on its OWN shard of
-    either half. The day turning moves `raw/box_live/`, which moves this season and no other.
-    """
+
+
     ran.append(f"box:{season}")
     return live if season == LIVE else settled
-
-
-# ── an update: read your own last copy, amend it, write it back ───────────────
 
 
 @iv.data(
@@ -180,22 +100,14 @@ def schedule(
     clock=iv.all_of(today, why="scores land all day; re-check daily"),
     was=iv.own_last_copy(why="the copy this amends"),
 ):
-    """READ-MODIFY-WRITE, which used to need its own primitive.
 
-    `own_last_copy()` says: this is the copy on disk I am about to overwrite. It is recorded
-    for lineage and EXCLUDED from the comparison — otherwise the stage would be permanently
-    stale against its own last output, one step behind itself, forever. It names nothing
-    because it can only mean one thing: the output this stage declares, three lines up.
-    """
+
     ran.append("schedule")
     old = (
         was if was is not None else pl.DataFrame(schema={"day": pl.Utf8, "n": pl.Int64})
     )
     new = pl.DataFrame({"day": [TODAY.isoformat()], "n": [len(old) + 1]})
     return pl.concat([old, new]).unique(subset="day", keep="last").sort("day")
-
-
-# ── one computation, split into a shard per season ───────────────────────────
 
 
 @iv.data(
@@ -209,25 +121,12 @@ def box_features(
     sched=iv.all_of(schedule, why="which games count"),
     bio=iv.all_of(bios, as_paths=True, why="the body-shape columns"),
 ):
-    """The features have career-cumulative terms, so they are built in ONE pass and split.
 
-    `split=True` says the body returns {partition: value} — one expensive computation, many
-    shards, each of which downstream can then depend on separately.
-    """
+
     ran.append("box_features")
     bf = box.with_columns((pl.col("pts") * 2).alias("z"))
     return {str(s): rows for (s,), rows in bf.group_by("season", maintain_order=True)}
 
-
-# ── three stages, three blocks, one dataset ──────────────────────────────────
-#
-# Three single-output stages, so each is an `@iv.data` — but they write the same dataset,
-# and none of them owns it. So it is declared on its own line and all three name it.
-#
-# Without that a read has to name one of the three — `iv.all_of(ncaa_block, ...)` — which
-# collects all three blocks anyway, because a read of a dataset takes every shard of it. The
-# name said one thing and the read did another, and which of the three you happened to name
-# was arbitrary.
 
 COLLEGE = iv.dataset(
     "derived/college/", why="one row per amateur source, ranked against the pros"
@@ -242,9 +141,8 @@ COLLEGE = iv.dataset(
 def ncaa_block(
     bf=iv.all_of(box_features, why="the pro side to rank against")
 ):
-    """A LITERAL part= is how several stages share one dataset. Each owns exactly one shard,
-    so the graph can see they do not collide — without it, whichever ran last would win.
-    """
+
+
     ran.append("ncaa")
     return pl.DataFrame({"source": ["ncaa"], "n": [bf.height]})
 
@@ -266,19 +164,6 @@ def intl_block(bf=iv.all_of(box_features, why="the pro side")):
     return pl.DataFrame({"source": ["intl"], "n": [1]})
 
 
-# ── one fit, several outputs ─────────────────────────────────────────────────
-#
-# The one place `@iv.step` is right: four tables out of ONE fit. Split into four
-# single-output stages it would fit four times.
-#
-# So `output=` is a dict, and its keys are the names the BODY returns them under. Those are
-# labels private to this one function — "ratings" is not what the dataset is called, and it
-# could as well be "r". A read downstream can say `xpm["ratings"]`, which resolves to the
-# same dataset and the same edge in the graph, but it names a key next to none of the dict
-# it is a key of.
-#
-# Declared above, each output has a name, and a read says which dataset it means.
-
 XPM = iv.dataset("processed/xpm/", why="a rating per player per season")
 XPM_CAREER = iv.dataset("processed/xpm_career/", why="one row per player, career to date")
 XPM_SUMMARY = iv.dataset("processed/xpm_summary/", why="what the fit did, per season")
@@ -299,12 +184,8 @@ def xpm(
     bf=iv.all_of(box_features, why="the box prior, every season at once"),
     college=iv.all_of(COLLEGE, why="the college block, all three sources"),
 ):
-    """ONE expensive computation, four tables. Declaring them together is what stops the fit
-    being run once per output — and losing any one of them brings the whole fit back.
 
-    No selector on `bf`: every season at once. That is what makes this a JOINT fit rather
-    than a per-season one, and it is visible in the signature rather than buried in a body.
-    """
+
     ran.append("xpm")
     r = bf.group_by("player", maintain_order=True).agg(
         (pl.col("z") * knobs["ridge"]).mean()
@@ -326,12 +207,9 @@ def rapm_fit(
     knobs=iv.all_of(model_config, why="the fit shape"),
     bf=iv.all_of(box_features, why="the design matrix"),
 ):
-    """Not every artifact is a table. `.pkl` round trips whatever the body returned."""
+
     ran.append("rapm_fit")
     return {"coefs": [1.0, 2.0], "ridge": knobs["ridge"]}
-
-
-# ── walk-forward, two bounds ─────────────────────────────────────────────────
 
 
 @iv.data(
@@ -348,7 +226,7 @@ def xpm_eoy(
         why="the box matrix through the END of this season",
     ),
 ):
-    """INCLUSIVE: `le`, so season T's own rows are in its own fit and nothing later is."""
+
     ran.append(f"eoy:{season}")
     return bf.select(pl.lit(season).alias("season"), pl.col("z").mean())
 
@@ -362,19 +240,11 @@ def rookie(
     bf=iv.before_part(box_features, why="strictly before this cohort"),
     college=iv.all_of(COLLEGE, why="the college block"),
 ):
-    """EXCLUSIVE: `lt`. The bound picks FILES, so a cohort physically cannot open its own
-    season or a later one. A season backfilled BELOW the bound is picked up; one added
-    above it is not."""
+
+
     ran.append("rookie")
     return bf.select(pl.col("z").mean().alias("prior_mean"))
 
-
-# ── two stages, the played and unplayed halves of one dataset ────────────────
-#
-# The same shape as the college blocks, and the same reason to declare it: two writers,
-# neither of which speaks for the dataset. Below, `site` wants both halves and `calibration`
-# wants one — and with the dataset declared, each says which by SELECTOR rather than by
-# picking a writer's name and hoping it lines up.
 
 PREDICTIONS = iv.dataset("processed/predictions/", why="one predicted margin per game")
 
@@ -417,16 +287,12 @@ def calibration(
         why="played games only — an unplayed one has no residual",
     )
 ):
-    """`parts()` is an explicit COVERAGE CLAIM: a named partition that is not there is an
-    error rather than a quietly shorter read. `allow_missing=True` says producing nothing
-    is legitimate — the shard stays absent and the next run tries again."""
+
+
     ran.append("calibration")
     return (
         None if played.height == 0 else pl.DataFrame({"sigma": [float(played.height)]})
     )
-
-
-# ── terminal, written through `out` ──────────────────────────────────────────
 
 
 @iv.data(dataset="dump/site/", why="the payload the app renders", ext=".json")
@@ -439,8 +305,8 @@ def site(
     preds=iv.all_of(PREDICTIONS, why="every game, played and upcoming"),
     cal=iv.all_of(calibration, optional=True, why="the sigma, once there is one"),
 ):
-    """A body that takes `out` writes the file itself, and nothing is inferred about a
-    return value. That is the escape hatch for anything the formats do not cover."""
+
+
     ran.append("site")
     out.write_text(
         json.dumps(
@@ -449,7 +315,7 @@ def site(
                 "eoy": eoy.height,
                 "rookies": rk.height,
                 "games": preds.height,
-                "ridge": fit["ridge"],  # a .pkl, round-tripped
+                "ridge": fit["ridge"],
                 "calibrated": cal is not None,
             },
             indent=1,
@@ -457,11 +323,8 @@ def site(
     )
 
 
-# ── run it ────────────────────────────────────────────────────────────────────
-
-
 def build_all():
-    if not (root / "raw/bios").exists():          # a person drops this in; nothing builds it
+    if not (root / "raw/bios").exists():
         with iv.writes("raw/bios/", why="dropped in by hand") as out:
             pl.DataFrame({"player": [1, 2], "cm": [180, 191]}).write_parquet(out)
     today()
@@ -505,9 +368,7 @@ run("nothing changed")
 TODAY = dt.date(2026, 8, 22)
 run("a new day: the schedule is amended, and only what reads it follows")
 
-# A settled season is fetched ONCE, so a correction upstream is not seen and iv does not
-# pretend otherwise — `iv check` warns that raw/box_settled/ runs once, which is this said
-# in advance. Picking it up is a deliberate act: IV_FORCE=1, or delete the shard.
+
 PTS["2022"] = 999
 run("a SETTLED season is corrected upstream: fetched once, so nothing follows")
 
@@ -530,8 +391,6 @@ run("one of the fit's four outputs is deleted")
 tree()
 
 
-# ── what the tool knows, having run nothing ──────────────────────────────────
-
 from iv import graph as _graph  # noqa: E402
 from iv import render as _render  # noqa: E402
 
@@ -547,11 +406,6 @@ for w in warns:
 for e in errors:
     print("  ERROR", e.splitlines()[0])
 
-
-# ── what it looks like when something is wrong ────────────────────────────────
-#
-# Every one of these used to pass quietly. They are the reason the pipeline can be trusted
-# to skip: anything the tool cannot account for stops the run instead of guessing.
 
 print("\n\n=== things that crash, and what they say ===")
 

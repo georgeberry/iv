@@ -25,7 +25,7 @@ _ACTIVE: list = []
 
 
 def _path_text(target) -> str | None:
-    """The path-like arguments stdlib I/O accepts; file descriptors are not paths."""
+
     if isinstance(target, int):
         return None
     try:
@@ -43,12 +43,8 @@ def _in_tree(target, base) -> bool:
 
 
 def _check_declared(target) -> None:
-    """Reading inside a pipeline's tree without going through `iv.reads()` raises.
 
-    Absent from the graph AND from the recorded inputs, so whatever it depends on can
-    change and the artifact never rebuilds. Nothing detects that afterwards: the read
-    succeeds and the number is simply wrong.
-    """
+
     s = _path_text(target)
     if s is None:
         return
@@ -66,12 +62,8 @@ def _check_declared(target) -> None:
 
 
 def _check_write(target) -> None:
-    """A stage may mutate the data tree only through ``iv.writes()``.
 
-    The check is deliberately about an active stage, not all code in a process: setup and
-    repair tools may create roots before a stage runs. Inside a stage, however, a direct
-    write cannot be named, staged, fingerprinted, or recorded correctly.
-    """
+
     s = _path_text(target)
     if s is None:
         return
@@ -93,7 +85,7 @@ def _check_write(target) -> None:
 
 @contextmanager
 def _internal_io():
-    """Let a wrapped stdlib helper perform its own opens after its boundary was checked."""
+
     with ExitStack() as stack:
         for iv in _ACTIVE:
             stack.enter_context(iv.bookkeeping())
@@ -105,20 +97,7 @@ def _stage_is_running() -> bool:
 
 
 class Invalidator:
-    """What decides whether a stage has to run.
 
-    Three paths, and they used to be called root, out_root and project_root, which is
-    three different things wearing one word. A fourth, `roots`, named dataset PREFIXES that
-    arrive from outside — a rule about paths — and is gone: those datasets are declared, one
-    at a time, with `iv.source(...)`.
-
-        tree      where the DATA lives. A dataset is named relative to it, which is what
-                  lets an id survive the data moving.
-        out_tree  where writes GO, if that is somewhere else. Defaults to `tree`.
-        project   where the CODE lives. Node names are relative to it, so they read the
-                  same however the module was imported.
-        code      the modules `iv preflight` reads for undefined names and dead imports.
-    """
 
     def __init__(self, *,
                  tree,
@@ -144,10 +123,8 @@ class Invalidator:
         self._externals: list[str] = []
         self._handed_out: set[str] = set()
         self._staged: set[str] = set()
-        # Undeclared I/O against the data tree raises. Not opt-in: an undeclared
-        # WRITE makes a shard's fingerprint-name a lie, and an undeclared READ is
-        # absent from the recorded inputs, so its source can change forever and
-        # nothing rebuilds. Neither is detectable after the fact.
+
+
         _ACTIVE.append(self)
         self._enforce_writes()
         self._enforce_reads()
@@ -156,27 +133,22 @@ class Invalidator:
         self._node = ""
         self._inputs: tuple = ()
         self._outputs: tuple[str, ...] = ()
-        # dataset -> the upstreams its stage declares. Filled in by @step and for_each at
-        # DECLARATION time, not at run time, so `why_stale("processed/x/")` answers on its
-        # own — the question does not need the stage to have run, only to exist.
+
+
         self._declared: dict[str, tuple] = {}
-        # dataset -> the Asset that builds it. Populated by @iv.step at DECLARATION time,
-        # so `iv graph` and `iv status` know the pipeline by importing it rather than by
-        # parsing it — which is what lets a stage defined in a notebook declare as well as
-        # one in a scanned file.
+
+
         self._assets: dict[str, _assets.Asset] = {}
-        # dataset -> the Source it arrives as. Declared, not inferred from a path prefix,
-        # so every dataset in the pipeline has exactly one declaration somewhere.
+
+
         self._sources: dict[str, _assets.Source] = {}
-        #: Datasets declared on their own line with `iv.data(...)`, so a read can name one
-        #: before the stage that writes it exists. A stage's inline `output="..."` is a
-        #: declaration too; it just has nowhere else to be said.
+
+
         self._datasets: dict[str, _assets.Dataset] = {}
-        # dataset -> its optional, exact Parquet schema contract.
+
         self._schemas: dict[str, tuple | None] = {}
-        # A universe is optional for ordinary programmatic `for_each`; runners need it so
-        # they can enumerate work without executing user code. A mapping is a Cartesian
-        # product, while a sequence names only valid full combinations.
+
+
         self._partition_universe = _partition_universe(partitions)
         self._versions: dict[str, str | None] = {}
 
@@ -222,11 +194,8 @@ class Invalidator:
         try:
             sel = _sh.select(present, where, dataset=name)
         except StateError:
-            # An explicit list is a COVERAGE CLAIM, and a value that is not there is a fact
-            # worth saying out loud — unless the read is optional, which is how a stage says
-            # the half it did not take is not its business. `key_of` has always read it that
-            # way; this did not, so a stage could be told its key was fine and then raise
-            # opening the same read. Two answers is one too many.
+
+
             if not optional:
                 raise
             sel = []
@@ -260,7 +229,7 @@ class Invalidator:
         return self._schemas.get(_canon(dataset))
 
     def _validate_schema(self, dataset: str, shards) -> None:
-        """Every selected shard must meet its declared Python contract."""
+
         contract = self._schema(dataset)
         if contract is None:
             return
@@ -285,18 +254,8 @@ class Invalidator:
                 f"schema. Expected {dict(contract)!r}; got {dict(actual)!r}.")
 
     def _check_updates_own(self, name: str) -> None:
-        """`update_file_on_disk=` may only name a dataset this same stage writes.
 
-        The flag excludes a dataset from the staleness comparison, which is mandatory when
-        the stage is about to overwrite that dataset — otherwise it is permanently one step
-        behind its own last output. Pointed at SOMEONE ELSE'S dataset it means the opposite:
-        the dependency is real, and hiding it from the comparison is how a stage silently
-        never rebuilds when its input moves.
 
-        Checked here, at the read, rather than at the write: a stage that updates two
-        datasets writes them one at a time, so at the first write the second is legitimately
-        flagged and not yet written.
-        """
         if name in self._outputs:
             return
         raise DeclError(
@@ -335,7 +294,7 @@ class Invalidator:
 
     @staticmethod
     def _patch_openers() -> None:
-        """Cover the two common stdlib escape hatches as well as ``Path.open``."""
+
         for owner, name in ((builtins, "open"), (io, "open"), (os, "open")):
             fn = getattr(owner, name)
             if getattr(fn, "_iv_checked", False):
@@ -401,9 +360,8 @@ class Invalidator:
                     _check_write(dst)
                     if name == "move":
                         _check_write(src)
-            # shutil implements its public operation with more file operations. Those are
-            # implementation detail, not extra user reads, and have already crossed the
-            # boundary above.
+
+
             with _internal_io():
                 return fn(src, *a, **kw)
         patched._iv_checked = True
@@ -445,9 +403,8 @@ class Invalidator:
         return patched
 
     def snapshot(self):
-        """A consistent, memoised view of the tree for a read-only pass — see
-        `shards.snapshot`. Wrap a loop that asks `is_current` many times in it; never wrap
-        anything that writes, because a commit would not be seen."""
+
+
         return _sh.snapshot()
 
     def verify(self, dataset: str) -> list[str]:
@@ -484,27 +441,13 @@ class Invalidator:
             return out
 
     def key_of(self, dataset: str, part: dict | None, inputs) -> str:
-        """The derivation key: a digest of what this shard is built FROM, resolved now.
 
-        This is the whole record. Recomputed from the declared upstreams and the files on
-        disk, it either matches a name that is here or it does not — so there is nothing to
-        write down, nothing to lose, and no way for a record to disagree with the tree.
 
-        An input that selects nothing for THIS partition is not an input to it. That is what
-        lets a stage branch — the settled half of a feed for an old season, the live half for
-        the current one — without the branch it did not take dragging the other's identity
-        into the key and rebuilding a finished shard every day.
-
-        No declared inputs at all means no derivation: the empty key, and a root-shaped name.
-        A fetcher's output really is a root, and this says so.
-        """
         pairs = []
         for name, sel, optional in inputs:
             if name == dataset:
-                # An artifact cannot be its own upstream. Writing it changes its own
-                # identity, so a key folding it in would move every time it was built and
-                # never settle. `update_file_on_disk=` says this out loud; this catches the
-                # stage that reads the same dataset plainly as well.
+
+
                 continue
             if sel is None:
                 raise DeclError(
@@ -516,10 +459,8 @@ class Invalidator:
             try:
                 got = _sh.select(live, _resolve_sel(sel, part, name), dataset=name)
             except StateError:
-                # An explicit list is a COVERAGE CLAIM, so a value that is not there is a
-                # fact worth saying out loud rather than a key that quietly differs. Unless
-                # the read is optional — which is how a stage that branches over two halves
-                # of one feed says that the half it did not take is not its business.
+
+
                 if optional:
                     continue
                 raise
@@ -529,12 +470,8 @@ class Invalidator:
         version = self._versions.get(dataset)
         if not inputs and contract is None and version is None:
             return ""
-        # DEDUPED, because the same upstream can arrive twice. A stage that branches —
-        # the W draft and the NBA draft read the same box scores for different reasons —
-        # has two call sites for one dataset, and the scan reports a site each while
-        # `reads_in` reports the set. Folding it in twice makes a different key, so
-        # `iv status` called such a stage stale forever while the run, asking the same
-        # question the other way round, skipped it. Two answers is one too many.
+
+
         body = "|".join(f"{n}={i}" for n, i in sorted(set(pairs)))
         schema = _sh._short(repr(contract)) if contract is not None else ""
         return _sh._short(f"key:{dataset}|{_sh.encode_part(part)}|schema={schema}|version={version or ''}|{body}")
@@ -574,11 +511,8 @@ class Invalidator:
                     staged.unlink()
                 self._staged.discard(str(staged))
                 raise
-        # The name is the record, so it has to be a true one. A read this stage really made
-        # and did not declare would be absent from the key, which means its source could
-        # change forever and nothing would rebuild — the exact failure the index used to
-        # catch after the fact, now refused at the write. The other direction is fine: a
-        # declared input on a branch that was not taken is not a lie.
+
+
         declared = {n for n, _, _ in self._inputs}
         undeclared = sorted(set(self._reads) - self._updating - declared)
         if self._inputs and undeclared:
@@ -600,28 +534,16 @@ class Invalidator:
 
     def why_stale(self, dataset: str, part: dict | None = None, *,
                   inputs=None) -> str | None:
-        """Why this artifact would be rebuilt, or None if it would not.
 
-        Three things and no fourth: the upstreams this stage declares, their identity as the
-        files on disk stand right now, and the name of the shard already here. The name
-        carries the key it was built under, so the comparison is a string equality against a
-        value recomputed from scratch — there is no record to go missing, to be stale, or to
-        disagree with the tree.
 
-        What it cannot say any more is WHICH input moved. A key is a hash and hashes do not
-        invert. `iv why` prints the resolved upstreams instead, which is the same question
-        asked forwards.
-        """
         name = _canon(dataset)
         inputs = self._declared.get(name, ()) if inputs is None else inputs
         d = self.resolve_out(name)
         with self.bookkeeping():
             live = _sh.current_shards(d)
             if part is None and "" not in live:
-                # A PARTITIONED DATASET, ASKED ABOUT AS A WHOLE. One computation may write
-                # many shards — `box_features` has career-cumulative terms, so it is built
-                # in one pass and split — and then the stage's question is "is every shard
-                # of mine current", not "is the unpartitioned one".
+
+
                 if not live:
                     return "not on disk (nothing built)"
                 for p in sorted(live, key=_sh.sort_key):
@@ -638,8 +560,8 @@ class Invalidator:
             except StateError as e:
                 return str(e)
             if not want:
-                # Nothing derives it: a root, or a fetcher with no declared upstream. Its
-                # identity is its contents, and there is no question to ask.
+
+
                 return None
             if got.key != want:
                 return ("its inputs moved — the key in its name is not the one its declared "
@@ -650,8 +572,6 @@ class Invalidator:
         return self.why_stale(dataset, part, **kw) is None
 
 
-    #: The selector vocabulary, on the instance so a declaration reads as what it is at
-    #: the call site: `def fit(box=iv.same_part("raw/box/", why="..."))`.
     all_of = staticmethod(_decl.all_of)
     same_part = staticmethod(_decl.same_part)
     before_part = staticmethod(_decl.before_part)
@@ -662,31 +582,8 @@ class Invalidator:
 
     def dataset(self, dataset: str, *, why: str, part=None, ext: str = _sh.EXT,
                 allow_missing: bool = False, schema=None) -> _assets.Dataset:
-        """Declare a dataset without saying how it is built, so something can NAME it.
 
-            XPM = iv.dataset("processed/xpm/", why="a rating per player per season")
 
-        A stage writing ONE dataset needs none of this: `@iv.data` names it and a read
-        names the stage. This is for the datasets no single stage speaks for.
-
-        A stage with more OUTPUTS than names. The keys in a `@iv.step` are labels private
-        to what that one body returns — `{"ratings": ..., "career": ...}` — so a read
-        downstream has to say `xpm["ratings"]`, naming a key rather than a dataset, and
-        that key is not visible where the read is written:
-
-            XPM = iv.dataset("processed/xpm/", why="a rating per player per season")
-
-            @iv.step(output={"ratings": XPM, "career": XPM_CAREER}, why="the joint fit")
-            def xpm(bf=iv.all_of(box_features, why="the box prior")):
-                return {"ratings": r, "career": c}
-
-            def leaderboard(x=iv.all_of(XPM, why="the headline table")):
-
-        A dataset with more WRITERS than any one of them speaks for — three blocks of a
-        college feature table, the played and unplayed halves of a prediction table. Each
-        stage names it and declares the shard it owns, and a read names the dataset instead
-        of picking whichever writer happens to be in scope.
-        """
         d = _assets.Dataset(_canon(dataset), ext, allow_missing,
                             _assets._fixed(part, _canon(dataset)),
                             _why(why, _canon(dataset)),
@@ -717,24 +614,8 @@ class Invalidator:
              allow_missing: bool = False, if_needed: bool = True, once: bool = False,
              split: bool = False, external=None, schema=None, version=None,
              universe=None) -> Callable:
-        """The function that builds ONE dataset. The body returns its contents.
 
-            @iv.data(dataset="processed/features/", why="per-season box features",
-                     part="season")
-            def features(box=iv.same_part(box_raw, why="raw box for this season")):
-                return box.with_columns((pl.col("pts") * 2).alias("z"))
 
-        Upstreams are parameter defaults, so the whole declaration — dataset, selectors,
-        partition key — is readable from the function object with nothing executed and no
-        source text needed.
-
-        A read names the STAGE: `iv.all_of(features, why="...")`. There is one dataset, so
-        the stage's name is unambiguous and the path is written once.
-
-        `dataset=` is usually a path, declared right here because nothing else needs to name
-        it. It takes an `iv.dataset(...)` where something does — several stages writing
-        different shards of one dataset, each of them a single-output stage.
-        """
         _why(why, _canon(dataset) if isinstance(dataset, str) else str(dataset))
         if isinstance(dataset, dict):
             raise DeclError(
@@ -751,14 +632,8 @@ class Invalidator:
         return declared
 
     def source(self, dataset: str, *, why: str, external=None, schema=None) -> _assets.Source:
-        """Declare a dataset that arrives from outside, so a read can name it.
 
-            pbp = iv.source("raw/pbp_official/", why="the official play-by-play dump")
 
-            @iv.step(output="derived/panel/", why="...", part="season")
-            def panel(raw=iv.same_part(pbp, why="one season of it")):
-                ...
-        """
         src = _assets.Source(dataset, why=why, external=external, schema=schema)
         if src.dataset in self._sources:
             raise DeclError(
@@ -794,10 +669,8 @@ class Invalidator:
             for other in self._assets.values():
                 if name not in other.datasets or other.fn is asset.fn:
                     continue
-                # Two stages may share a dataset only by writing DIFFERENT shards of it —
-                # three blocks of a college feature table, the played and unplayed halves
-                # of a prediction table. Without a literal part= on both, whichever ran
-                # last would simply win.
+
+
                 mine, theirs = asset.part_for(name), other.part_for(name)
                 if mine and theirs and mine != theirs:
                     continue
@@ -829,27 +702,8 @@ class Invalidator:
              ext: str = _sh.EXT, allow_missing: bool = False,
              if_needed: bool = True, once: bool = False, split: bool = False,
              external=None, version=None, universe=None) -> Callable:
-        """The function that builds SEVERAL datasets, or none.
 
-        `output=` is a dict naming each one, and the body returns a dict keyed by those
-        names — so one expensive fit produces six tables without being run six times:
 
-            @iv.step(output={"ratings": XPM, "career": XPM_CAREER}, why="the joint fit")
-            def xpm(bf=iv.all_of(box_features, why="the box prior")):
-                return {"ratings": r, "career": c}
-
-        The keys are labels private to what this body returns. Declaring each output with
-        `iv.dataset(...)` above gives a read downstream a dataset to name instead of a key
-        — `xpm["ratings"]` works, but says what this stage calls the thing rather than what
-        the thing is.
-
-        Omit `output=` for a stage that writes nothing into the tree — a fetch filling a
-        download cache, a publish copying out to a bucket. There is no artifact to be stale
-        against, so it runs every time.
-
-        ONE dataset is `@iv.data`, whose body returns its contents rather than a dict of
-        one.
-        """
         _why(why, "step")
         if output is not None and not isinstance(output, dict):
             raise DeclError(
@@ -866,12 +720,8 @@ class Invalidator:
         return declared
 
     def _node_name(self, fn: Callable) -> str:
-        """The name the static scan gives this step: `<file>::<function>`.
 
-        A node is a step, not a file — so a project may keep every stage in one file and
-        still get one node each. Derived from the function's own code object, so it agrees
-        with the scan whatever imported it.
-        """
+
         src = getattr(fn, "__code__", None)
         if src is None:
             return getattr(fn, "__name__", "<step>")
@@ -897,7 +747,7 @@ class Invalidator:
         self._fresh_scope()
 
     def partitions_for(self, keys: tuple[str, ...]) -> list[dict]:
-        """Declared valid partitions for a stage, restricted to exactly its dimensions."""
+
         if self._partition_universe is None:
             raise DeclError("no partition universe is declared. Pass partitions={...} to "
                             "Invalidator(...) or use an explicit list of shard dictionaries.")
@@ -914,13 +764,8 @@ class Invalidator:
 
 
 def _sub_part(where: dict | None, part: dict | None, name: str):
-    """Replace `iv.PART` with the partition being built, in a real `where=`.
 
-    The same substitution `_resolve_sel` does for the STATIC form. Both exist because the
-    selector is read twice — once off the source to compute the key before the body runs,
-    once here when the body actually opens the files — and they have to agree, which they
-    do by both meaning "the shard being built".
-    """
+
     if not where:
         return where
     def one(v, k):
@@ -944,7 +789,7 @@ def _sub_part(where: dict | None, part: dict | None, name: str):
 
 
 def _resolve_sel(sel, part: dict | None, name: str):
-    """A statically-read selector plus the partition being built -> a real `where=`."""
+
     if not sel:
         return None
 
@@ -1010,5 +855,4 @@ def _abs_trace(trace):
     return Path(t).expanduser().resolve() if t else None
 
 
-# `iv.PART` on the instance, so a selector reads as what it is at the call site.
 Invalidator.PART = PART

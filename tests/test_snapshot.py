@@ -1,10 +1,5 @@
-"""A snapshot is a memoised view of the tree, and the two things that makes it worth having.
 
-It has to be FASTER — that is the whole point, and the cost it removes is quadratic, so a
-test that only checked the answer would not notice it coming back. And it has to be
-INVISIBLE — the same answer as the live tree, or it is a cache that lies about staleness,
-which is the one thing this package exists not to do.
-"""
+
 from __future__ import annotations
 
 import polars as pl
@@ -23,14 +18,14 @@ def iv(tmp_path, monkeypatch):
 
 
 def seed(iv, dataset, part=None, n=3, why="an upstream feed"):
-    """Put a shard on disk the way a fetcher would, and declare what it is."""
+
     with iv.writes(dataset, why=why, part=part) as out:
         pl.DataFrame({"a": range(n)}).write_parquet(out)
     return iv._sources.get(dataset) or iv.source(dataset, why=why)
 
 
 def counting(monkeypatch):
-    """Count directory listings, which is the work a snapshot exists to remove."""
+
     calls = []
     real = _sh.list_shards
     monkeypatch.setattr(_sh, "list_shards",
@@ -51,8 +46,6 @@ def seasons(iv, keys):
     features.for_each(keys)
 
 
-# ── it must not change the answer ─────────────────────────────────────────────
-
 def test_a_snapshot_gives_the_same_answer_as_the_live_tree(iv):
     seasons(iv, ["2021", "2022", "2023"])
     live = {p: iv.why_stale("processed/features/", {"season": p})
@@ -65,11 +58,8 @@ def test_a_snapshot_gives_the_same_answer_as_the_live_tree(iv):
 
 
 def test_a_snapshot_sees_staleness_it_was_opened_after(iv):
-    """Opening the snapshot AFTER an upstream moves must still report the move.
 
-    A cache that answered from the state at the last run would say `current` here, which is
-    a wrong number rather than a slow one.
-    """
+
     seasons(iv, ["2021", "2022"])
     seed(iv, "raw/box/", part={"season": "2021"}, n=99)
     with iv.snapshot():
@@ -85,8 +75,6 @@ def test_a_snapshot_does_not_survive_its_block(iv):
     assert not iv.is_current("processed/features/", {"season": "2021"}), \
         "the cache outlived the block and is answering about a tree that has changed"
 
-
-# ── it must actually remove the work ──────────────────────────────────────────
 
 def test_a_snapshot_lists_each_directory_once(iv, monkeypatch):
     keys = [str(y) for y in range(2000, 2012)]
@@ -111,8 +99,8 @@ def test_a_snapshot_lists_each_directory_once(iv, monkeypatch):
 
 
 def test_the_saving_grows_with_partitions(iv, monkeypatch):
-    """The cost being removed is quadratic, so doubling the partitions must not double the
-    listings under a snapshot — it must leave them flat."""
+
+
     def listings(keys):
         pipe = Invalidator(tree=iv.tree.parent / f"d{len(keys)}",
                            stage_dir=iv.stage_dir, project=iv.project)
@@ -130,19 +118,12 @@ def test_the_saving_grows_with_partitions(iv, monkeypatch):
         f"got {small} for 6 partitions and {big} for 18")
 
 
-# ── the rules that keep it honest ─────────────────────────────────────────────
-
 def test_a_commit_is_never_answered_from_a_snapshot(iv):
-    """`commit` and `gc` go through `list_shards`, which must never be memoised.
 
-    A commit finds the shard it supersedes by listing the directory. Answer that from a
-    view taken before an earlier commit in the same block and it drops the wrong file —
-    leaving two shards for one partition, which is the state `current_shards` refuses to
-    guess about. So: prime the view, then commit twice under it.
-    """
+
     seed(iv, "raw/feed/", n=1)
     with iv.snapshot():
-        _sh.current_shards(iv.resolve_out("raw/feed/"))     # prime the cached view
+        _sh.current_shards(iv.resolve_out("raw/feed/"))
         seed(iv, "raw/feed/", n=5)
         seed(iv, "raw/feed/", n=9)
 

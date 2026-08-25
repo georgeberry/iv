@@ -34,12 +34,8 @@ def main(instance: str = typer.Option(
 
 
 def reports(fn):
-    """A command that touches the data tree reports what is wrong with it.
 
-    `IvError` says something true and actionable about the tree — a file that is not a shard,
-    two shards for one partition, an index from another version. A traceback buries that
-    under twenty lines of this package's own frames, which is nobody's problem but ours.
-    """
+
     import functools
 
     @functools.wraps(fn)
@@ -161,7 +157,7 @@ def _print_stage_output(text: str) -> None:
 
 
 class _LogCapture(io.StringIO):
-    """The ordinary non-TTY capture, optionally teeing every write to a run log."""
+
 
     def __init__(self, sink=None) -> None:
         super().__init__()
@@ -220,7 +216,7 @@ def impact(stage: str, tick: bool = typer.Option(False, "--tick",
                                                    help="assume this stage's output changes"),
            tick_part: list[str] = typer.Option(
                [], "--tick-part", help="output partition to tick, repeat as key=value")):
-    """Show a stage's dependency cone and, optionally, the effect of ticking it."""
+
     if tick_part and not tick:
         raise IvError("--tick-part requires --tick.")
     iv = _load()
@@ -277,7 +273,7 @@ def impact(stage: str, tick: bool = typer.Option(False, "--tick",
 
 @app.command()
 def preflight():
-    """Stop a run before it starts: undefined names, missing modules, cycles."""
+
     iv = _load()
     g = _graph.build(iv)
     bad = []
@@ -349,11 +345,8 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
                                   help="an interactive page instead of a picture"),
         reduce: bool = typer.Option(False, "--reduce",
                                     help="--html: hide edges a longer path implies")):
-    """Draw the DAG: colour is `iv status`, shape is what kind of dataset it is.
 
-    `--html` writes a page instead: click a node for what it is for, what is stale about
-    it, and which nodes are upstream and downstream of it.
-    """
+
     from . import viz as _viz
     iv = _load()
     g = _graph.build(iv)
@@ -375,18 +368,8 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
 
 
 def _staleness(iv, g):
-    """Per SHARD: {dataset: {part_str: reason or None}}.
 
-    The CLI has no running stage to ask, so it reads each stage's declared upstreams off
-    the graph — the same triples the run takes off the decorated function, arrived at the
-    other way round.
 
-    WHICH STAGE OWNS WHICH SHARD. Two stages may share a dataset by writing different
-    partitions of it — the played and the unplayed half of a prediction table, three blocks
-    of a college feature table — and each has its own upstreams. This used to take the first
-    writer in the order and judge every shard against it, so most of them were answered with
-    the wrong question.
-    """
     writers: dict[str, list[tuple]] = {}
     for node in g.order():
         inputs = tuple((s.dataset, s.sel, s.optional) for s in g.stages[node].triggers)
@@ -409,7 +392,7 @@ def _stale_shards(state: dict) -> set:
 
 
 def _which(parts: list[str], total: int) -> str:
-    """Name the shards, compactly: a list while it is readable, a range when it is not."""
+
     named = sorted(parts, key=_sh.sort_key)
     if total == 1:
         return named[0] or "(one shard)"
@@ -420,12 +403,8 @@ def _which(parts: list[str], total: int) -> str:
 
 
 def _line(shards: dict, maybe: set, dataset: str) -> tuple:
-    """One dataset's line: its worst state, and the shard counts behind it.
 
-    A dataset is rarely all one thing. One season of a panel is stale because its own feed
-    moved and the other twenty may follow because they share a crosswalk — reporting only
-    the worst of those loses the number that says how much work is coming.
-    """
+
     total = len(shards)
     bad = {p: why for p, why in shards.items() if why}
     soft = [p for p in shards if not shards[p] and (dataset, p) in maybe]
@@ -444,23 +423,12 @@ def _line(shards: dict, maybe: set, dataset: str) -> tuple:
 
 
 def _downstream_of(g, state: dict, iv=None, moving=None) -> set:
-    """Shards that read something being rebuilt: current now, and possibly not after.
 
-    POSSIBLY, not certainly, which is the whole reason this is a third state rather than
-    more red. A rebuild that produces the same bytes commits the same shard and stops
-    there, so on an ordinary day the poll re-fetches, writes what it wrote yesterday, and
-    nothing below it moves.
 
-    PER SHARD, because that is the question worth answering. A cohort fit on seasons
-    before 2010 cannot see a shard of 2026, and saying so is the difference between "this
-    dataset may move" and "these three of its twenty-one may". The selector is data, so it
-    can be resolved for each of a stage's own partitions and asked whether it reaches a
-    shard that is moving — which is exactly what `select` asks of a directory.
-    """
     from .core import _resolve_sel
     seed = _stale_shards(state) if moving is None else set(moving)
     moving = set(seed)
-    for node in g.order():                      # topological: parents decided first
+    for node in g.order():
         st = g.stages[node]
         asset = getattr(g.iv, "_assets", {}).get(node)
         for site in st.outputs:
@@ -472,10 +440,8 @@ def _downstream_of(g, state: dict, iv=None, moving=None) -> set:
                 if (site.dataset, p) in moving:
                     continue
                 part = shard_part or fixed
-                # `_staleness` represents an empty output directory as a synthetic blank
-                # shard so it can say "not on disk". A dynamic stage has no real blank
-                # shard to test here; resolving PART against it is meaningless, and it is
-                # stale already rather than a current shard that may follow.
+
+
                 if part is None and asset is not None and asset.part_keys:
                     continue
                 for t in st.triggers:
@@ -488,12 +454,12 @@ def _downstream_of(g, state: dict, iv=None, moving=None) -> set:
 
 
 def _part_matches(part: dict[str, str], filters: dict[str, str]) -> bool:
-    """True only when a shard contains every requested key at the requested value."""
+
     return all(part.get(k) == v for k, v in filters.items())
 
 
 def _site_owns(g, node: str, site, part: dict[str, str]) -> bool:
-    """Whether this output declaration owns this shard under the graph's writer rules."""
+
     fixed = dict(site.part)
     if fixed:
         return _part_matches(part, fixed)
@@ -507,7 +473,7 @@ def _site_owns(g, node: str, site, part: dict[str, str]) -> bool:
 
 def _stage_output_shards(g, node: str, state: dict,
                          filters: dict[str, str] | None = None) -> set[tuple[str, str]]:
-    """Existing shards owned by one stage, optionally narrowed to an exact partition."""
+
     filters = filters or {}
     out = set()
     for site in g.stages[node].outputs:
@@ -521,11 +487,8 @@ def _stage_output_shards(g, node: str, state: dict,
 
 
 def _owner(owners, part) -> tuple:
-    """The upstreams of the stage that writes THIS shard.
 
-    A writer naming a literal part= owns exactly that shard. One naming none owns whatever
-    is left — a `for_each` does not know its keys until it runs, so it cannot name them.
-    """
+
     if part:
         for fixed, inputs in owners:
             if fixed and all(str(part.get(k)) == v for k, v in fixed):
@@ -562,8 +525,8 @@ def _print_impact_list(title: str, nodes: list[str], g, state, maybe, *, target=
 def status():
     iv = _load()
     g = _graph_of()
-    # Nothing here writes, so one view of the tree answers every question — without it the
-    # same input directory is re-listed once per partition of every dataset that reads it.
+
+
     with _sh.snapshot():
         state = _staleness(iv, g)
         maybe = _downstream_of(g, state)
@@ -600,8 +563,8 @@ def why(dataset: str):
                  if any(s.dataset == _canon(dataset) for s in st.outputs)), None)
     inputs = tuple((s.dataset, s.sel, s.optional)
                    for s in g.stages[node].triggers) if node else ()
-    # One view of the tree for the whole report: every partition asks the same upstream
-    # directories the same question, and nothing here writes.
+
+
     with _sh.snapshot():
         for part in sorted(present, key=_sh.sort_key):
             sh = present[part]
@@ -613,8 +576,8 @@ def why(dataset: str):
                                            '(a root — nothing here derives it)')}")
             if node:
                 typer.echo(f"  by      {node}")
-            # A key does not invert, so this cannot say which input moved. It says what the
-            # upstreams are RIGHT NOW, which is the same question asked forwards.
+
+
             for name, sel, _ in inputs:
                 live = _sh.current_shards(iv.resolve(name))
                 try:
@@ -662,7 +625,7 @@ def run(
         None, "--log",
         help="write all merged stage output and outcomes to this file"),
 ):
-    """Execute pipeline stages in dependency order."""
+
     choices = [x for x in (up_to, up_to_excluding, from_, only) if x]
     if len(choices) > 1:
         raise IvError("choose only one of --up-to, --up-to-excluding, --from, or --only.")
@@ -760,7 +723,7 @@ def run(
 @app.command()
 @reports
 def verify(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
-    """Re-fingerprint every shard and check it still matches the name it is filed under."""
+
     iv = _load()
     g = _graph_of()
     bad = []

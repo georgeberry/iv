@@ -1,8 +1,5 @@
-"""The primitives, end to end, on a real directory tree.
 
-Every assertion here is about a DECISION — did this stage run or skip — because that is the
-only thing the package exists to get right.
-"""
+
 from __future__ import annotations
 
 import polars as pl
@@ -22,11 +19,8 @@ def iv(tmp_path, monkeypatch):
 
 
 def seed(iv, dataset, part=None, n=3, extra=0, why="an upstream feed"):
-    """Put a shard on disk the way a fetcher would, and declare what it is.
 
-    Every dataset is declared exactly once, so a test that drops a file into the tree says
-    it arrives from outside — which is what a fetcher landing one really is.
-    """
+
     with iv.writes(dataset, why=why, part=part) as out:
         pl.DataFrame({"a": range(n), "b": [x + extra for x in range(n)]}).write_parquet(out)
     return iv._sources.get(dataset) or iv.source(dataset, why=why)
@@ -37,15 +31,14 @@ def rows(iv, dataset):
 
 
 def redeclared(iv):
-    """Declaring a dataset again in one process is what re-importing the module is in a
-    real run. The registry refuses a second producer, so a test that redefines a stage has
-    to say it is the same stage coming back rather than a rival one."""
+
+
     iv._assets.clear()
     return iv
 
 
 def out_asset(iv, feed, ran=None):
-    """`raw/feed/` -> `processed/out/`, the passthrough most of these hang off."""
+
     @iv.data(dataset="processed/out/", why="passthrough")
     def build(feed=iv.all_of(feed, why="the upstream")):
         if ran is not None:
@@ -53,8 +46,6 @@ def out_asset(iv, feed, ran=None):
         return feed
     return build
 
-
-# ── the basic loop ────────────────────────────────────────────────────────────
 
 def test_a_stage_runs_then_skips(iv):
     feed = seed(iv, "raw/feed/")
@@ -87,10 +78,8 @@ def test_a_real_change_reaches_downstream(iv):
     assert len(ran) == 2
 
 
-# ── the skip check sees every output ──────────────────────────────────────────
-
 def test_a_stage_with_several_outputs_is_checked_on_all_of_them(iv):
-    """One fit, several outputs. Losing any one of them must bring the stage back."""
+
     feed = seed(iv, "raw/feed/")
     ran = []
 
@@ -105,7 +94,7 @@ def test_a_stage_with_several_outputs_is_checked_on_all_of_them(iv):
     assert build() is True
     assert build() is False and len(ran) == 1
 
-    # A crash between two of the writes leaves exactly this state.
+
     import shutil
     shutil.rmtree(iv.resolve_out("out/careers/"))
     assert build() is True, "a missing output must bring the stage back"
@@ -128,17 +117,9 @@ def test_part_is_ambient_for_the_body(iv):
     assert len(ran) == 1
 
 
-# ── code and versions stop at their own stage ─────────────────────────────────
-
 def test_a_code_edit_alone_does_not_rerun_anything(iv):
-    """Editing a stage is invisible. Only a file can invalidate.
 
-    The stage used to be hashed, which read as covering a logic change and did not: the
-    hash sees the decorated function, and the logic it calls lives in modules the hash
-    never opens. A half-covering mechanism is worse than none, because it is the half you
-    do not have that you stop checking. So the rule is uniform — an artifact moves when an
-    input file moves, and a builder's own version is an input like any other.
-    """
+
     feed = seed(iv, "raw/feed/")
     ran = []
 
@@ -196,8 +177,8 @@ def test_a_version_is_a_file_and_only_moves_what_reads_it(iv):
 
 
 def test_a_root_re_run_that_produces_the_same_bytes_touches_nothing(iv):
-    """A root runs every time. The commit is content-addressed, so an unchanged answer
-    commits the same shard and nothing downstream follows."""
+
+
     @iv.data(dataset="config/model/", why="the model")
     def model():
         return pl.DataFrame({"v": ["m1"]})
@@ -209,7 +190,7 @@ def test_a_root_re_run_that_produces_the_same_bytes_touches_nothing(iv):
 
 
 def test_the_clock_is_a_file(iv, monkeypatch):
-    """What a "re-run daily" policy used to be: the day is an upstream like any other."""
+
     import datetime as _d
     fetches = []
 
@@ -238,11 +219,8 @@ def test_the_clock_is_a_file(iv, monkeypatch):
 
 
 def test_a_stage_that_reads_no_clock_never_re_runs(iv):
-    """Fetch-once history, and it is a fact about the reads rather than a label.
 
-    `once=True` is the caller saying so: with no upstream, nothing on disk can make it
-    stale, and running it every time is the other reading of the same silence.
-    """
+
     calls = []
 
     @iv.data(dataset="raw/archive/", why="fetch-once history", once=True,
@@ -256,7 +234,7 @@ def test_a_stage_that_reads_no_clock_never_re_runs(iv):
 
 
 def test_a_named_partition_that_disappears_is_named(iv):
-    """A stage that named the seasons it wants says which one went missing."""
+
     for s in ("2025", "2026"):
         feed = seed(iv, "raw/feed/", part={"season": s})
 
@@ -270,7 +248,7 @@ def test_a_named_partition_that_disappears_is_named(iv):
 
 
 def test_a_vanished_shard_from_a_WHOLE_dataset_read_is_a_moved_input(iv):
-    """Read everything and the dataset simply has different contents now."""
+
     for s in ("2025", "2026"):
         feed = seed(iv, "raw/feed/", part={"season": s})
     ran = []
@@ -281,8 +259,6 @@ def test_a_vanished_shard_from_a_WHOLE_dataset_read_is_a_moved_input(iv):
     build()
     assert len(ran) == 2
 
-
-# ── failure never records ─────────────────────────────────────────────────────
 
 def test_a_body_that_raises_records_nothing(iv):
     feed = seed(iv, "raw/feed/")
@@ -321,8 +297,6 @@ def test_why_is_required(iv):
         iv.dataset("processed/out/", why="")
 
 
-# ── for_each ──────────────────────────────────────────────────────────────────
-
 def seasons(iv, built):
     box_src = iv._sources["raw/box/"]
 
@@ -348,10 +322,8 @@ def test_for_each_builds_once_then_reuses(iv):
 
 
 def test_for_each_rebuilds_a_shard_deleted_off_disk(iv):
-    """The counterpart to the loss in test_a_dataset_asked_about_as_a_whole_...: with no
-    index there is nothing that remembers a shard was ever there, so being asked about BY
-    NAME is what catches a gap. `for_each` iterates an explicit list, so every partition is
-    asked about whether or not it is on disk — and only the missing one is rebuilt."""
+
+
     for s in ("2024", "2025", "2026"):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
     built = []
@@ -369,7 +341,7 @@ def test_for_each_rebuilds_a_shard_deleted_off_disk(iv):
 
 
 def test_a_walk_forward_partition_cannot_see_the_future(iv):
-    """Past-only is structural: the shard is never opened, not opened-and-filtered."""
+
     for s in ("2024", "2025", "2026"):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
 
@@ -395,10 +367,8 @@ def test_an_explicit_selection_is_a_coverage_claim(iv):
         iv.reads("raw/box/", why="two seasons", where={"season": ["2024", "2025"]})
 
 
-# ── update_file_on_disk ───────────────────────────────────────────────────────
-
 def test_an_update_read_is_lineage_or_a_stage_is_stale_against_its_own_last_output(iv):
-    """Read-modify-write: a stage must not be stale against its own last output."""
+
     feed = seed(iv, "raw/feed/")
     today = seed(iv, "config/today/")
     ran = []
@@ -420,8 +390,8 @@ def test_an_update_read_is_lineage_or_a_stage_is_stale_against_its_own_last_outp
 
 
 def test_a_dataset_this_stage_writes_is_never_its_own_upstream(iv):
-    """However it is read. Folding an artifact into its own key would move that key every
-    time it was built, so the stage would chase its own output and never settle."""
+
+
     ran = []
 
     @iv.data(dataset="raw/feed/", why="rewritten in place", once=True)
@@ -434,8 +404,8 @@ def test_a_dataset_this_stage_writes_is_never_its_own_upstream(iv):
 
 
 def test_updating_a_dataset_this_stage_does_not_write_is_refused(iv):
-    """The flag hides a dataset from the comparison, so on someone else's it hides a real
-    dependency and this stage never rebuilds when that input moves."""
+
+
     rosters = seed(iv, "raw/rosters/")
 
     @iv.data(dataset="processed/cohorts/", why="a fit per cohort")
@@ -445,8 +415,6 @@ def test_updating_a_dataset_this_stage_does_not_write_is_refused(iv):
     with pytest.raises(DeclError, match="but this stage writes processed/cohorts/"):
         build()
 
-
-# ── ordering ──────────────────────────────────────────────────────────────────
 
 def test_reads_come_back_in_a_stable_semantic_order(iv):
     for s in (2011, 2006, 2026, 2019):
@@ -459,12 +427,8 @@ def test_reads_come_back_in_a_stable_semantic_order(iv):
 
 
 def test_a_read_of_the_whole_dataset_notices_a_brand_new_partition(iv):
-    """A joint fit over every season must re-run when a season is added.
 
-    The counterpart of the walk-forward test: there, a new partition must NOT move an
-    earlier cohort. Here it must move the fit. The difference is whether the read named a
-    selection or asked for everything.
-    """
+
     for s in ("2024", "2025"):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
     ran = []
@@ -483,7 +447,7 @@ def test_a_read_of_the_whole_dataset_notices_a_brand_new_partition(iv):
 
 
 def test_a_write_outside_a_stage_does_not_inherit_the_last_one_s_reads(iv):
-    """Otherwise a bare `writes` records whatever was read most recently as its upstream."""
+
     seed(iv, "raw/box/", part={"season": "2019"})
 
     @iv.data(dataset="processed/out/", why="passthrough")
@@ -491,17 +455,14 @@ def test_a_write_outside_a_stage_does_not_inherit_the_last_one_s_reads(iv):
         return pl.DataFrame({"a": [1]})
 
     build()
-    seed(iv, "raw/box/", part={"season": "2020"})     # a bare write, after a stage ran
+    seed(iv, "raw/box/", part={"season": "2020"})
     fresh = _sh.current_shards(iv.resolve_out("raw/box/"))["season=2020"]
     assert fresh.key == "", "a raw shard has no upstream, so its name carries no key"
 
 
 def test_a_partition_appearing_inside_the_range_read_forces_a_rebuild(iv):
-    """A predicate cannot be replayed, so the record keeps the SPAN it matched.
 
-    Backfilling a season EARLIER than a cohort's bound would have been selected, so the fit
-    is now built from less than it should be and has to run again.
-    """
+
     for s in ("2019", "2020"):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
     ran = []
@@ -527,7 +488,7 @@ def test_a_partition_appearing_inside_the_range_read_forces_a_rebuild(iv):
 
 
 def test_writing_through_a_path_reads_handed_back_is_refused(iv):
-    """A shard's name is a fingerprint of its contents. Overwriting one makes it a lie."""
+
     seed(iv, "raw/feed/")
     got = iv.reads("raw/feed/", why="the upstream")[0]
     with pytest.raises(DeclError, match="handed back"):
@@ -543,7 +504,7 @@ def test_verify_catches_a_shard_whose_contents_no_longer_match_its_name(iv):
 
 
 def test_verify_reports_shards_of_one_dataset_that_disagree_on_columns(iv):
-    """A merged file guaranteed one schema; a directory of shards does not."""
+
     with iv.writes("raw/box/", why="an old season", part={"season": "2006"}) as out:
         pl.DataFrame({"a": [1], "reason": ["dnp"]}).write_parquet(out)
     with iv.writes("raw/box/", why="a new season", part={"season": "2026"}) as out:
@@ -557,8 +518,6 @@ def test_verify_is_quiet_when_every_shard_agrees(iv):
         seed(iv, "raw/box/", part={"season": s}, extra=int(s))
     assert iv.verify("raw/box/") == []
 
-
-# ── declared Parquet schemas ─────────────────────────────────────────────────
 
 def test_a_declared_schema_is_validated_on_write_and_read(iv):
     schema = {"player": pl.Int64, "pts": pl.Int64}
@@ -657,21 +616,15 @@ def test_a_declared_schema_changes_a_once_artifacts_key(iv, tmp_path):
 
 
 def test_reading_shards_reproduces_a_total_sort_over_the_merged_frame(iv):
-    """The property SVI minibatching depends on, checked rather than reasoned about.
 
-    The old builder concatenated every season then sorted on (season, game_id, row) —
-    load-bearing, because minibatches are contiguous slices with shuffle=False. Sharded,
-    there is no concat: each season is written on its own and `reads` hands them back in
-    season order. Those agree exactly when each shard is internally sorted on the rest of
-    the key, and this asserts it on a shuffled build order so a lucky ordering cannot pass.
-    """
+
     import random
     rows = [{"season": s, "game_id": g, "row": r}
             for s in ("2006", "2011", "2019", "2026")
             for g in range(4) for r in range(3)]
     merged = pl.DataFrame(rows).sort(["season", "game_id", "row"])
 
-    order = ["2019", "2026", "2006", "2011"]        # deliberately not season order
+    order = ["2019", "2026", "2006", "2011"]
     random.Random(0).shuffle(order)
     for s in order:
         with iv.writes("processed/possessions/", why="one season", part={"season": s}) as out:
@@ -683,7 +636,7 @@ def test_reading_shards_reproduces_a_total_sort_over_the_merged_frame(iv):
 
 
 def test_a_rebuilt_shard_does_not_disturb_the_read_order(iv):
-    """One new game rebuilds one season; the other twenty must land where they were."""
+
     for s in ("2024", "2025", "2026"):
         with iv.writes("processed/possessions/", why="one season", part={"season": s}) as out:
             pl.DataFrame({"season": [s] * 3, "row": [0, 1, 2]}).write_parquet(out)
@@ -699,12 +652,8 @@ def test_a_rebuilt_shard_does_not_disturb_the_read_order(iv):
 
 
 def test_a_dataset_may_hold_something_other_than_a_table(iv):
-    """A fitted model is a file. There is no reason it should sit outside the tree.
 
-    It used to have a bespoke side cache, keyed by hand, invisible to the graph and
-    unchecked. As a dataset it is one writer and two readers like anything else — the only
-    thing that differs is how its contents are digested, which the file type says.
-    """
+
     seed(iv, "processed/possessions/")
     knob = [4.0]
     fits = []
@@ -738,9 +687,8 @@ def test_an_unknown_file_type_has_no_fingerprint_and_says_so(iv):
 
 
 def test_a_dataset_asked_about_as_a_whole_is_current_iff_every_shard_is(iv):
-    """One computation, many shards. `box_features` has career-cumulative terms, so it
-    cannot be built per season — but it can be WRITTEN per season, and then the stage's
-    question is about all of them."""
+
+
     seed(iv, "raw/box/")
     ran = []
 
@@ -757,11 +705,7 @@ def test_a_dataset_asked_about_as_a_whole_is_current_iff_every_shard_is(iv):
     build()
     assert len(ran) == 1, "every shard is current"
 
-    # A DELETED SHARD IS NO LONGER NOTICED, and this is the one thing the index bought
-    # that nothing else does. Every shard of one pass carries its own key, so the two that
-    # are left still match and the stage skips — there is nothing on disk that says a third
-    # was ever expected. `for_each` is unaffected: it iterates an explicit list, so a
-    # missing partition is still rebuilt.
+
     _sh.current_shards(iv.resolve_out("processed/box_features/"))["season=2025"].path.unlink()
     assert iv.why_stale("processed/box_features/") is None
     build()
@@ -773,13 +717,8 @@ def test_a_dataset_asked_about_as_a_whole_is_current_iff_every_shard_is(iv):
 
 
 def test_adding_a_dependency_reruns_the_stage(iv):
-    """A read added since the last build must fire, or it is dead for good.
 
-    Staleness compares the inputs a build RECORDED. A newly declared read is not in that
-    record, so on its own it cannot trigger: the stage skips, never runs, never records the
-    new input, and the dependency silently does nothing forever. The declared-reads digest
-    is what closes that loop.
-    """
+
     feed = seed(iv, "raw/feed/")
     seed(iv, "raw/extra/")
     ran = []
@@ -809,26 +748,22 @@ def test_adding_a_dependency_reruns_the_stage(iv):
     two_inputs()
     assert len(ran) == 2, "and now the new one is recorded"
 
-    # And having recorded it, the new dependency actually works.
+
     seed(iv, "raw/extra/", n=9)
     two_inputs()
     assert len(ran) == 3, "raw/extra/ moved"
 
 
 def test_an_undeclared_read_of_the_data_tree_raises(iv):
-    """The mirror of guard_writes, and the reason bare reads accumulate without it.
 
-    A path opened without going through iv.reads() is absent from the graph and from the
-    recorded inputs, so whatever it depends on can change and the artifact never rebuilds.
-    Nothing about that is visible at runtime — the read succeeds and the number is wrong.
-    """
+
     seed(iv, "raw/feed/")
     bare = next(p for p in (iv.tree / "raw/feed").iterdir() if p.suffix == ".parquet")
 
     with pytest.raises(DeclError, match="not handed back by iv.reads"):
         pl.read_parquet(bare)
 
-    # Declared, so the same file is fine — and outside the tree is nobody's business.
+
     assert pl.read_parquet(iv.reads("raw/feed/", why="declared")).height == 3
 
 
@@ -893,20 +828,15 @@ def test_shutil_copy_into_the_data_tree_is_refused_inside_a_stage(iv, tmp_path):
 
 
 def test_an_optional_coverage_claim_is_answered_the_same_way_twice(iv):
-    """`key_of` and `reads` must agree about a named partition that is not there.
 
-    An explicit list is a coverage claim, so a missing value is an error — but `optional=`
-    says the half this stage did not take is not its business, and `key_of` has always read
-    it that way. `reads` did not, so the skip check could call a stage current and the very
-    same read then raise.
-    """
+
     seed(iv, "raw/feed/", part={"half": "a"})
     sel = (("half", ("in", ("a", "b"))),)
 
-    # The key: the missing half is not this stage's business.
+
     assert iv.key_of("processed/out/", None, (("raw/feed/", sel, True),))
 
-    # The read: the same answer, rather than an error the key said would not come.
+
     assert iv.reads("raw/feed/", why="both halves if they are there",
                     where={"half": ["a", "b"]}, optional=True) == []
 

@@ -31,27 +31,16 @@ _NUM = re.compile(r"(\d+)")
 
 _HEX = re.compile(rf"^[0-9a-f]{{{DIGEST_LEN}}}$")
 
-#: Thread-local so a snapshot taken for a read-only pass cannot leak into a thread that
-#: is committing. Absent (None) means no snapshot is open and every listing is live.
+
 _local = threading.local()
 
 
 @contextmanager
 def snapshot():
-    """Memoise `current_shards` for the duration of a READ-ONLY pass over the tree.
 
-    `iv status` asks "is this current" once per partition of every dataset, and each of
-    those recomputes a key, and each key re-lists the directory of every upstream. So one
-    input directory is listed once per partition of every dataset that reads it, and each
-    of those listings is itself O(partitions) — quadratic work for an answer that cannot
-    change, because nothing is being written.
 
-    Only correct where nothing writes. A commit changes what is current and a cached view
-    would not see it, so this is opt-in rather than the default: `commit` and `gc` go
-    through `list_shards`, which is never memoised and always sees the tree as it is.
-    """
     if getattr(_local, "cache", None) is not None:
-        yield          # already inside one — reuse it rather than take a second view
+        yield
         return
     _local.cache = {}
     try:
@@ -121,19 +110,8 @@ class Shard:
 
 def shard_name(part: dict[str, object] | None, fp: str, ext: str = EXT,
                key: str = "") -> str:
-    """`<part>.<key>.<fp><ext>` — the whole record, in the name.
 
-    `key` is the DERIVATION: a digest of the inputs this shard was built from, resolved as
-    they stood. `fp` is a digest of the bytes. Both are needed and they answer different
-    questions. The key answers "am I current" — recomputed from the code and the tree, it
-    either matches a file that is here or it does not, so nothing has to be written down.
-    The fp is what DOWNSTREAM reads as this dataset's identity, which is what keeps the
-    early cutoff: a stage that re-runs and produces identical bytes moves its own key and
-    not its fp, so nothing below it rebuilds.
 
-    A shard with no key was not derived by this pipeline — it is a root, and its identity
-    is its contents and nothing else.
-    """
     if not _HEX.match(fp or ""):
         raise DeclError(
             f"a fingerprint must be {DIGEST_LEN} hex chars, got {fp!r}. The shape is what "
@@ -148,8 +126,8 @@ def shard_name(part: dict[str, object] | None, fp: str, ext: str = EXT,
 
 
 def parse_name(path) -> Shard | None:
-    """Read a shard's name back. The segment count alone is ambiguous, the shapes are not:
-    a partition string always contains `=`, a digest never does."""
+
+
     name = path.name
     ext = next((e for e in FINGERPRINT_OF if name.endswith(e)), None)
     if ext is None:
@@ -255,12 +233,8 @@ def matches(value: str, rule: object) -> bool:
 
 
 def covers(where: dict[str, object] | None, part: dict[str, str]) -> bool:
-    """Would a read with this `where` pick up a shard with this partition?
 
-    The same test `select` applies to a directory, asked of one partition — the downstream
-    trace needs it per shard and has no `Shard` to hand. No selector means the whole
-    dataset, so everything in it.
-    """
+
     return all(k in part and matches(part[k], rule)
                for k, rule in (where or {}).items())
 
@@ -328,7 +302,7 @@ def schemas_of(shards: Iterable[Shard]) -> dict[tuple, list[str]]:
 
 
 def schema_of_file(path) -> tuple:
-    """The ordered Polars schema of a Parquet file, in a stable comparable shape."""
+
     import polars as pl
     schema = pl.read_parquet_schema(str(path))
     return tuple((str(name), str(dtype)) for name, dtype in schema.items())

@@ -1,17 +1,5 @@
-"""Datasets, and the stages that produce them.
 
-Two words, and they are not the same word twice. `iv.data(...)` DECLARES a dataset: a name,
-a format, a line on what it is for. `@iv.step` PRODUCES one or several, and its upstreams
-are parameter defaults, so the whole declaration — datasets, selectors, partition key — is
-readable from the function object with nothing executed and no source text needed.
 
-Most stages write one dataset and declare it inline, which is a string in `output=`. The
-declaration gets its own line when something else needs to NAME it: a stage writing four
-tables from one fit, where a read wants to say WHICH.
-
-Calling the asset is how it gets built. It builds if it is stale and loads if it is not,
-made per shard.
-"""
 from __future__ import annotations
 
 import inspect
@@ -24,14 +12,6 @@ from . import shards as _sh
 from .errors import DeclError, StateError
 from .paths import mkpath
 
-
-# ── turning a returned value into a file, and back ────────────────────────────
-#
-# The rule is ROUND TRIP: what a cached call hands back must be what the producer returned.
-# A dict written to parquet comes back a DataFrame, so the same function gives two types
-# depending on whether the shard happened to be current — a difference that shows up as a
-# TypeError days later, in the branch that was cached. So a format that cannot return the
-# value it was given refuses it and names one that can.
 
 def save_value(value: object, path, ext: str) -> None:
     if ext == ".parquet":
@@ -73,7 +53,7 @@ _WRITERS = (".parquet", ".json", ".pkl", ".html", ".txt")
 
 
 def schema_contract(schema, ext: str, dataset: str) -> tuple | None:
-    """A declared Parquet shape, kept dependency-free until somebody opts into it."""
+
     if schema is None:
         return None
     if ext != ".parquet":
@@ -92,7 +72,7 @@ def schema_contract(schema, ext: str, dataset: str) -> tuple | None:
 
 
 def load_value(paths, ext: str):
-    """The other half of the round trip. `paths` is what `Invalidator.reads` handed back."""
+
     if ext == ".parquet":
         import polars as pl
         files = [str(p) for p in paths]
@@ -117,21 +97,12 @@ def load_value(paths, ext: str):
     return p
 
 
-# ── what a signature declares ─────────────────────────────────────────────────
-
 OUT_PARAM = "out"
 
 
 def declared_reads(fn, part_keys: tuple[str, ...] | None, own: str | None = None) -> dict:
-    """The `Read` defaults in a signature, by parameter name, bound to what the stage says
-    about itself.
 
-    Two things are filled in here rather than written twice: the partition key a relative
-    selector applies to, and the output an `own_last_copy()` means — both of which the
-    decorator already said, three lines above the signature. Returned BY PARAMETER so the
-    body is handed the same reads the graph was told about; deriving them twice is how a
-    resolved one and an unresolved one end up in the same stage.
-    """
+
     return {name: p.default.bound_to(part_keys).against(own)
             for name, p in inspect.signature(fn).parameters.items()
             if isinstance(p.default, _decl.Read)}
@@ -143,7 +114,7 @@ def has_declared_reads(fn) -> bool:
 
 
 def check_signature(fn, part_keys: tuple[str, ...] | None, dataset: str) -> None:
-    """Every parameter has to be something this can supply, or the call would fail late."""
+
     for name, p in inspect.signature(fn).parameters.items():
         if isinstance(p.default, _decl.Read) or name == OUT_PARAM:
             continue
@@ -162,43 +133,21 @@ def check_signature(fn, part_keys: tuple[str, ...] | None, dataset: str) -> None
 
 @dataclass(frozen=True)
 class Dataset:
-    """A dataset this pipeline writes: a name, a format, and what it is for.
 
-    What `iv.data(...)` returns. It is a DECLARATION and nothing more — it says a dataset
-    exists and how it is stored, not how it is computed. Some `@iv.step` produces it, and
-    reads name it.
 
-    `part` is the literal shard THIS dataset gets out of the stage, where it differs from
-    the stage's own. One computation can produce a whole dataset and one block of a shared
-    one.
-    """
     dataset: str
     ext: str = _sh.EXT
     allow_missing: bool = False
     part: tuple = ()
     why: str = ""
     schema: tuple | None = None
-    #: True when this came from `iv.dataset(...)` — a declaration on its own line, which a
-    #: stage names rather than restates. False when a stage declared the path inline in its
-    #: own `output=`, which is the one-writer case. The difference is what lets a second
-    #: declaration of the same path be refused: naming `X` is one declaration used twice,
-    #: writing "processed/x/" again is two declarations that can disagree.
+
+
     standalone: bool = False
 
     def shard(self, **part) -> "Dataset":
-        """The one shard of this dataset a stage writes, where the stage cannot say it.
 
-            @iv.step(output={"raw": INTL_RAW,
-                             "features": COLLEGE_FEATURES.shard(source="intl")}, ...)
 
-        A stage writing ONE dataset says which shard with its own `part=`. A stage writing
-        several cannot: `part=` there would claim the same shard of every output, and the
-        stage above writes all of `derived_data/intl/` and one block of a table three
-        stages share. So the claim moves to the output it is about.
-
-        It is not a second declaration — the dataset is declared once, and this is that
-        declaration with the shard named.
-        """
         if not part:
             raise DeclError(
                 f"{self.dataset}: shard() names the literal partition this stage writes — "
@@ -212,17 +161,8 @@ class Dataset:
 
 
 def _outputs(spec, ext, allow_missing, schema=None) -> dict:
-    """`output=` as {key: Dataset}.
 
-    A bare string is one dataset declared where it is produced, which is the common case
-    and reads as one line. A `Dataset` is one declared on its own, which is what a stage
-    writing several wants so that a read can name each. A dict is several, keyed by what
-    the body returns.
 
-    None is a stage that writes NOTHING — a fetch that fills a download cache, a publish
-    that uploads. There is no artifact to be stale, so there is nothing to skip on and it
-    runs every time. Its reads are still declared, so the graph draws the edges.
-    """
     if spec is None:
         return {}
     if isinstance(spec, (str, Dataset, Source)):
@@ -237,7 +177,7 @@ def _outputs(spec, ext, allow_missing, schema=None) -> dict:
 
 
 def _fixed(part, dataset) -> tuple:
-    """The literal shard a declaration owns, as a sorted tuple."""
+
     if not part:
         return ()
     if not isinstance(part, dict):
@@ -262,15 +202,7 @@ def _dataset(v, ext, allow_missing, schema=None) -> Dataset:
 
 
 class Source:
-    """A dataset that arrives from OUTSIDE: a fetch, a hand-placed file, another system.
 
-    Nothing here builds it, so there is no body and no skip check — but it is declared all
-    the same, so a read can name it and the graph knows every dataset the pipeline has
-    rather than only the ones something here writes. That is what replaced a `sources=`
-    list of path prefixes on the Invalidator: a prefix said "do not ask what writes
-    anything under here", which is a rule about paths, where this is a statement about one
-    dataset that can be pointed at.
-    """
 
     def __init__(self, dataset: str, *, why: str, external=None, schema=None) -> None:
         self.dataset = _decl._canon(dataset)
@@ -284,13 +216,7 @@ class Source:
 
 
 class Asset:
-    """A stage: what it reads, what it writes, and whether it needs to run.
 
-    One object for all three shapes. `output=` naming ONE dataset is the common case, where
-    the body returns its contents; a dict returns a dict keyed by those names, which is how
-    one expensive fit produces six tables without being run six times; nothing at all is a
-    stage that writes outside the tree.
-    """
 
     def __init__(self, pipeline, output, fn, *, why: str,
                  part=None, ext: str = _sh.EXT, allow_missing: bool = False, if_needed: bool = True,
@@ -339,18 +265,8 @@ class Asset:
         return next(iter(self.outputs.values())).dataset
 
     def __getitem__(self, key: str):
-        """One named output of a multi-output stage, by the key the body returns it under.
 
-        Usually the outputs are declared above and a read names the declaration directly,
-        which is the same thing said without needing to know the key:
 
-            XPM = iv.data("processed/xpm/", why="the player ratings")
-
-            @iv.step(output={"ratings": XPM, ...}, why="the joint fit")
-            def xpm(...): ...
-
-            def wvorp(x=iv.all_of(XPM, why="the headline table")):
-        """
         if key not in self.outputs:
             raise DeclError(
                 f"{self.__name__} has no output named {key!r}: {sorted(self.outputs)}.")
@@ -358,11 +274,8 @@ class Asset:
 
     @property
     def dataset(self) -> str:
-        """What `iv.all_of(this_stage, ...)` means: the dataset it writes.
 
-        A stage writing several has no single answer, so it says so rather than picking
-        the first — `iv.all_of("processed/xpm/", ...)` names which.
-        """
+
         if len(self.outputs) != 1:
             raise DeclError(
                 f"{self.__name__} writes {len(self.outputs)} datasets, so naming the stage "
@@ -379,18 +292,13 @@ class Asset:
         return tuple(o.dataset for o in self.outputs.values())
 
     def _own_output(self, fn) -> str | None:
-        """What a bare `own_last_copy()` in this signature means: the one dataset written.
 
-        None when there are several, so `Read.against` can say so rather than pick.
-        """
+
         return self.primary if len(self.outputs) == 1 else None
 
     def part_for(self, dataset: str) -> tuple:
-        """The literal shard this stage owns OF THIS DATASET, if it owns one.
 
-        An output may name its own, which is what lets one computation write a whole
-        dataset and one block of a shared one.
-        """
+
         for o in self.outputs.values():
             if o.dataset == dataset:
                 if o.part:
@@ -402,11 +310,10 @@ class Asset:
         p = f", part={self.part_keys or self.fixed_part!r}" if (self.part_keys or self.fixed_part) else ""
         return f"<iv stage {', '.join(self.datasets)}{p}>"
 
-    # ── what the graph and the skip check read off it ─────────────────────────
 
     @property
     def triggers(self) -> tuple:
-        """The reads that can make it stale. An own-copy read is lineage, not a trigger."""
+
         return tuple(r for r in self.reads if not r.is_own)
 
     def triples(self) -> tuple:
@@ -414,22 +321,10 @@ class Asset:
 
     @property
     def may_skip(self) -> bool:
-        """A ROOT — no declared upstream — always runs, and that is not an oversight.
 
-        Its body is the only thing that knows about the world outside the tree: the
-        fetch, the clock, the hyperparameters someone just edited. Nothing on disk can
-        say whether that has moved, so `why_stale` has no question to ask and answers
-        `current` forever. Skip on that and the pipeline is sealed shut — it serves the
-        first run's numbers and never notices anything again.
 
-        Running it is the safe failure: the commit is content-addressed, so a body that
-        produces the same bytes commits the same shard, and nothing downstream moves. A
-        fetch too expensive to repeat says once=True, and then it is the caller who has
-        decided that nothing new can arrive.
-        """
         return bool(self.outputs) and (bool(self.triggers) or self.once)
 
-    # ── deciding ──────────────────────────────────────────────────────────────
 
     def _part(self, args, kwargs) -> dict | None:
         if self.fixed_part is not None:
@@ -459,10 +354,10 @@ class Asset:
             f"{self.__name__}(league='nba', season='2025').")
 
     def why_stale(self, *args, **kwargs) -> str | None:
-        """Stale if ANY output is. Losing one table of a six-table fit brings the fit back."""
+
         part = self._part(args, kwargs)
         if self.acts_only:
-            # Nothing was written, so there is nothing on disk to compare a key against.
+
             return "writes nothing, so nothing can say it is done"
         for o in self.outputs.values():
             r = self.pipeline.why_stale(o.dataset, dict(o.part) if o.part else part,
@@ -492,7 +387,7 @@ class Asset:
         return self.load(part) if self.single and not self.split else True
 
     def build(self, part: dict | None) -> None:
-        """Run the body and commit what it produced. No skip check — the caller made it."""
+
         iv = self.pipeline
         iv._fresh_scope()
         prev = (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs)
@@ -562,12 +457,8 @@ class Asset:
                 self._commit(o, value[key], part)
 
     def _commit_split(self, value) -> None:
-        """One computation, many shards.
 
-        With one output the body returns {partition: value}. With several it returns
-        {output: {partition: value}} — a walk-forward evaluation computes team, possession
-        and player accuracy in one pass and cuts each by season.
-        """
+
         shape = (f"{{{self.part_key}: value}}" if self.single
                  else f"{{output: {{{self.part_key}: value}}}}, one per {sorted(self.outputs)}")
         if not isinstance(value, dict):
@@ -601,8 +492,8 @@ class Asset:
                 self._commit(o, v, {self.part_key: str(part_val)})
 
     def _resolve(self, part: dict | None) -> dict:
-        """Each declared read, opened — through `Invalidator.reads`, so the recording, the
-        enforcement and the undeclared-read check all apply exactly as they always have."""
+
+
         from .core import _resolve_sel
         iv = self.pipeline
         params = inspect.signature(self.fn).parameters
@@ -616,19 +507,14 @@ class Asset:
                              where=_resolve_sel(r.sel(), part, r.dataset),
                              optional=r.optional, update_file_on_disk=r.is_own)
             if r.as_paths:
-                kw[name] = list(paths)          # what iv.reads has always handed back
+                kw[name] = list(paths)
             else:
                 kw[name] = load_value(paths, _ext_of(paths, _sh.EXT)) if paths else None
         return kw
 
     def load(self, part: dict | None = None):
-        """The contents of one shard, without deciding anything.
 
-        The whole read happens under `bookkeeping`, which exempts it from the
-        undeclared-read check for the duration and no longer. Whitelisting the path
-        instead would exempt it FOREVER — and then any later stage could open that file
-        behind iv's back, which is the exact thing the check exists to refuse.
-        """
+
         iv = self.pipeline
         o = next(iter(self.outputs.values()))
         with iv.bookkeeping():
@@ -661,7 +547,7 @@ class Asset:
         return out
 
     def for_each(self, over=None) -> list[str]:
-        """Build one shard per key, skipping the ones already current."""
+
         if self.part_keys is None or self.split or self.fixed_part is not None:
             raise DeclError(
                 f"{self.primary} is not built one partition at a time, so there is "
@@ -697,12 +583,8 @@ class Asset:
 
 
 def _externals(spec, dataset) -> tuple:
-    """Sources outside the tree — an API, a bucket, a page being scraped.
 
-    Declared rather than called, so `iv graph` draws them without the body running. They
-    cannot trigger anything: nothing on disk says whether an endpoint moved, which is what
-    a clock read is for.
-    """
+
     if not spec:
         return ()
     if not isinstance(spec, dict):
@@ -714,12 +596,8 @@ def _externals(spec, dataset) -> tuple:
 
 
 def _part_spec(part, dataset) -> tuple:
-    """`part=` is either a KEY this stage builds one shard per, or a LITERAL shard it owns.
 
-    The literal form is how several stages share one dataset: three blocks of a college
-    feature table, or the played and unplayed halves of a prediction table. Each names the
-    shard it writes, so the graph can see they do not collide.
-    """
+
     if part is None:
         return None, None
     if isinstance(part, str):

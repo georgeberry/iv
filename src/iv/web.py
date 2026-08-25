@@ -1,27 +1,5 @@
-"""The DAG as a page you can click, in one self-contained file.
 
-`iv viz` draws a PNG, which answers "what is the shape of this" and nothing else. The
-questions that actually come up in front of a stale pipeline are about ONE node —
 
-    what is this for, and what is stale about it
-    what does it read, and what reads it
-    if I rebuild it, what follows
-
-— and a picture cannot answer them because it has no place to put the answer. On a 60-node
-graph the labels alone are at the edge of legible, and the reasons never fit at all.
-
-So this emits the same graph as DATA and lets the browser do the layout and the asking.
-Python computes nothing new: the nodes are `viz.to_networkx`'s, the colours are
-`viz.STATUS`, the staleness is the CLI's, per shard, with the reasons it already prints.
-What is new is only that a click can select a node and something can be shown about it.
-
-WHY THE LAYOUT IS NOT DONE HERE. Upstream and downstream are the whole question, and in a
-graph library they are one call — `predecessors()` and `successors()` — against a layout
-that already puts an edge's ends on either side of it. Recomputing that in matplotlib means
-reimplementing layered layout, edge routing and hit-testing to arrive somewhere worse. The
-page is a template with a JSON blob in it, and everything interactive is the graph library's
-own.
-"""
 from __future__ import annotations
 
 import json
@@ -30,35 +8,21 @@ from pathlib import Path
 from . import shards as _sh
 from . import viz as _viz
 
-#: Pulled at open time, pinned to an exact version so a page that worked keeps working.
-#: Just the one: the LAYOUT is computed here (see `_positions`), so the page needs a
-#: renderer and not a layout engine.
+
 CDN = ("https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js",)
 
-#: One row, and one character of a label, in px at the page's font size. The column gap is
-#: what is left over once the widest label in a column has been paid for.
-#:
-#: These are the layout's half of the page's type and marker sizes, which live in the CSS —
-#: so they move TOGETHER. Bumping the font without CHAR runs labels into the next column;
-#: bumping the marker without ROW puts two of them on the same line.
-FONT, MARKER = 14, 26.0                  # px; must match `font-size` and `width` below
+
+FONT, MARKER = 14, 26.0
 ROW, CHAR, GAP = 52.0, FONT * 0.56, 30.0
 
 
 def payload(g, status: dict | None = None, state: dict | None = None,
             maybe: set | None = None, reduce: bool = False) -> dict:
-    """Everything the page shows, as JSON. No presentation, no layout — those are the
-    template's, so what is asserted about this can be asserted about a dict."""
+
+
     whole = _viz.to_networkx(g)
-    # EVERY DECLARED EDGE, because every one of them is a read someone wrote down. The PNG
-    # drops the ones a longer path implies — box -> site is not news when box -> features
-    # -> xpm -> site is already drawn — which is right for a still picture that has to be
-    # legible at a glance and wrong here, where the point is to see what a stage actually
-    # reads. `--reduce` puts the PNG's behaviour back.
-    #
-    # It costs the layout nothing: an implied edge cannot lengthen the longest path to its
-    # own target, so the COLUMNS are identical either way. Only the within-column ordering
-    # sees the extra edges, and it should — they are crossings that are really there.
+
+
     d = _reduced(whole) if reduce else whole
     status = status or {}
     state = state or {}
@@ -79,11 +43,8 @@ def payload(g, status: dict | None = None, state: dict | None = None,
     nodes = []
     for n in d.nodes:
         ds, part = n
-        # A dataset several stages write is one node PER PARTITION, and each node owns only
-        # the shards of its own. Handing every node the whole dataset's shards would count
-        # the shared ones once per writer, so the page and `iv status` would disagree about
-        # how many shards there are — and the played half would list the unplayed half's
-        # staleness as its own.
+
+
         shards = {k: v for k, v in state.get(ds, {}).items() if _owns(part, k)}
         writers = g.producers_of(ds)
         src = getattr(iv, "_sources", {}).get(ds)
@@ -94,8 +55,8 @@ def payload(g, status: dict | None = None, state: dict | None = None,
             "dataset": ds,
             "part": dict(part),
             "kind": d.nodes[n]["kind"],
-            # A root has no stage to ask, so it is not "current", it is grey — the same
-            # thing `iv status` does by not listing it at all.
+
+
             "status": status.get(ds, "source" if d.nodes[n]["kind"] == "root" else "current"),
             "why": (getattr(src, "why", None) or getattr(decl, "why", None)
                     or (stages[writers[0]]["why"] if writers else "")),
@@ -105,12 +66,8 @@ def payload(g, status: dict | None = None, state: dict | None = None,
                         "maybe": (ds, p) in maybe}
                        for p, why in sorted(shards.items())],
             "externals": [e for w in writers for e in stages[w]["externals"]],
-            # From the WHOLE graph, never the reduced one. The reduction drops an edge that
-            # a longer path already implies, which is fine for drawing and wrong for this:
-            # xpm declares a read of box_features, and the panel saying otherwise because
-            # box_features also reaches it through the college blocks is a lie about the
-            # code. Reachability is what the reduction preserves, so the highlighted CONE
-            # is still the drawn graph's — it is only the direct neighbours that are not.
+
+
             "reads": sorted({_nid(m) for m in whole.predecessors(n)}),
             "readBy": sorted({_nid(m) for m in whole.successors(n)}),
         })
@@ -125,25 +82,8 @@ def payload(g, status: dict | None = None, state: dict | None = None,
 
 
 def _positions(d) -> dict:
-    """Where each node goes: the PNG's layout, with the crossings taken out.
 
-    THE COLUMN IS THE POINT. A node sits in the column of its longest route from a root, so
-    every edge points right and how far right a thing is means how deep in the pipeline it
-    is. `viz._layers` has always done this and the PNG has always looked organised because
-    of it.
 
-    dagre will not do this. Its `longest-path` ranker is as-LATE-as-possible — it ranks
-    backwards from the sinks — so `processed/xpm_career/`, which nothing reads, is pushed to
-    the last column while `processed/xpm/`, written by the same stage from the same inputs,
-    stays in the middle. Four outputs of one fit end up in two columns, with the edges to
-    prove it crossing everything between. Its default ranker minimises total edge length,
-    which is tidy on average and puts nothing anywhere in particular.
-
-    WITHIN a column the PNG sorts by name, which is stable and ignores the edges. Here the
-    order is swept by BARYCENTRE instead — repeatedly, put each node at the average height
-    of its neighbours in the column before — which is the standard way to take crossings out
-    of a layered graph, and the one thing this does that the PNG does not.
-    """
     depth = _viz._layers(d)
     cols: dict[int, list] = {}
     for n, k in sorted(depth.items(), key=lambda kv: (kv[1], _viz.short(kv[0]))):
@@ -162,8 +102,8 @@ def _positions(d) -> dict:
 
     pos, x = {}, 0.0
     for k in sorted(cols):
-        # A COLUMN IS AS WIDE AS ITS OWN LONGEST LABEL, so one dataset called
-        # possessions_with_lineups does not set the gap between two called xpm and wvorp.
+
+
         width = MARKER + CHAR * max(len(_viz.short(n)) for n in cols[k]) + GAP
         for i, n in enumerate(cols[k]):
             pos[_nid(n)] = {"x": round(x, 1),
@@ -173,7 +113,7 @@ def _positions(d) -> dict:
 
 
 def _reduced(d):
-    """Transitive reduction, or the graph unchanged if it has a cycle to be reduced."""
+
     import networkx as nx
     if _viz.find_cycle(d) is not None:
         return d
@@ -185,7 +125,7 @@ def _reduced(d):
 
 
 def _owns(part: tuple, shard_key: str) -> bool:
-    """Is this shard the one this node writes? Every shard, where the node is the dataset."""
+
     if not part:
         return True
     got = _sh.decode_part(shard_key) or {}

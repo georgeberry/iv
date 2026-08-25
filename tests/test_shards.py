@@ -1,8 +1,5 @@
-"""`shards.py` alone: names, ordering, fingerprints, selection, commit, gc, index.
 
-No Invalidator, no static scan, no bucket. A shard is a file in a temp directory, and every
-question here is answerable from the directory listing — which is the point of the module.
-"""
+
 from __future__ import annotations
 
 import hashlib
@@ -15,7 +12,7 @@ from iv.errors import DeclError, StateError
 
 
 def dg(tag: str) -> str:
-    """A stand-in fingerprint of the real shape — 16 hex chars, which names require."""
+
     return hashlib.sha256(tag.encode()).hexdigest()[:sh.DIGEST_LEN]
 
 
@@ -32,8 +29,6 @@ def put(d, name, f=None):
 def shard(d, part, tag, f=None):
     return put(d, sh.shard_name(part, dg(tag)), f)
 
-
-# ── names ─────────────────────────────────────────────────────────────────────
 
 def test_a_name_is_a_partition_and_a_fingerprint_and_nothing_else(tmp_path):
     n = sh.shard_name({"season": 2026}, dg("c"))
@@ -58,7 +53,7 @@ def test_a_separator_in_a_value_raises_rather_than_being_escaped():
 
 
 def test_an_underscore_in_a_value_is_fine(tmp_path):
-    """`_` is legal precisely because it is not the separator — `dataset=player_box` is real."""
+
     n = sh.shard_name({"dataset": "player_box", "season": 2026}, dg("c"))
     assert sh.parse_name(tmp_path / n).part == {"dataset": "player_box", "season": "2026"}
 
@@ -75,7 +70,7 @@ def test_non_shard_files_are_not_ours(tmp_path):
 
 
 def test_a_stray_file_of_any_shape_stops_the_run(tmp_path):
-    """An unexpected file is a bug. Skipping it would silently drop a partition."""
+
     d = tmp_path / "ds"
     shard(d, {"season": 2026}, "a")
     for junk in ("notes.backup.parquet", "README.md", "_tmp-1.parquet", ".DS_Store"):
@@ -84,8 +79,6 @@ def test_a_stray_file_of_any_shape_stops_the_run(tmp_path):
             sh.list_shards(d)
         (d / junk).unlink()
 
-
-# ── ordering ──────────────────────────────────────────────────────────────────
 
 def test_numeric_partitions_sort_numerically_not_lexically(tmp_path):
     d = tmp_path / "ds"
@@ -96,7 +89,7 @@ def test_numeric_partitions_sort_numerically_not_lexically(tmp_path):
 
 
 def test_read_order_is_stable_across_repeated_listings(tmp_path):
-    """Row order is a model input; a listing that reorders is the bug this rules out."""
+
     d = tmp_path / "ds"
     for s in (2011, 2006, 2026, 2019):
         shard(d, {"season": s}, str(s))
@@ -110,8 +103,6 @@ def test_sort_is_total_so_ties_cannot_reorder():
     assert a != b and (a < b or b < a)
 
 
-# ── fingerprints ──────────────────────────────────────────────────────────────
-
 def test_a_permutation_is_not_new_data():
     f = frame(5)
     assert sh.fingerprint(f) == sh.fingerprint(f.reverse())
@@ -124,7 +115,7 @@ def test_the_fingerprint_moves_on_a_schema_change_alone():
 
 
 def test_the_fingerprint_sees_a_string_only_change():
-    """The hole in a moment summary: mean and std are undefined for a string column."""
+
     a = pl.DataFrame({"n": [1, 2], "team": ["LAS", "NYL"]})
     b = pl.DataFrame({"n": [1, 2], "team": ["SEA", "CHI"]})
     assert sh.fingerprint(a) != sh.fingerprint(b)
@@ -161,7 +152,7 @@ def test_a_selection_has_its_own_id(tmp_path):
 
 
 def test_a_later_shard_cannot_move_an_earlier_selection(tmp_path):
-    """The walk-forward guarantee, and the reason a per-row bound is not needed."""
+
     d = tmp_path / "ds"
     for s in ("2024", "2025"):
         shard(d, {"season": s}, s)
@@ -170,8 +161,6 @@ def test_a_later_shard_cannot_move_an_earlier_selection(tmp_path):
     shard(d, {"season": "2026"}, "2026")
     assert sh.dataset_id(sh.select(sh.current_shards(d), upto)) == before
 
-
-# ── selection ─────────────────────────────────────────────────────────────────
 
 def test_an_explicit_list_is_a_coverage_claim(tmp_path):
     d = tmp_path / "ds"
@@ -193,8 +182,6 @@ def test_selection_on_a_missing_directory_is_empty(tmp_path):
     assert sh.current_shards(tmp_path / "nope") == {} and sh.select({}, None) == []
 
 
-# ── commit ────────────────────────────────────────────────────────────────────
-
 def test_commit_names_by_fingerprint_and_drops_what_it_replaced(tmp_path):
     d = tmp_path / "ds"
     f = frame(3)
@@ -211,7 +198,7 @@ def test_commit_names_by_fingerprint_and_drops_what_it_replaced(tmp_path):
 
 
 def test_identical_data_is_the_identical_file_and_touches_nothing(tmp_path):
-    """A rebuild that changed nothing must not rewrite the dataset."""
+
     d = tmp_path / "ds"
     f = frame(3)
     names = []
@@ -246,8 +233,6 @@ def test_the_committed_fingerprint_is_what_a_READER_gets_back(tmp_path):
     assert sh.parse_name(final).fp == sh.fingerprint(pl.read_parquet(final))
 
 
-# ── an interrupted commit ─────────────────────────────────────────────────────
-
 def test_two_shards_for_one_partition_raise_rather_than_being_guessed(tmp_path):
     d = tmp_path / "ds"
     shard(d, {"season": 2026}, "a")
@@ -265,16 +250,9 @@ def test_gc_drops_what_is_not_kept(tmp_path):
     assert sh.current_shards(d)["season=2026"].name == keep.name
 
 
-# ── the whole point ───────────────────────────────────────────────────────────
-
 def test_every_comparison_is_answered_from_FILENAMES_alone(tmp_path):
-    """No question this module answers may open a parquet file.
 
-    Written as sabotage rather than as a mock, because that is the claim: replace every
-    shard's CONTENTS with bytes polars cannot parse, leave the names alone, and listing,
-    selection and dataset ids all still answer correctly. Anything reaching for the data
-    would raise. This is what buys a staleness sweep for one listing and zero reads.
-    """
+
     d = tmp_path / "ds"
     for s in ("2024", "2025", "2026"):
         tmp = sh.stage(s, tmp_path)

@@ -1,10 +1,5 @@
-"""A declared selector is a VALUE, and these are the values.
 
-`key_of` hashes them and `_resolve_sel` turns them back into a `where=`, so a shape that
-differs by so much as a sort order is a stage that rebuilds forever, or one that never
-does. Nothing else in the package pins them down, so they are written out in full here
-rather than compared against another expression of the same thing.
-"""
+
 from __future__ import annotations
 
 import pytest
@@ -15,9 +10,8 @@ from iv.decl import PART
 
 
 class _Declared:
-    """What a declaration hands back: something that knows its own dataset. A `Dataset`
-    from `iv.data`, an `Asset` from `@iv.step`, a `Source` from `iv.source` — this module
-    only asks for the attribute."""
+
+
     def __init__(self, dataset="processed/features/"):
         self.dataset = dataset
 
@@ -47,9 +41,8 @@ def test_a_declared_selector_is_the_value_key_of_hashes(label, read, sel, where)
 
 
 def test_a_bound_relative_to_the_partition_is_not_an_outright_value():
-    """`where()` rules an edge OUT, so only a value stated on both sides counts. A bound
-    that is not known until the shard is chosen cannot, and a missing edge is a wrong DAG.
-    """
+
+
     assert decl.same_part(_Declared("d/"), why="x").bound_to("season").where() == ()
     assert decl.before_part(_Declared("d/"), why="x").bound_to("season").where() == ()
 
@@ -64,8 +57,6 @@ def test_optional_rides_along():
     r = decl.all_of(_Declared("raw/feed/"), why="x", optional=True)
     assert r.triple()[2] is True
 
-
-# ── the partition key is filled in, never repeated ────────────────────────────
 
 def test_the_partition_key_comes_from_the_stage():
     r = decl.same_part(_Declared("raw/box/"), why="x")
@@ -88,14 +79,10 @@ def test_a_whole_dataset_read_does_not_need_one():
     assert decl.own_last_copy(_Declared("raw/log/"), why="x").bound_to(None).sel() == ()
 
 
-# ── an own-copy read is lineage, never a trigger ──────────────────────────────
-
 def test_own_last_copy_is_marked_and_optional():
     r = decl.own_last_copy(_Declared("raw/odds_log/"), why="yesterday's copy")
     assert r.is_own and r.optional and r.sel() == ()
 
-
-# ── what is refused ───────────────────────────────────────────────────────────
 
 def test_why_is_required():
     for make in (decl.all_of, decl.same_part, decl.before_part):
@@ -152,17 +139,15 @@ def test_values_are_stringified_like_the_scan_does():
     assert decl.parts(_Declared("raw/box/"), why="x", season=[2025, 2024]).body == ("2024", "2025")
 
 
-# ── a read names a dataset, or the stage that writes it ───────────────────────
-
 def test_a_read_names_a_declaration():
-    """An ordinary Python reference, so a typo is a NameError where it is written rather
-    than a READ WITH NO PRODUCER the next time someone runs `iv check`."""
+
+
     assert decl.all_of(_Declared(), why="x").dataset == "processed/features/"
 
 
 def test_a_dataset_nothing_produces_is_declared_too():
-    """A source is declared with `iv.source(...)` and named like anything else — there is
-    no longer a category of dataset a read refers to by writing its path again."""
+
+
     assert decl.all_of(_Declared("raw_data/pbp_official/"),
                        why="x").dataset == "raw_data/pbp_official/"
 
@@ -181,8 +166,6 @@ def test_a_bare_path_is_refused_and_says_what_to_do():
         decl.all_of(len, why="x")
 
 
-# ── as_paths ──────────────────────────────────────────────────────────────────
-
 def test_as_paths_defaults_to_the_contents():
     assert decl.all_of(_Declared("d/"), why="x").as_paths is False
     assert decl.all_of(_Declared("d/"), why="x", as_paths=True).as_paths is True
@@ -192,8 +175,6 @@ def test_as_paths_survives_being_bound_to_a_partition():
     r = decl.same_part(_Declared("d/"), why="x", as_paths=True).bound_to("season")
     assert r.as_paths is True and r.sel() == (("season", ("in", (PART,))),)
 
-
-# ── own_last_copy names nothing, because it can only mean one thing ───────────
 
 def test_own_last_copy_names_nothing_until_the_stage_says():
     bare = decl.own_last_copy(why="yesterday's copy")

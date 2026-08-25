@@ -1,9 +1,5 @@
-"""The picture: colour is status, shape is kind.
 
-Two channels because they are two questions. Whether a dataset is current changes every
-day; what KIND of thing it is does not. Sharing one channel would mean neither could be
-read off the page.
-"""
+
 from __future__ import annotations
 
 import polars as pl
@@ -28,7 +24,7 @@ def frame():
 
 
 def built(iv):
-    """A source, a derived dataset and a terminal one — one of each shape."""
+
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
     @iv.data(dataset="processed/mid/", why="the middle")
     def mid(feed=iv.all_of(feed, why="arrives out of band")):
@@ -44,8 +40,6 @@ def built(iv):
     return _graph.build(iv)
 
 
-# ── shape: what kind of dataset it is ─────────────────────────────────────────
-
 def test_every_dataset_gets_one_of_the_three_kinds(iv):
     d = _viz.to_networkx(built(iv))
     kinds = {ds: d.nodes[n]["kind"] for n in d for ds, _ in [n]}
@@ -56,9 +50,8 @@ def test_every_dataset_gets_one_of_the_three_kinds(iv):
 
 
 def test_two_stages_writing_one_dataset_are_two_nodes(iv):
-    """The played and unplayed halves of a prediction table are different shards. Drawn as
-    one node they are the same thing, and a stage that reads one and writes the other reads
-    as a cycle it does not have — which is what `iv check` correctly said it did not."""
+
+
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
 
     @iv.data(dataset="processed/preds/", part={"completed": "true"}, why="played")
@@ -91,11 +84,9 @@ def test_every_kind_has_a_distinct_shape():
     assert len(set(_viz.SHAPE.values())) == len(_viz.SHAPE)
 
 
-# ── colour: the same three answers `iv status` gives ──────────────────────────
-
 def test_the_states_are_the_ones_status_reports():
-    """`states` is shared with the CLI so the picture and the report cannot drift into
-    naming the same three things differently."""
+
+
     got = _viz.states({"a/": {"": None}, "b/": {"": "its inputs moved"}, "c/": {"": None}},
                       maybe={("c/", "")})
     assert got == {"a/": "current", "b/": "stale", "c/": "maybe"}
@@ -103,8 +94,8 @@ def test_the_states_are_the_ones_status_reports():
 
 
 def test_a_dataset_with_no_producer_is_not_coloured_as_an_answer(iv):
-    """A source has no stage to ask, so `iv status` does not report it and the picture
-    does not pretend to know — it is grey."""
+
+
     g = built(iv)
     status = _viz.states({n: {"": None} for n in g.produced}, maybe=set())
     assert "raw/feed/" not in status
@@ -115,8 +106,6 @@ def test_every_state_has_a_distinct_colour():
     assert len(set(_viz.STATUS.values())) == len(_viz.STATUS)
 
 
-# ── it draws ──────────────────────────────────────────────────────────────────
-
 def test_draw_writes_a_picture(iv, tmp_path):
     g = built(iv)
     status = _viz.states({n: {"": None} for n in g.produced}, maybe=set())
@@ -125,20 +114,15 @@ def test_draw_writes_a_picture(iv, tmp_path):
 
 
 def test_draw_needs_no_status_at_all(iv, tmp_path):
-    """`iv viz --plain` does not read the tree, which is what you want when the data is
-    somewhere slow or not there yet."""
+
+
     out = _viz.draw(built(iv), tmp_path / "plain.png")
     assert out.exists() and out.stat().st_size > 1000
 
 
 def test_a_cycle_is_cut_to_lay_out_rather_than_crashing(iv, tmp_path, monkeypatch):
-    """The picture is most wanted when the graph is wrong, so it has to survive one.
 
-    A cycle cannot be DECLARED any more — the first stage would have to name the second
-    before the second exists — so this closes the loop on the drawn graph directly, which
-    is the only way one can still arrive: a `Graph` assembled by something other than the
-    decorators.
-    """
+
     g = built(iv)
     d = _viz.to_networkx(g)
     d.add_edge(("dump/site/", ()), ("processed/mid/", ()), stage="hand-built")

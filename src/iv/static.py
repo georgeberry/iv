@@ -32,12 +32,8 @@ class Site:
 
 @dataclass(frozen=True)
 class Node:
-    """One STAGE: a step function, and the I/O reachable from it.
 
-    A stage used to be a file, which was only ever a proxy — `sys.argv[0]` at runtime and a
-    relative path in the scan. Put every stage in one file and that proxy collapses to a
-    single node. The unit of work is the step.
-    """
+
     name: str
     file: str
     fn: str
@@ -78,8 +74,8 @@ def undefined_names(iv) -> list[str] | None:
 
 
 def _sources(iv):
-    """Every project file to check. A source_dir may name a FILE, which is the exact answer
-    when every declaration lives in one pipeline module."""
+
+
     project = Path(iv.project or Path.cwd())
     for d in iv.code:
         base = project / d
@@ -89,19 +85,16 @@ def _sources(iv):
             yield project, base
             continue
         for f in sorted(base.rglob("*.py")):
-            # Vendored code is not this project's source, and one of its fixtures will have
-            # a deliberately broken encoding.
+
+
             if any(part in SKIP_DIRS or part.startswith(".") for part in f.parts):
                 continue
             yield project, f
 
 
 def _imported_modules(path: Path) -> set[str]:
-    """The dotted module names a file imports. Nothing else about it is read.
 
-    This used to come off the full declaration scan, which had to parse every call in the
-    project to answer a question about its import lines.
-    """
+
     try:
         tree = ast.parse(path.read_text())
     except (SyntaxError, UnicodeDecodeError):
@@ -116,12 +109,8 @@ def _imported_modules(path: Path) -> set[str]:
 
 
 def missing_imports(iv) -> list[str]:
-    """A stage importing a module of this project that is not there.
 
-    Only this project's own modules: an absent third-party package is pip's problem and
-    shows up the moment anything runs, but a local module a refactor renamed is a name that
-    looks fine and fails at the one moment the stage is finally reached.
-    """
+
     tops = {d.split("/")[0].removesuffix(".py") for d in iv.code}
     bad = []
     for project, f in _sources(iv):

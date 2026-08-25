@@ -1,9 +1,5 @@
-"""The clickable graph: what the page is handed, checked as a dict.
 
-The page itself is a template with a JSON blob in it, so everything worth asserting is in
-the blob. These run against a pipeline built here — never a real tree, which moves while
-the assertions are being made.
-"""
+
 from __future__ import annotations
 
 import json
@@ -34,8 +30,8 @@ def frame():
 
 @pytest.fixture
 def built(iv):
-    """A source, a partitioned dataset, and one dataset TWO stages write — the shape the
-    per-partition node exists for."""
+
+
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
 
     @iv.data(dataset="processed/box/", why="one season", part="season")
@@ -71,18 +67,15 @@ def load(iv):
     return g, state, maybe, _web.payload(g, _viz.states(state, maybe), state, maybe)
 
 
-# ── the page and `iv status` count the same shards ────────────────────────────
-
 def test_the_page_counts_the_shards_iv_status_counts(built):
-    """One number, computed once. Two derivations of one fact is how they drift."""
+
     g, state, maybe, p = load(built)
     assert sum(len(n["shards"]) for n in p["nodes"]) == sum(len(v) for v in state.values())
 
 
 def test_a_dataset_two_stages_write_is_two_nodes_with_a_shard_each(built):
-    """Each node owns the shard IT writes. Handed the whole dataset's shards, the played
-    half would report the unplayed half's staleness as its own — and the total would count
-    every shared shard once per writer."""
+
+
     _, _, _, p = load(built)
     halves = [n for n in p["nodes"] if n["dataset"] == "processed/preds/"]
     assert len(halves) == 2
@@ -91,15 +84,13 @@ def test_a_dataset_two_stages_write_is_two_nodes_with_a_shard_each(built):
 
 
 def test_a_partitioned_dataset_is_one_node_holding_every_shard(built):
-    """The split is for a dataset several STAGES write, not for one stage's partitions —
-    otherwise a twenty-season table would be twenty nodes."""
+
+
     _, _, _, p = load(built)
     box = [n for n in p["nodes"] if n["dataset"] == "processed/box/"]
     assert len(box) == 1
     assert sorted(s["part"] for s in box[0]["shards"]) == ["season=2023", "season=2024"]
 
-
-# ── what a click has to answer ────────────────────────────────────────────────
 
 def test_every_node_carries_what_the_panel_shows(built):
     _, _, _, p = load(built)
@@ -119,7 +110,7 @@ def test_a_source_says_nothing_here_writes_it(built):
 
 
 def test_the_reason_a_shard_is_stale_is_carried_verbatim(built):
-    """The panel shows what `iv status` prints, not a paraphrase of it."""
+
     with built.writes("raw/feed/", why="the feed moves") as out:
         pl.DataFrame({"a": [9, 9, 9]}).write_parquet(out)
     g, state, _, p = load(built)
@@ -131,7 +122,7 @@ def test_the_reason_a_shard_is_stale_is_carried_verbatim(built):
 
 
 def test_upstream_and_downstream_are_reachable_from_the_edges(built):
-    """The page walks edges for the cone, so the edges have to BE the graph."""
+
     g, _, _, p = load(built)
     ids = {n["id"] for n in p["nodes"]}
     for e in p["edges"]:
@@ -140,9 +131,8 @@ def test_upstream_and_downstream_are_reachable_from_the_edges(built):
 
 
 def test_every_declared_edge_is_drawn_and_reduce_drops_the_implied_ones(iv):
-    """Every edge is a read someone wrote down, so the page draws all of them. The PNG
-    drops the ones a longer path implies, which is right for a still picture and wrong
-    where the point is seeing what a stage reads. `--reduce` puts that behaviour back."""
+
+
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
 
     @iv.data(dataset="processed/mid/", why="the middle")
@@ -160,8 +150,8 @@ def test_every_declared_edge_is_drawn_and_reduce_drops_the_implied_ones(iv):
 
 
 def test_a_cone_is_unchanged_by_the_reduction(built):
-    """Reachability is what the highlight is, and a reduction preserves it exactly — so
-    dropping the implied edges cannot change which nodes light up."""
+
+
     import networkx as nx
     g, _, _, _ = load(built)
     d = _viz.to_networkx(g)
@@ -176,8 +166,6 @@ def test_the_counts_add_up_to_the_nodes(built):
     assert sum(p["counts"].values()) == len(p["nodes"])
 
 
-# ── it writes a page ──────────────────────────────────────────────────────────
-
 def test_the_written_page_carries_the_payload(built, tmp_path):
     g, state, maybe, p = load(built)
     out = _web.write(g, tmp_path / "dag.html", status=_viz.states(state, maybe),
@@ -190,23 +178,15 @@ def test_the_written_page_carries_the_payload(built, tmp_path):
 
 
 def test_the_page_is_one_file(built, tmp_path):
-    """No sidecar, no server. `iv viz --html` writes a thing you can open or send."""
+
     g, _, _, _ = load(built)
     _web.write(g, tmp_path / "dag.html")
     assert [f.name for f in tmp_path.iterdir() if f.is_file()] == ["dag.html"]
 
 
-# ── the layout ────────────────────────────────────────────────────────────────
-
 def test_every_edge_points_right(built):
-    """The one thing that makes a layered graph readable: a column is how deep in the
-    pipeline a thing is, so an edge pointing left would be a lie about the order.
 
-    dagre cannot give this. Its longest-path ranker is as-LATE-as-possible, so a terminal
-    output gets pushed to the last column while its sibling from the same stage stays where
-    it was; its default ranker minimises edge length and puts nothing anywhere in
-    particular.
-    """
+
     g, _, _, p = load(built)
     at = {n["id"]: n["position"] for n in p["nodes"]}
     for e in p["edges"]:
@@ -215,9 +195,8 @@ def test_every_edge_points_right(built):
 
 
 def test_outputs_of_one_stage_share_a_column(iv):
-    """They are written by one body from one set of inputs, so they are the same depth.
-    Split across columns, the edges between their shared upstream and each of them cross
-    everything in between — which is what the ALAP ranker did."""
+
+
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
 
     @iv.step(output={"a": "processed/a/", "b": "processed/b/", "c": "processed/c/"},
@@ -231,9 +210,8 @@ def test_outputs_of_one_stage_share_a_column(iv):
 
 
 def test_a_column_is_as_wide_as_its_own_longest_label(iv):
-    """Sizing every column for the longest label in the graph is most of a page of white
-    space, because one dataset called possessions_with_lineups should not set the gap
-    between two called xpm and wvorp."""
+
+
     feed = iv.source("raw/x/", why="short name")
 
     @iv.data(dataset="processed/a_very_long_dataset_name_indeed/", why="long")
@@ -251,7 +229,7 @@ def test_a_column_is_as_wide_as_its_own_longest_label(iv):
 
 
 def test_the_page_needs_only_a_renderer(built, tmp_path):
-    """The layout is computed in Python, so the page pulls one script rather than three."""
+
     g, _, _, _ = load(built)
     text = _web.write(g, tmp_path / "dag.html").read_text()
     assert text.count("<script src=") == 1
@@ -259,9 +237,8 @@ def test_the_page_needs_only_a_renderer(built, tmp_path):
 
 
 def test_the_panel_lists_the_reads_the_code_declares_not_the_drawn_ones(iv):
-    """The reduction drops an edge a longer path implies. That is right for drawing and
-    wrong for the panel: `end` declares a read of `feed`, and saying otherwise because
-    `feed` also reaches it through `mid` misdescribes the code."""
+
+
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
 
     @iv.data(dataset="processed/mid/", why="the middle")
@@ -284,8 +261,8 @@ def test_the_panel_lists_the_reads_the_code_declares_not_the_drawn_ones(iv):
 
 
 def test_the_columns_are_the_same_with_and_without_the_reduction(built):
-    """An implied edge cannot lengthen the longest path to its own target, so dropping it
-    cannot move a node's column. Drawing every edge costs the layout nothing."""
+
+
     g, _, _, _ = load(built)
     full = {n["id"]: n["position"]["x"] for n in _web.payload(g)["nodes"]}
     cut = {n["id"]: n["position"]["x"] for n in _web.payload(g, reduce=True)["nodes"]}
@@ -293,9 +270,8 @@ def test_the_columns_are_the_same_with_and_without_the_reduction(built):
 
 
 def test_the_layout_constants_match_the_css_they_are_meant_to_describe():
-    """`_positions` reserves space from FONT and MARKER; the page draws from `font-size`
-    and `width`. They are two statements of one number, and moving one without the other
-    is silent: the labels run into the next column, or two markers land on one line."""
+
+
     import re
     css = _web._PAGE
     assert f"'font-size':{_web.FONT}," in css

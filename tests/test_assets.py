@@ -1,9 +1,5 @@
-"""A declared dataset, end to end.
 
-Every assertion is about a DECISION — did this body run, or did it not — because that is
-the only thing the package exists to get right. The cases that matter most are the ones
-where something CHANGED and a stage had to notice.
-"""
+
 from __future__ import annotations
 
 import polars as pl
@@ -28,8 +24,6 @@ def iv(tmp_path, monkeypatch):
 def frame(n=2, extra=0):
     return pl.DataFrame({"player": list(range(n)), "pts": [x + extra for x in range(n)]})
 
-
-# ── the basic loop ────────────────────────────────────────────────────────────
 
 def test_a_derived_asset_builds_then_skips(iv):
     ran = []
@@ -87,7 +81,7 @@ def test_a_version_reruns_its_stage_but_identical_output_stops_downstream(iv):
         return source
 
     feed(); mid(); end()
-    iv._versions[mid.dataset] = "1"  # equivalent to adding version="1" and re-importing
+    iv._versions[mid.dataset] = "1"
     assert mid.why_stale()
     mid()
     assert end.why_stale() is None
@@ -263,7 +257,7 @@ def test_impact_ignores_a_missing_dynamic_output_when_tracing(iv, monkeypatch):
     def out(season, source=iv.same_part(feed, why="the matching season")):
         return source
 
-    feed("2025")                 # `out` is intentionally absent
+    feed("2025")
     import iv.cli as cli
     monkeypatch.setattr(cli, "_load", lambda: iv)
     result = CliRunner().invoke(app, ["impact", "feed", "--tick"])
@@ -381,7 +375,7 @@ def test_impact_ticks_only_shards_owned_by_a_writer_of_a_shared_dataset(iv,
 
     named_result = runner.invoke(app, ["impact", "named", "--tick"])
     assert named_result.exit_code == 0, named_result.output
-    assert "derived/blocks/source=named" not in named_result.output  # no downstream
+    assert "derived/blocks/source=named" not in named_result.output
     assert "Available" not in named_result.output
 
     wrong_part = runner.invoke(app, [
@@ -477,7 +471,7 @@ def test_a_moved_upstream_rebuilds(iv):
 
 
 def test_a_rebuild_that_does_not_move_the_bytes_stops_there(iv):
-    """The early cutoff: an upstream re-runs, produces the same shard, and the tail sits."""
+
     ran = []
 
     @iv.data(dataset="raw/feed/", why="the feed")
@@ -490,15 +484,13 @@ def test_a_rebuild_that_does_not_move_the_bytes_stops_there(iv):
         return feed
 
     feed(); out()
-    feed()                                   # runs again — a root always does
+    feed()
     out()
     assert len(ran) == 1, "the bytes did not move, so the downstream must not follow"
 
 
-# ── a root is what lets anything in ───────────────────────────────────────────
-
 def test_a_root_runs_every_time_because_nothing_else_can_notice_the_world(iv):
-    """No upstream means no question `why_stale` can ask, so skipping seals the tree shut."""
+
     ran = []
     n = [2]
 
@@ -553,8 +545,6 @@ def test_once_is_warned_about(iv):
     _, warns = _graph.check(_graph.build(iv))
     assert [w for w in warns if "RUNS ONCE" in w]
 
-
-# ── partitions ────────────────────────────────────────────────────────────────
 
 def seasons_pipeline(iv, pts=None):
     pts = pts if pts is not None else {"2024": 10, "2025": 20, "2026": 30}
@@ -639,8 +629,6 @@ def test_an_unpartitioned_asset_takes_no_partition(iv):
         feed.for_each(["2024"])
 
 
-# ── round trip: a cached call returns what the body returned ─────────────────
-
 def test_a_dict_round_trips_through_json(iv):
     @iv.data(dataset="config/knobs/", why="the knobs", ext=".json")
     def knobs():
@@ -652,8 +640,8 @@ def test_a_dict_round_trips_through_json(iv):
 
 
 def test_a_dict_is_refused_by_parquet_rather_than_silently_reshaped(iv):
-    """The trap this exists to close: dict in, DataFrame out, and the same function then
-    gives two types depending on whether the shard happened to be current."""
+
+
     @iv.data(dataset="config/knobs/", why="the knobs")
     def knobs():
         return {"half_life": 4.0}
@@ -680,7 +668,7 @@ def test_an_arbitrary_object_round_trips_through_pickle(iv):
 
 
 def test_a_body_may_write_the_file_itself(iv):
-    """The escape hatch: take `out` and nothing is inferred about the value."""
+
     @iv.data(dataset="dump/page/", why="a rendered page", ext=".html")
     def page(out):
         out.write_text("<h1>hi</h1>")
@@ -696,8 +684,6 @@ def test_a_body_that_returns_nothing_and_takes_no_out_is_an_error(iv):
     with pytest.raises(DeclError, match="returned None"):
         out()
 
-
-# ── what is refused ───────────────────────────────────────────────────────────
 
 def test_one_dataset_has_one_producer(iv):
     @iv.data(dataset="raw/feed/", why="the feed")
@@ -762,10 +748,8 @@ def test_loading_a_shard_that_was_never_built_says_so(iv):
         feed.load()
 
 
-# ── the update: read your own last copy ───────────────────────────────────────
-
 def test_a_stage_may_read_the_copy_it_is_about_to_overwrite(iv):
-    """Excluded from the comparison, or the stage is permanently stale against itself."""
+
     day = ["day1"]
 
     @iv.data(dataset="config/today/", why="the clock", ext=".json")
@@ -786,8 +770,6 @@ def test_a_stage_may_read_the_copy_it_is_about_to_overwrite(iv):
     assert log().height == 2, "a new day appended"
     assert log.is_current()
 
-
-# ── one computation, several outputs ──────────────────────────────────────────
 
 def test_a_stage_with_several_outputs_runs_once(iv):
     ran = []
@@ -810,7 +792,7 @@ def test_a_stage_with_several_outputs_runs_once(iv):
 
 
 def test_losing_any_one_output_brings_the_whole_stage_back(iv):
-    """A crash between two of the writes leaves exactly this state."""
+
     import shutil
     ran = []
 
@@ -861,9 +843,8 @@ def test_allow_missing_lets_an_output_stay_absent(iv):
 
 
 def test_a_dataset_nothing_reads_is_terminal_without_being_told(iv):
-    """`terminal=True` used to be an assertion every dump had to remember to make so a
-    check would not complain. With every dataset declared the graph knows its own
-    consumers, and a leaf is a fact rather than a claim."""
+
+
     feed = iv.source("raw/feed/", why="arrives from outside")
 
     @iv.step(output={"read_by_someone": "processed/a/", "read_by_a_person": "processed/b/"},
@@ -920,8 +901,6 @@ def test_a_fixed_partition_takes_no_call_argument(iv):
         block("b")
 
 
-# ── one computation, many shards ──────────────────────────────────────────────
-
 def test_split_writes_a_shard_per_returned_key(iv):
     ran = []
 
@@ -959,8 +938,6 @@ def test_split_needs_a_partition_key(iv):
             return {"a": frame()}
 
 
-# ── external sources ──────────────────────────────────────────────────────────
-
 def test_an_external_source_is_declared_and_drawn(iv):
     @iv.data(dataset="config/today/", why="the clock", ext=".json")
     def today():
@@ -976,12 +953,9 @@ def test_an_external_source_is_declared_and_drawn(iv):
     assert [s.dataset for s in g.stages[node].externals] == ["external:espn/feeds"]
 
 
-# ── a stage that writes nothing ───────────────────────────────────────────────
-
 def test_a_stage_may_write_nothing_and_still_declare_what_it_reads(iv):
-    """A fetch fills a download cache; a publish uploads. Neither leaves an artifact iv
-    names, so there is nothing to be stale and nothing to skip on — but the reads are
-    still worth declaring, or the graph cannot draw the edge."""
+
+
     ran = []
 
     @iv.data(dataset="dump/site/", why="the payload")
@@ -1017,8 +991,6 @@ def test_a_stage_that_writes_nothing_has_no_partition(iv):
             pass
 
 
-# ── as_paths: what the parameter is handed ────────────────────────────────────
-
 def test_as_paths_hands_back_paths_and_the_default_hands_back_contents(iv):
     @iv.data(dataset="raw/feed/", why="the feed", once=True)
     def feed():
@@ -1043,8 +1015,8 @@ def test_as_paths_hands_back_paths_and_the_default_hands_back_contents(iv):
 
 
 def test_an_optional_read_that_selects_nothing_is_empty_either_way(iv):
-    """The two forms disagree on what "nothing" looks like, and both are the natural one
-    for their side: `[]` concatenates with another path list, `None` tests with `is None`."""
+
+
     got = {}
     absent = iv.source("raw/absent/", why="arrives from outside")
 
@@ -1057,8 +1029,6 @@ def test_an_optional_read_that_selects_nothing_is_empty_either_way(iv):
     out()
     assert got["paths"] == [] and got["contents"] is None
 
-
-# ── a read names the stage that writes it ─────────────────────────────────────
 
 def test_naming_the_stage_builds_the_same_graph_as_naming_the_path(iv):
     @iv.data(dataset="raw/feed/", why="the feed", once=True)
@@ -1083,10 +1053,8 @@ def test_naming_a_stage_that_writes_several_does_not_say_which(iv):
         iv.all_of(two, why="ambiguous")
 
 
-# ── own_last_copy with nothing to name ────────────────────────────────────────
-
 def test_a_bare_own_last_copy_means_this_stage_s_own_output(iv):
-    """The read-modify-write loop, with the dataset written once instead of twice."""
+
     day = ["day1"]
     ran = []
 
@@ -1118,13 +1086,9 @@ def test_a_bare_own_last_copy_on_a_multi_output_stage_is_refused(iv):
             return {"a": frame(), "b": frame()}
 
 
-
-# ── declaring a dataset, and producing one ───────────────────────────────────
-
 def test_a_declared_dataset_is_produced_by_naming_it_in_output(iv):
-    """`iv.data` says a dataset EXISTS. `@iv.step` says what computes it. They are two
-    statements because a stage writing four tables has one body and four datasets, and
-    saying which is which inside `output=` is the only place the names can meet."""
+
+
     feed = iv.source("raw/feed/", why="arrives from outside")
     ratings = iv.dataset("processed/ratings/", why="one row per player")
     summary = iv.dataset("processed/summary/", why="one row per season")
@@ -1138,8 +1102,8 @@ def test_a_declared_dataset_is_produced_by_naming_it_in_output(iv):
 
 
 def test_a_read_names_the_declaration_rather_than_the_key_it_arrives_under(iv):
-    """`xpm["ratings"]` needs you to know the key the body returns it under. The
-    declaration is the same dataset said without that."""
+
+
     feed = iv.source("raw/feed/", why="arrives from outside")
     ratings = iv.dataset("processed/ratings/", why="one row per player")
 
@@ -1151,7 +1115,7 @@ def test_a_read_names_the_declaration_rather_than_the_key_it_arrives_under(iv):
 
 
 def test_one_output_needs_no_declaration_of_its_own(iv):
-    """A name used once does not need a line to itself: the read names the STAGE."""
+
     feed = iv.source("raw/feed/", why="arrives from outside")
 
     @iv.data(dataset="processed/mid/", why="the middle")
@@ -1169,8 +1133,8 @@ def test_a_dataset_is_declared_once_as_one_thing_or_the_other(iv):
 
 
 def test_a_source_cannot_be_named_as_something_a_stage_writes(iv):
-    """A read may name a source; an `output=` may not. Otherwise a dataset would have two
-    declarations disagreeing about where it comes from."""
+
+
     feed = iv.source("raw/feed/", why="arrives from outside")
     with pytest.raises(DeclError, match="declared a source"):
         @iv.data(dataset=feed, why="writing what arrives from outside")
@@ -1179,9 +1143,8 @@ def test_a_source_cannot_be_named_as_something_a_stage_writes(iv):
 
 
 def test_the_advice_in_the_own_last_copy_error_is_advice_that_works(iv):
-    """The message used to say `own_last_copy('raw/box/')` — a bare path, which reads
-    stopped accepting. Following it raised a second, different error. An error that tells
-    you to do something impossible is worse than no error, so this runs the advice."""
+
+
     box = iv.dataset("raw/box/", why="the box scores being patched")
     pbp = iv.dataset("raw/pbp/", why="the play-by-play being patched")
 
@@ -1194,21 +1157,13 @@ def test_the_advice_in_the_own_last_copy_error_is_advice_that_works(iv):
 
 
 def test_a_multi_output_stage_cannot_read_its_own_copy_without_a_declaration(iv):
-    """Not merely unclear — impossible. The stage cannot name itself: the `Asset` does not
-    exist yet where a parameter default is evaluated. So this is the one case where
-    `iv.data` is load-bearing rather than a legibility choice."""
+
+
     with pytest.raises(DeclError, match="declared above and named here"):
         @iv.step(output={"box": "raw/box/", "pbp": "raw/pbp/"}, why="patch both")
         def patch(was=iv.own_last_copy(why="the copy this amends")):
             return {"box": frame(), "pbp": frame()}
 
-
-# ── a dataset is declared exactly once ────────────────────────────────────────
-#
-# The point of `iv.dataset` is that the path is written in ONE place and named everywhere
-# else. A second declaration takes that away silently: two `why=` lines that can drift
-# apart, and a rename that gets one of them and leaves the other pointing at a directory
-# nothing fills.
 
 def test_declaring_the_same_dataset_twice_is_refused(iv):
     iv.dataset("processed/x/", why="a rating per player")
@@ -1217,8 +1172,8 @@ def test_declaring_the_same_dataset_twice_is_refused(iv):
 
 
 def test_the_second_declaration_does_not_silently_win(iv):
-    """It used to overwrite, so the LAST `iv.dataset` call decided what the dataset was for
-    — which is the failure this refuses, not merely an untidy one."""
+
+
     iv.dataset("processed/x/", why="the original reason")
     with pytest.raises(DeclError):
         iv.dataset("processed/x/", why="a contradicting reason")
@@ -1226,8 +1181,8 @@ def test_the_second_declaration_does_not_silently_win(iv):
 
 
 def test_a_stage_may_not_write_the_path_of_a_declared_dataset_out_again(iv):
-    """Declaring it and then restating the path in an output= is two declarations of one
-    dataset, which is exactly what declaring it was supposed to stop."""
+
+
     iv.dataset("processed/x/", why="declared up here")
     with pytest.raises(DeclError, match="already declared on its own line"):
         @iv.data(dataset="processed/x/", why="and written out again down here")
@@ -1236,8 +1191,8 @@ def test_a_stage_may_not_write_the_path_of_a_declared_dataset_out_again(iv):
 
 
 def test_naming_the_declaration_is_one_declaration_used_twice(iv):
-    """The same path in two places is refused; the same OBJECT in two places is the point.
-    Three stages writing three shards of one dataset all name it."""
+
+
     college = iv.dataset("derived/college/", why="one row per amateur source")
 
     @iv.data(dataset=college, why="the NCAA block", part={"source": "ncaa"})
@@ -1253,7 +1208,7 @@ def test_naming_the_declaration_is_one_declaration_used_twice(iv):
 
 
 def test_declaring_a_dataset_a_stage_already_wrote_inline_is_refused(iv):
-    """The same rule from the other side: whichever came first is the declaration."""
+
     @iv.data(dataset="processed/x/", why="declared inline, where it is written")
     def x():
         return frame()
@@ -1268,10 +1223,8 @@ def test_declaring_the_same_source_twice_is_refused(iv):
         iv.source("raw/bios/", why="dropped in by hand once a year")
 
 
-# ── nothing writes it, and something reads it ────────────────────────────────
-
 def test_reading_a_declared_dataset_nothing_writes_is_an_error(iv):
-    """`iv check` says it, rather than the build saying "selected no shards" an hour in."""
+
     ghost = iv.dataset("processed/ghost/", why="a table that lost its writer")
 
     @iv.data(dataset="processed/y/", why="reads it")
@@ -1308,7 +1261,7 @@ def test_a_dataset_a_required_read_wants_and_nothing_writes_is_still_an_error(iv
 
 
 def test_a_declared_dataset_nothing_reads_or_writes_is_only_a_warning(iv):
-    """Dead, but nothing is going to fail because of it."""
+
     iv.dataset("processed/ghost/", why="a table that lost its writer")
 
     @iv.data(dataset="processed/y/", why="minds its own business")
@@ -1320,8 +1273,6 @@ def test_a_declared_dataset_nothing_reads_or_writes_is_only_a_warning(iv):
     assert any("DECLARED, NOBODY WRITES  processed/ghost/" in w for w in warns)
 
 
-# ── and the same for a source, which nothing here may write ──────────────────
-
 @pytest.mark.parametrize("write", [
     pytest.param(lambda iv, s: iv.data(dataset=s, why="w"), id="@iv.data names the source"),
     pytest.param(lambda iv, s: iv.data(dataset="raw/bios/", why="w"), id="@iv.data names its path"),
@@ -1331,17 +1282,16 @@ def test_a_declared_dataset_nothing_reads_or_writes_is_only_a_warning(iv):
                  id="@iv.step by path, among several"),
 ])
 def test_no_stage_may_write_a_source(iv, write):
-    """A source is a claim that something OUTSIDE puts the bytes there. A stage writing it
-    contradicts the claim, and then `iv check` cannot say whether a missing file is a
-    fetch that has not run or a stage that has not run."""
+
+
     bios = iv.source("raw/bios/", why="dropped in by hand once a year")
     with pytest.raises(DeclError, match="declared a source"):
         write(iv, bios)(lambda: frame())
 
 
 def test_a_source_is_filled_through_iv_writes_which_is_still_allowed(iv):
-    """Refusing a STAGE is not refusing the bytes. Out-of-band data lands through
-    `iv.writes`, which is how a fetcher outside the graph puts a source there."""
+
+
     bios = iv.source("raw/bios/", why="dropped in by hand once a year")
     with iv.writes("raw/bios/", why="the annual drop") as out:
         frame().write_parquet(out)
@@ -1354,9 +1304,8 @@ def test_a_source_is_filled_through_iv_writes_which_is_still_allowed(iv):
 
 
 def test_a_stage_writing_several_names_the_shard_on_the_output(iv):
-    """A stage writing ONE dataset says which shard with its own `part=`. One writing
-    several cannot — `part=` there would claim the same shard of every output — so the
-    claim moves to the output it is about."""
+
+
     college = iv.dataset("derived/college/", why="one row per amateur source")
     intl_raw = iv.dataset("derived/intl/", why="the scraped international stats")
 
@@ -1370,8 +1319,8 @@ def test_a_stage_writing_several_names_the_shard_on_the_output(iv):
 
 
 def test_naming_a_shard_is_not_a_second_declaration(iv):
-    """`shard()` returns the declaration with the partition named, so the declare-once
-    check still sees one declaration — otherwise the shape above would be unwritable."""
+
+
     college = iv.dataset("derived/college/", why="one row per amateur source")
 
     @iv.data(dataset=college, why="the NCAA block", part={"source": "ncaa"})

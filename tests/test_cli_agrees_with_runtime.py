@@ -1,11 +1,5 @@
-"""`iv status` must give the same answer the run would.
 
-The CLI cannot ask a running step what it reads, so it reads each stage's upstreams off the
-static scan, while the run reads them off the decorated function. Two ways of arriving at
-one fact, and nothing until now checked they arrive at the same place. If they drift, the
-CLI says `current` about something the run is about to rebuild — or worse, says `current`
-because it could not find the question at all.
-"""
+
 from __future__ import annotations
 
 import sys
@@ -37,8 +31,7 @@ def build(f=iv.all_of(feed, why="the feed")):
     return f
 '''
 
-# A read reaching ACROSS modules: `end` imports `mid` and names the stage in it. The
-# import order that makes the reference resolvable is the same order the stages run in.
+
 END = '''
 import mid
 from p import iv
@@ -62,9 +55,8 @@ def project(tmp_path, monkeypatch):
     for m in ("p", "mid", "end"):
         sys.modules.pop(m, None)
     import p
-    # A declared stage registers itself on IMPORT, so a plain import is the whole of it.
-    # The project scan used to find stages by reading files; a pipeline that spans several
-    # modules imports them from the one `[tool.iv] instance` names.
+
+
     __import__("mid"); __import__("end")
     yield tmp_path, p.iv
     for m in ("p", "mid", "end"):
@@ -83,17 +75,14 @@ def seed(iv, n=3):
 
 
 def cli_says(iv):
-    """What `iv status` would print: dataset -> stale?
 
-    Produced datasets only. A root nothing declares as an output has no stage to ask, so
-    it is not in the report — `raw/feed/` here.
-    """
+
     state = _staleness(iv, _graph.build(iv))
     return {ds: any(why for why in shards.values()) for ds, shards in state.items()}
 
 
 def run_says(iv):
-    """What actually happens when you run it: dataset -> did the stage run?"""
+
     out = {}
     for ds, asset in steps().items():
         before = asset.is_current()
@@ -105,7 +94,7 @@ def run_says(iv):
 def test_they_agree_when_everything_is_current(project):
     _, iv = project
     seed(iv)
-    run_says(iv)                                   # build it all
+    run_says(iv)
 
     cli = cli_says(iv)
     assert cli == {"processed/mid/": False, "dump/site/": False}
@@ -113,25 +102,20 @@ def test_they_agree_when_everything_is_current(project):
 
 
 def test_the_cli_and_the_run_agree_at_every_step_of_a_cascade(project):
-    """The CLI answers about the tree AS IT STANDS, and so does the run.
 
-    A moved feed does not make the terminal dump stale — not yet. Its upstream shard has
-    not moved, only the thing that builds that shard. So the honest invariant is lockstep:
-    at each point, what the CLI calls stale is exactly what runs next. (`iv plan` is what
-    reports the not-yet-stale tail, as `maybe — downstream of a rebuild`.)
-    """
+
     _, iv = project
     seed(iv)
     run_says(iv)
-    seed(iv, n=9)                                  # the feed moves
+    seed(iv, n=9)
 
-    # The middle is stale; the dump is not, because the middle has not been rebuilt yet.
+
     assert cli_says(iv) == {"processed/mid/": True, "dump/site/": False}
 
     assert not steps()["processed/mid/"].is_current(), "the CLI said this one was stale"
     steps()["processed/mid/"]()
 
-    # Rebuilding the middle moved its bytes, and only now is the dump stale.
+
     assert cli_says(iv) == {"processed/mid/": False, "dump/site/": True}
 
     assert not steps()["dump/site/"].is_current()
@@ -140,16 +124,12 @@ def test_the_cli_and_the_run_agree_at_every_step_of_a_cascade(project):
 
 
 def test_a_rebuild_that_does_not_move_the_bytes_stops_there(project):
-    """The early cutoff, checked through the CLI rather than the run.
 
-    Re-seeding identical data re-commits the same shard, so the middle re-runs and the dump
-    must not — and the CLI has to say so, or `iv status` would send you rebuilding a tail
-    that is genuinely finished.
-    """
+
     _, iv = project
     seed(iv)
     run_says(iv)
-    seed(iv)                                       # same data, same fingerprint
+    seed(iv)
 
     assert cli_says(iv) == {"processed/mid/": False, "dump/site/": False}
     assert run_says(iv) == {"processed/mid/": False, "dump/site/": False}
@@ -175,7 +155,7 @@ def test_a_deleted_output_is_stale_to_the_cli_and_to_the_run(project):
 
 
 def test_the_cli_answer_does_not_change_under_a_snapshot(project):
-    """The memoised path and the live path are the same report."""
+
     _, iv = project
     seed(iv)
     run_says(iv)
@@ -198,12 +178,8 @@ def build(one=iv.all_of(feed, why="the upstream, one way"),
 
 
 def test_one_dataset_read_at_two_call_sites_gets_one_answer(tmp_path, monkeypatch):
-    """A branching stage reads the same upstream twice, for two different reasons.
 
-    `reads_in` reports the SET of what a stage reads; the scan reports a site per call.
-    Folded into the key twice that is a different digest, so `iv status` called the stage
-    stale forever while the run skipped it — a disagreement neither side could see.
-    """
+
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "d"\nversion = "0"\n')
@@ -252,12 +228,8 @@ def upcoming(df=iv.all_of(other, why="the unplayed upstream")):
 
 
 def test_each_shard_is_judged_against_the_stage_that_writes_it(tmp_path, monkeypatch):
-    """Two stages, two shards, one dataset — and two different upstreams.
 
-    `iv status` used to take the first writer it found and judge every shard of the dataset
-    against it, so moving what only the SECOND writer reads was answered with the first
-    one's question. Each stage names the shard it owns, so each shard has an owner to ask.
-    """
+
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "d"\nversion = "0"\n')
@@ -279,7 +251,7 @@ def test_each_shard_is_judged_against_the_stage_that_writes_it(tmp_path, monkeyp
     b.upcoming()
     assert cli_says(p.iv)["processed/preds/"] is False
 
-    # Move ONLY what the unplayed half reads.
+
     with p.iv.writes("raw/other/", why="the other feed") as out:
         pl.DataFrame({"a": [1, 2, 3]}).write_parquet(out)
 
@@ -294,12 +266,8 @@ def test_each_shard_is_judged_against_the_stage_that_writes_it(tmp_path, monkeyp
 
 
 def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkeypatch):
-    """The clock turns, the poll is stale, and everything below it MIGHT move.
 
-    Might, and usually does not: the poll re-fetches, writes the bytes it wrote yesterday,
-    and the commit is content-addressed so nothing downstream follows. Reporting a whole
-    tail as stale every morning would be a wall of red that is wrong by the time it is read.
-    """
+
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
     iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
@@ -328,7 +296,7 @@ def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkey
     assert _stale_shards(state) == set() and _downstream_of(g, state) == set()
 
     day[0] = "day2"
-    today()                      # the clock is a root; running it is how the day lands
+    today()
     state = _staleness(iv, g)
     maybe = _downstream_of(g, state)
     assert _stale_shards(state) == {("raw/feed/", "")}, \
@@ -337,19 +305,15 @@ def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkey
         "the tail is transitive, per shard, and a maybe"
     assert not any(state["processed/mid/"].values()), "a maybe is still current on disk"
 
-    feed()                       # re-polls, writes the same bytes, and stops there
+    feed()
     state = _staleness(iv, g)
     assert _stale_shards(state) == set() and _downstream_of(g, state) == set(), \
         "the maybe was right to be a maybe"
 
 
 def test_only_the_shards_a_selector_reaches_may_follow(tmp_path, monkeypatch):
-    """One season moves, and the cohorts that cannot see it do not follow.
 
-    This is the whole point of answering per shard. `cohort[2025]` is fit on seasons
-    strictly before 2025, so a change to 2025 is not its business — and saying "this
-    dataset may move" would have made it look like it was.
-    """
+
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
     iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
@@ -373,7 +337,7 @@ def test_only_the_shards_a_selector_reaches_may_follow(tmp_path, monkeypatch):
     g = _graph.build(iv)
     assert _stale_shards(_staleness(iv, g)) == set()
 
-    # 2025's feed moves. box[2025] goes stale; nothing else has.
+
     with iv.writes("raw/feed/", why="the feed", part={"season": "2025"}) as out:
         pl.DataFrame({"a": [999]}).write_parquet(out)
 
@@ -388,8 +352,8 @@ def test_only_the_shards_a_selector_reaches_may_follow(tmp_path, monkeypatch):
 
 def test_a_dataset_reports_its_stale_and_its_following_shards_separately(tmp_path,
                                                                         monkeypatch):
-    """A panel with one season stale and twenty that share a crosswalk is the ordinary
-    case, and the counts either side of that are the whole story of how much work is due."""
+
+
     from iv.cli import _line
     shards = {"season=2024": None, "season=2025": None,
               "season=2026": "its inputs moved"}
