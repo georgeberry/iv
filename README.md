@@ -134,6 +134,9 @@ strings (`.html` or `.txt`). A stage may accept `out` and write its staged file 
 
 `maybe` means an upstream may change: downstream work runs only if the rebuilt content
 gets a new fingerprint. Set `IV_TRACE=path` during a pipeline run to record a trace.
+During `iv run`, each rebuild reports its cause. If an upstream's content changed earlier
+in that run, the exact dataset shard is named; older aggregate keys can only identify that
+declared inputs, the version, or the schema changed.
 
 ## Safety
 

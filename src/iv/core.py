@@ -147,6 +147,7 @@ class Invalidator:
         self._datasets: dict[str, _assets.Dataset] = {}
 
         self._schemas: dict[str, tuple | None] = {}
+        self._changes: set[tuple[str, str]] = set()
 
 
         self._partition_universe = _partition_universe(partitions)
@@ -524,7 +525,11 @@ class Invalidator:
         out_dir = self.resolve_out(name)
         with self.bookkeeping():
             key = self.key_of(name, part, self._inputs)
-            _sh.commit(staged, out_dir, part=part, key=key)
+            _sh.commit(
+                staged, out_dir, part=part, key=key,
+                on_commit=lambda _, changed: self._changes.add(
+                    (name, _sh.encode_part(part))) if changed else None,
+            )
         self.record("io", op="write", rel=name, why=why, part=_sh.encode_part(part),
                     key=key, seconds=round(time.time() - started, 2))
         if not self._in_step:

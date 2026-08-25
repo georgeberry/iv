@@ -173,6 +173,7 @@ def test_runner_prints_plan_progress_and_stage_output(iv, monkeypatch):
     assert first.exit_code == 0, first.output
     assert "iv run · 1 stage shard(s)" in first.output
     assert "[1/1]" in first.output
+    assert "rebuild — not on disk" in first.output
     assert "output" in first.output and "│ fetching the official feed" in first.output
     assert "reran (" in first.output and "1 reran, 0 current — skipped" in first.output
 
@@ -180,6 +181,27 @@ def test_runner_prints_plan_progress_and_stage_output(iv, monkeypatch):
     assert second.exit_code == 0, second.output
     assert "current — skipped (" in second.output
     assert "0 reran, 1 current — skipped" in second.output
+
+
+def test_runner_names_an_upstream_that_changed_earlier_in_the_run(iv, monkeypatch):
+    value = [1]
+
+    @iv.data(dataset="raw/feed/", why="a moving root")
+    def feed():
+        return frame(extra=value[0])
+
+    @iv.data(dataset="processed/out/", why="a consumer")
+    def out(source=iv.all_of(feed, why="the feed")):
+        return source
+
+    feed(); out()
+    value[0] = 2
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["run"])
+    assert result.exit_code == 0, result.output
+    assert "rebuild — root has no declared inputs" in result.output
+    assert "rebuild — upstream changed: raw/feed/(one shard)" in result.output
 
 
 def test_runner_writes_one_incremental_output_log(iv, monkeypatch, tmp_path):
@@ -199,6 +221,7 @@ def test_runner_writes_one_incremental_output_log(iv, monkeypatch, tmp_path):
     text = log.read_text()
     assert "iv run · 1 stage shard(s)" in text
     assert "[1/1]" in text and "first line" in text and "second line" in text
+    assert "[iv] rebuild — not on disk" in text
     assert "[iv] reran (" in text and "1 reran, 0 current — skipped" in text
 
     second = runner.invoke(app, ["run", "--log", str(log)])

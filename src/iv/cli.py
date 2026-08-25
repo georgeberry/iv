@@ -188,6 +188,39 @@ def _open_run_log(path: Path | None, total: int):
     return out
 
 
+def _run_causes(asset, part: dict | None,
+                changed: set[tuple[str, str]]) -> list[str]:
+    out = []
+    for read in asset.triggers:
+        where = _resolve_sel(read.sel(), part, read.dataset)
+        for dataset, part_str in sorted(changed):
+            if dataset != read.dataset:
+                continue
+            if _sh.covers(where, _sh.decode_part(part_str)):
+                out.append(f"{dataset}{part_str or '(one shard)'}")
+    return sorted(set(out))
+
+
+def _rebuild_reason(iv, asset, part: dict | None, stale: str | None,
+                    changed: set[tuple[str, str]]) -> str:
+    if iv.force:
+        return "forced by IV_FORCE"
+    if asset.acts_only:
+        return "action has no output to mark current"
+    causes = _run_causes(asset, part, changed)
+    if causes:
+        shown = ", ".join(causes[:3])
+        return f"upstream changed: {shown}" + (
+            f" (+{len(causes) - 3} more)" if len(causes) > 3 else "")
+    if stale:
+        return stale
+    if not asset.may_skip:
+        return "root has no declared inputs"
+    if not asset.if_needed:
+        return "configured to run every time"
+    return "declared inputs, version, or schema changed"
+
+
 @app.command()
 def graph(focus: str = typer.Option(None, "--focus", help="only this stage and its cone"),
           full: bool = typer.Option(False, "--full", help="every edge, not the reduction")):
@@ -677,6 +710,7 @@ def run(
     typer.echo()
 
     ran = skipped = 0
+    changed: set[tuple[str, str]] = set()
     started = time.perf_counter()
     for i, (node, asset, p) in enumerate(work, 1):
         heading = f"[{i}/{len(work)}] {node}{_part_label(p)}"
@@ -688,10 +722,18 @@ def run(
         step_started = time.perf_counter()
         try:
             args = p or {}
-            will_run = (iv.force or not asset.if_needed or not asset.may_skip
-                        or not asset.is_current(**args))
+            stale = asset.why_stale(**args)
+            will_run = iv.force or not asset.if_needed or not asset.may_skip or bool(stale)
+            reason = _rebuild_reason(iv, asset, p, stale, changed) if will_run else None
+            if reason:
+                typer.secho(f"  rebuild — {reason}", fg="yellow")
+                if run_log:
+                    run_log.write(f"[iv] rebuild — {reason}\n")
+                    run_log.flush()
+            iv._changes.clear()
             with redirect_stdout(output), redirect_stderr(output):
                 asset(**p) if p is not None else asset()
+            changed.update(iv._changes)
         except BaseException:
             _print_stage_output(output.getvalue())
             if run_log:

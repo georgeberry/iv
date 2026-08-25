@@ -268,7 +268,7 @@ def stage(tag: object = "", stage_dir=None, ext: str = EXT) -> Path:
 
 
 def commit(staged, dataset_dir, *, part: dict[str, object] | None,
-           key: str = "") -> object:
+           key: str = "", on_commit=None) -> object:
     fp = fingerprint_of_file(staged)
     final = dataset_dir / shard_name(part, fp, Path(str(staged)).suffix, key)
     part_str = encode_part(part)
@@ -281,6 +281,8 @@ def commit(staged, dataset_dir, *, part: dict[str, object] | None,
         _move(staged, final)
     for s in superseded:
         s.path.unlink()
+    if on_commit:
+        on_commit(final, not any(s.fp == fp for s in superseded))
     return final
 
 

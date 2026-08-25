@@ -211,6 +211,17 @@ def test_identical_data_is_the_identical_file_and_touches_nothing(tmp_path):
     assert [p.name for p in d.iterdir()] == [f"season=2026.{sh.fingerprint(f)}.parquet"]
 
 
+def test_commit_reports_only_a_content_change(tmp_path):
+    d = tmp_path / "ds"
+    changed = []
+    for key, extra in (("a" * 16, 0), ("b" * 16, 0), ("c" * 16, 1)):
+        tmp = sh.stage(key, tmp_path)
+        frame(3, extra=extra).write_parquet(tmp)
+        sh.commit(tmp, d, part={"season": 2026}, key=key,
+                  on_commit=lambda _, moved: changed.append(moved))
+    assert changed == [True, False, True]
+
+
 def test_commit_leaves_other_partitions_alone(tmp_path):
     d = tmp_path / "ds"
     shard(d, {"season": 2025}, "old")
