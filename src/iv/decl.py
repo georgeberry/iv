@@ -99,7 +99,7 @@ class Read:
     kind: str
     body: tuple = ()
     optional: bool = False
-    key: str | None = None
+    key: str | tuple[str, ...] | None = None
     why: str = ""
     #: True hands the body the selected PATHS instead of their contents — what `iv.reads`
     #: has always returned. It says nothing about how staleness is decided: a key is
@@ -109,21 +109,40 @@ class Read:
     #: that never looks at the value at all and declares the read so the read can make it
     #: stale — a clock being the usual one.
     as_paths: bool = False
+    #: Dimensions of a composite partition held equal while a range varies `key`.
+    preserve: tuple[str, ...] = ()
 
     @property
     def is_own(self) -> bool:
         return self.kind == "own"
 
-    def bound_to(self, part_key: str | None) -> "Read":
+    def bound_to(self, part_keys: tuple[str, ...] | None) -> "Read":
         """The same read, with the stage's partition key filled in."""
-        if self.key is not None or self.kind in ("all", "own"):
+        if isinstance(part_keys, str):          # compatibility for direct users/tests
+            part_keys = (part_keys,)
+        if self.kind in ("all", "own", "multi"):
             return self
-        if part_key is None:
+        if self.key is not None and not (self.kind == "range" and part_keys):
+            return self
+        if not part_keys:
             raise DeclError(
                 f"{self.dataset} is read relative to the partition being built, but the "
                 f"stage declares no part=. A partition-relative selector only means "
                 f"something where there is a partition: @iv.step(..., part='season').")
-        return Read(self.dataset, self.kind, self.body, self.optional, part_key, self.why,
+        if self.kind == "range" and self.key is None and len(part_keys) != 1:
+            raise DeclError(
+                f"{self.dataset} is a range relative to a multi-partition stage. Name "
+                "the dimension: before_part(..., key='season').")
+        if self.kind == "range":
+            key = self.key or part_keys[0]
+            if key not in part_keys:
+                raise DeclError(f"{self.dataset}: range key {key!r} is not one of "
+                                f"this stage's partitions {part_keys}.")
+            return Read(self.dataset, self.kind, self.body, self.optional, key, self.why,
+                        self.as_paths, tuple(k for k in part_keys if k != key))
+        if self.key is not None:
+            return self
+        return Read(self.dataset, self.kind, self.body, self.optional, part_keys, self.why,
                     self.as_paths)
 
     def against(self, own: str | None) -> "Read":
@@ -140,13 +159,18 @@ class Read:
                 "    @iv.step(output={'box': BOX, 'pbp': PBP}, why='...')\n"
                 "    def patch(was=iv.own_last_copy(BOX, why='the copy this amends')):")
         return Read(own, self.kind, self.body, self.optional, self.key, self.why,
-                    self.as_paths)
+                    self.as_paths, self.preserve)
 
     def sel(self) -> tuple:
         """The selector, in the shape `key_of` and `_resolve_sel` already consume."""
         if self.kind in ("all", "own"):
             return ()
-        return ((self.key, (self.kind, self.body)),)
+        if self.kind == "multi":
+            return tuple((k, ("in", vals)) for k, vals in self.body)
+        if isinstance(self.key, tuple):
+            return tuple((k, (self.kind, self.body)) for k in self.key)
+        return ((self.key, (self.kind, self.body)),) + tuple(
+            (k, ("in", (PART,))) for k in self.preserve)
 
     def where(self) -> tuple:
         """The subset that names partition values OUTRIGHT, for the DAG's edge test.
@@ -155,8 +179,14 @@ class Read:
         bound that is not known until the shard is chosen, cannot rule an edge out, and a
         missing edge is a wrong DAG.
         """
+        if self.kind == "multi":
+            if any(v == PART for _, vals in self.body for v in vals):
+                return ()
+            return tuple((k, tuple(sorted(vals))) for k, vals in self.body)
         if self.kind != "in" or any(v == PART for v in self.body):
             return ()
+        if isinstance(self.key, tuple):
+            return tuple((k, tuple(sorted(self.body))) for k in self.key)
         return ((self.key, tuple(sorted(self.body))),)
 
     def triple(self) -> tuple:
@@ -180,7 +210,7 @@ def same_part(dataset, *, why: str, optional: bool = False,
     return Read(d, "in", (PART,), optional, None, _why(why, d), as_paths)
 
 
-def before_part(dataset, *, why: str, inclusive: bool = False,
+def before_part(dataset, *, why: str, key: str | None = None, inclusive: bool = False,
                 optional: bool = False, as_paths: bool = False) -> Read:
     """Everything ordered before this partition — a walk-forward bound.
 
@@ -188,14 +218,14 @@ def before_part(dataset, *, why: str, inclusive: bool = False,
     backfilled BELOW the bound is picked up; one added above it is not.
     """
     d = _target(dataset)
-    return Read(d, "range", (("le" if inclusive else "lt", PART),), optional, None,
+    return Read(d, "range", (("le" if inclusive else "lt", PART),), optional, key,
                 _why(why, d), as_paths)
 
 
-def after_part(dataset, *, why: str, inclusive: bool = False,
+def after_part(dataset, *, why: str, key: str | None = None, inclusive: bool = False,
                optional: bool = False, as_paths: bool = False) -> Read:
     d = _target(dataset)
-    return Read(d, "range", (("ge" if inclusive else "gt", PART),), optional, None,
+    return Read(d, "range", (("ge" if inclusive else "gt", PART),), optional, key,
                 _why(why, d), as_paths)
 
 
@@ -223,17 +253,20 @@ def parts(dataset, *, why: str, optional: bool = False, as_paths: bool = False,
     """An explicit set, which is a COVERAGE CLAIM: a value that is not there is an error
     rather than a quietly shorter read."""
     d = _target(dataset)
-    if len(values) != 1:
-        raise DeclError(
-            f"{d}: parts() names exactly one partition key — "
-            f"parts('raw/box/', why='...', season=['2024', '2025']).")
-    (key, vals), = values.items()
-    if isinstance(vals, (str, bytes)) or not hasattr(vals, "__iter__"):
-        vals = [vals]
-    body = tuple(sorted(v if v == PART else str(v) for v in vals))
-    if not body:
-        raise DeclError(f"{d}: parts() was given no values for {key!r}.")
-    return Read(d, "in", body, optional, key, _why(why, d), as_paths)
+    if not values:
+        raise DeclError(f"{d}: parts() needs at least one partition key.")
+    body = []
+    for key, vals in values.items():
+        if isinstance(vals, (str, bytes)) or not hasattr(vals, "__iter__"):
+            vals = [vals]
+        vals = tuple(sorted(v if v == PART else str(v) for v in vals))
+        if not vals:
+            raise DeclError(f"{d}: parts() was given no values for {key!r}.")
+        body.append((str(key), vals))
+    if len(body) == 1:
+        key, vals = body[0]
+        return Read(d, "in", vals, optional, key, _why(why, d), as_paths)
+    return Read(d, "multi", tuple(body), optional, None, _why(why, d), as_paths)
 
 
 def own_last_copy(dataset=None, *, why: str, as_paths: bool = False) -> Read:

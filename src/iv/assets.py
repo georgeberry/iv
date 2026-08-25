@@ -122,7 +122,7 @@ def load_value(paths, ext: str):
 OUT_PARAM = "out"
 
 
-def declared_reads(fn, part_key: str | None, own: str | None = None) -> dict:
+def declared_reads(fn, part_keys: tuple[str, ...] | None, own: str | None = None) -> dict:
     """The `Read` defaults in a signature, by parameter name, bound to what the stage says
     about itself.
 
@@ -132,7 +132,7 @@ def declared_reads(fn, part_key: str | None, own: str | None = None) -> dict:
     body is handed the same reads the graph was told about; deriving them twice is how a
     resolved one and an unresolved one end up in the same stage.
     """
-    return {name: p.default.bound_to(part_key).against(own)
+    return {name: p.default.bound_to(part_keys).against(own)
             for name, p in inspect.signature(fn).parameters.items()
             if isinstance(p.default, _decl.Read)}
 
@@ -142,18 +142,18 @@ def has_declared_reads(fn) -> bool:
                for p in inspect.signature(fn).parameters.values())
 
 
-def check_signature(fn, part_key: str | None, dataset: str) -> None:
+def check_signature(fn, part_keys: tuple[str, ...] | None, dataset: str) -> None:
     """Every parameter has to be something this can supply, or the call would fail late."""
     for name, p in inspect.signature(fn).parameters.items():
         if isinstance(p.default, _decl.Read) or name == OUT_PARAM:
             continue
-        if part_key is not None and name == part_key:
+        if part_keys is not None and name in part_keys:
             continue
         if p.default is not inspect.Parameter.empty:
             continue
         known = ["a read (iv.all_of(...) and friends)", repr(OUT_PARAM)]
-        if part_key:
-            known.append(repr(part_key))
+        if part_keys:
+            known += [repr(k) for k in part_keys]
         raise DeclError(
             f"{dataset}: parameter {name!r} of {fn.__name__} is not something iv can "
             f"supply. A parameter is one of: {', '.join(known)}, or has a default. "
@@ -295,7 +295,7 @@ class Asset:
     def __init__(self, pipeline, output, fn, *, why: str,
                  part=None, ext: str = _sh.EXT, allow_missing: bool = False, if_needed: bool = True,
                  once: bool = False, split: bool = False, single: bool = True,
-                 external=None, schema=None) -> None:
+                 external=None, schema=None, version=None) -> None:
         self.pipeline = pipeline
         self.outputs = _outputs(output, ext, allow_missing, schema)
         self.single = single
@@ -305,17 +305,21 @@ class Asset:
         self.if_needed = if_needed
         self.once = once
         self.split = split
-        self.part_key, self.fixed_part = _part_spec(part, self.primary)
-        if split and not self.part_key:
+        self.part_keys, self.fixed_part = _part_spec(part, self.primary)
+        self.part_key = self.part_keys[0] if self.part_keys and len(self.part_keys) == 1 else None
+        self.version = _version(version, self.primary)
+        if split and not self.part_keys:
             raise DeclError(
                 f"{self.primary}: split=True means the body computes every partition at "
                 f"once and returns {{partition: value}}, so it needs a partition key — "
                 f"@iv.step(..., part='season', split=True).")
-        check_signature(fn, self.part_key, self.primary)
-        if self.acts_only and (self.split or self.part_key or self.fixed_part):
+        if split and len(self.part_keys or ()) != 1:
+            raise DeclError(f"{self.primary}: split=True currently requires one partition key.")
+        check_signature(fn, self.part_keys, self.primary)
+        if self.acts_only and (self.split or self.part_keys or self.fixed_part):
             raise DeclError(
                 f"{self.primary} writes nothing, so it has no shard for part= to name.")
-        self.by_param = declared_reads(fn, self.part_key, self._own_output(fn))
+        self.by_param = declared_reads(fn, self.part_keys, self._own_output(fn))
         self.reads = tuple(self.by_param.values())
         self.externals = _externals(external, self.primary)
         self.wants_out = OUT_PARAM in inspect.signature(fn).parameters
@@ -394,7 +398,7 @@ class Asset:
         return tuple(sorted(self.fixed_part.items())) if self.fixed_part else ()
 
     def __repr__(self) -> str:
-        p = f", part={self.part_key or self.fixed_part!r}" if (self.part_key or self.fixed_part) else ""
+        p = f", part={self.part_keys or self.fixed_part!r}" if (self.part_keys or self.fixed_part) else ""
         return f"<iv stage {', '.join(self.datasets)}{p}>"
 
     # ── what the graph and the skip check read off it ─────────────────────────
@@ -433,19 +437,25 @@ class Asset:
                     f"{self.primary} writes the fixed partition {self.fixed_part}, so a "
                     f"call names no other.")
             return dict(self.fixed_part)
-        if self.part_key is None or self.split:
+        if self.part_keys is None or self.split:
             if args or kwargs:
                 raise DeclError(
                     f"{self.primary} is not built one partition at a time, so it takes no "
                     f"partition value.")
             return None
-        if self.part_key in kwargs:
-            return {self.part_key: str(kwargs[self.part_key])}
-        if len(args) == 1:
-            return {self.part_key: str(args[0])}
+        if set(kwargs) == set(self.part_keys):
+            return self._validate_part({k: str(kwargs[k]) for k in self.part_keys})
+        if len(self.part_keys) == 1 and len(args) == 1:
+            return self._validate_part({self.part_keys[0]: str(args[0])})
+        if len(args) == len(self.part_keys):
+            return self._validate_part(dict(zip(self.part_keys, map(str, args))))
+        if len(self.part_keys) == 1:
+            raise DeclError(
+                f"{self.primary} is partitioned by {self.part_keys[0]!r}, so a call names one: "
+                f"{self.__name__}('2024') or {self.__name__}({self.part_keys[0]}='2024').")
         raise DeclError(
-            f"{self.primary} is partitioned by {self.part_key!r}, so a call names one: "
-            f"{self.__name__}('2024') or {self.__name__}({self.part_key}='2024').")
+            f"{self.primary} is partitioned by {self.part_keys!r}, so name every partition: "
+            f"{self.__name__}(league='nba', season='2025').")
 
     def why_stale(self, *args, **kwargs) -> str | None:
         """Stale if ANY output is. Losing one table of a six-table fit brings the fit back."""
@@ -591,8 +601,10 @@ class Asset:
         iv = self.pipeline
         params = inspect.signature(self.fn).parameters
         kw: dict = {}
-        if self.part_key is not None and self.part_key in params and part:
-            kw[self.part_key] = part[self.part_key]
+        if self.part_keys and part:
+            for key in self.part_keys:
+                if key in params:
+                    kw[key] = part[key]
         for name, r in self.by_param.items():
             paths = iv.reads(r.dataset, why=r.why,
                              where=_resolve_sel(r.sel(), part, r.dataset),
@@ -627,17 +639,32 @@ class Asset:
 
     def for_each(self, over) -> list[str]:
         """Build one shard per key, skipping the ones already current."""
-        if self.part_key is None or self.split or self.fixed_part is not None:
+        if self.part_keys is None or self.split or self.fixed_part is not None:
             raise DeclError(
                 f"{self.primary} is not built one partition at a time, so there is "
                 f"nothing to iterate. Declare part='season' without split=.")
         iv = self.pipeline
-        want = [str(p) for p in over]
+        want = [self._coerce_part(p) for p in over]
         rebuild = [p for p in want
-                   if iv.force or not self.may_skip or self.why_stale(p) is not None]
+                   if iv.force or not self.may_skip or self.why_stale(**p) is not None]
         for p in rebuild:
-            self.build({self.part_key: p})
-        return rebuild
+            self.build(p)
+        return [p[self.part_keys[0]] for p in rebuild] if len(self.part_keys) == 1 else rebuild
+
+    def _coerce_part(self, value) -> dict:
+        if isinstance(value, dict):
+            if set(value) != set(self.part_keys):
+                raise DeclError(f"{self.primary}: expected partition keys {self.part_keys}, got {sorted(value)}.")
+            return self._validate_part({k: str(value[k]) for k in self.part_keys})
+        if len(self.part_keys) == 1:
+            return self._validate_part({self.part_keys[0]: str(value)})
+        if isinstance(value, (tuple, list)) and len(value) == len(self.part_keys):
+            return self._validate_part(dict(zip(self.part_keys, map(str, value))))
+        raise DeclError(f"{self.primary}: multi-partition for_each() takes dictionaries or {len(self.part_keys)}-tuples.")
+
+    def _validate_part(self, part: dict) -> dict:
+        self.pipeline._validate_partition(part)
+        return part
 
 
 def _externals(spec, dataset) -> tuple:
@@ -667,13 +694,26 @@ def _part_spec(part, dataset) -> tuple:
     if part is None:
         return None, None
     if isinstance(part, str):
-        return part, None
+        return (part,), None
+    if isinstance(part, (tuple, list)) and part and all(isinstance(k, str) and k for k in part):
+        if len(set(part)) != len(part):
+            raise DeclError(f"{dataset}: partition keys must be distinct, got {part!r}.")
+        return tuple(part), None
     if isinstance(part, dict) and part:
         fixed = {str(k): str(v) for k, v in part.items()}
-        return (next(iter(fixed)) if len(fixed) == 1 else None), fixed
+        return None, fixed
     raise DeclError(
-        f"{dataset}: part= is a key this stage builds one shard per — part='season' — or "
+        f"{dataset}: part= is key(s) this stage builds one shard per — part='season' or "
+        "part=('league', 'season') — or "
         f"a literal shard it owns — part={{'source': 'ncaa'}}. Got {part!r}.")
+
+
+def _version(value, dataset):
+    if value is None:
+        return None
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        raise DeclError(f"{dataset}: version= is a stable string or integer, got {value!r}.")
+    return str(value)
 
 
 def _ext_of(paths, default: str) -> str:

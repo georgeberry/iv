@@ -6,6 +6,7 @@ import os
 import shutil
 import threading
 import time
+import itertools
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Callable, Sequence
@@ -126,7 +127,8 @@ class Invalidator:
                  project=None,
                  trace=None,
                  stage_dir=None,
-                 force: bool | None = None) -> None:
+                 force: bool | None = None,
+                 partitions=None) -> None:
         self.project = mkpath(str(project), None) if project else None
         self.tree = mkpath(tree, self.project)
         self.out_tree = mkpath(out_tree, self.project) if out_tree is not None else self.tree
@@ -172,6 +174,11 @@ class Invalidator:
         self._datasets: dict[str, _assets.Dataset] = {}
         # dataset -> its optional, exact Parquet schema contract.
         self._schemas: dict[str, tuple | None] = {}
+        # A universe is optional for ordinary programmatic `for_each`; runners need it so
+        # they can enumerate work without executing user code. A mapping is a Cartesian
+        # product, while a sequence names only valid full combinations.
+        self._partition_universe = _partition_universe(partitions)
+        self._versions: dict[str, str | None] = {}
 
     def __repr__(self) -> str:
         return f"<Invalidator {self.tree}>"
@@ -519,7 +526,8 @@ class Invalidator:
             if got:
                 pairs.append((name, _sh.dataset_id(got)))
         contract = self._schema(dataset)
-        if not inputs and contract is None:
+        version = self._versions.get(dataset)
+        if not inputs and contract is None and version is None:
             return ""
         # DEDUPED, because the same upstream can arrive twice. A stage that branches —
         # the W draft and the NBA draft read the same box scores for different reasons —
@@ -529,7 +537,7 @@ class Invalidator:
         # question the other way round, skipped it. Two answers is one too many.
         body = "|".join(f"{n}={i}" for n, i in sorted(set(pairs)))
         schema = _sh._short(repr(contract)) if contract is not None else ""
-        return _sh._short(f"key:{dataset}|{_sh.encode_part(part)}|schema={schema}|{body}")
+        return _sh._short(f"key:{dataset}|{_sh.encode_part(part)}|schema={schema}|version={version or ''}|{body}")
 
 
     @contextmanager
@@ -707,7 +715,7 @@ class Invalidator:
 
     def data(self, dataset, *, why: str, part=None, ext: str = _sh.EXT,
              allow_missing: bool = False, if_needed: bool = True, once: bool = False,
-             split: bool = False, external=None, schema=None) -> Callable:
+             split: bool = False, external=None, schema=None, version=None) -> Callable:
         """The function that builds ONE dataset. The body returns its contents.
 
             @iv.data(dataset="processed/features/", why="per-season box features",
@@ -737,7 +745,7 @@ class Invalidator:
             return self._register(_assets.Asset(
                 self, dataset, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
-                split=split, single=True, external=external, schema=schema))
+                split=split, single=True, external=external, schema=schema, version=version))
         return declared
 
     def source(self, dataset: str, *, why: str, external=None, schema=None) -> _assets.Source:
@@ -805,6 +813,7 @@ class Invalidator:
         self._assets[self._node_name(asset.fn)] = asset
         for name in asset.datasets:
             self._declared[name] = asset.triples()
+            self._versions[name] = asset.version
         for output in asset.outputs.values():
             known = self._schemas.get(output.dataset)
             self._schemas[output.dataset] = output.schema if output.schema is not None else known
@@ -817,7 +826,7 @@ class Invalidator:
     def step(self, output=None, *, why: str, part=None,
              ext: str = _sh.EXT, allow_missing: bool = False,
              if_needed: bool = True, once: bool = False, split: bool = False,
-             external=None) -> Callable:
+             external=None, version=None) -> Callable:
         """The function that builds SEVERAL datasets, or none.
 
         `output=` is a dict naming each one, and the body returns a dict keyed by those
@@ -850,7 +859,7 @@ class Invalidator:
             return self._register(_assets.Asset(
                 self, output, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
-                split=split, single=False, external=external))
+                split=split, single=False, external=external, version=version))
         return declared
 
     def _node_name(self, fn: Callable) -> str:
@@ -883,6 +892,22 @@ class Invalidator:
 
     def reset(self) -> None:
         self._fresh_scope()
+
+    def partitions_for(self, keys: tuple[str, ...]) -> list[dict]:
+        """Declared valid partitions for a stage, restricted to exactly its dimensions."""
+        if self._partition_universe is None:
+            raise DeclError("no partition universe is declared. Pass partitions={...} to "
+                            "Invalidator(...) or use an explicit list of shard dictionaries.")
+        out = [{k: p[k] for k in keys} for p in self._partition_universe
+               if all(k in p for k in keys)]
+        return [dict(x) for x in sorted({tuple(sorted(p.items())) for p in out})]
+
+    def _validate_partition(self, part: dict) -> None:
+        if self._partition_universe is None:
+            return
+        frozen = tuple(sorted((str(k), str(v)) for k, v in part.items()))
+        if not any(all(p.get(k) == v for k, v in frozen) for p in self._partition_universe):
+            raise DeclError(f"partition {dict(frozen)} is not in this pipeline's declared universe.")
 
 
 def _sub_part(where: dict | None, part: dict | None, name: str):
@@ -944,6 +969,36 @@ def _span_parts(parts: list[str]) -> str:
 
 def _env_force() -> bool:
     return os.environ.get("IV_FORCE", "").lower() in ("1", "true", "yes")
+
+
+def _partition_universe(spec) -> tuple[dict, ...] | None:
+    if spec is None:
+        return None
+    if isinstance(spec, dict):
+        keys = tuple(str(k) for k in spec)
+        values = []
+        for key, vals in spec.items():
+            if isinstance(vals, (str, bytes)) or not hasattr(vals, "__iter__"):
+                raise DeclError(f"partitions[{key!r}] must be an iterable of values.")
+            vals = tuple(str(v) for v in vals)
+            if not vals:
+                raise DeclError(f"partitions[{key!r}] is empty.")
+            values.append(vals)
+        return tuple(dict(zip(keys, row)) for row in itertools.product(*values))
+    if not isinstance(spec, (list, tuple)) or not spec:
+        raise DeclError("partitions= is a non-empty mapping of dimensions or a list of shard dictionaries.")
+    out = []
+    keys = None
+    for part in spec:
+        if not isinstance(part, dict) or not part:
+            raise DeclError("an explicit partition universe is a list of non-empty dictionaries.")
+        got = tuple(sorted(str(k) for k in part))
+        if keys is None:
+            keys = got
+        elif got != keys:
+            raise DeclError("every explicit partition must name the same dimensions.")
+        out.append({str(k): str(v) for k, v in part.items()})
+    return tuple(out)
 
 
 def _abs_trace(trace):

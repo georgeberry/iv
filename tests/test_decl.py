@@ -124,11 +124,19 @@ def test_between_needs_a_bound():
         decl.between(_Declared("raw/box/"), why="x")
 
 
-def test_parts_names_exactly_one_key():
-    with pytest.raises(DeclError, match="exactly one partition key"):
-        decl.parts(_Declared("raw/box/"), why="x", season=["2024"], week=["1"])
-    with pytest.raises(DeclError, match="exactly one partition key"):
+def test_parts_can_name_multiple_keys():
+    r = decl.parts(_Declared("raw/box/"), why="x", season=["2024"], week=["1"])
+    assert r.sel() == (("season", ("in", ("2024",))), ("week", ("in", ("1",))))
+    with pytest.raises(DeclError, match="at least one partition key"):
         decl.parts(_Declared("raw/box/"), why="x")
+
+
+def test_a_composite_range_keeps_the_other_dimension_equal():
+    r = decl.before_part(_Declared("raw/box/"), why="earlier seasons", key="season")
+    assert r.bound_to(("league", "season")).sel() == (
+        ("season", ("range", (("lt", decl.PART),))),
+        ("league", ("in", (decl.PART,))),
+    )
 
 
 def test_parts_refuses_an_empty_coverage_claim():

@@ -160,6 +160,45 @@ Partition-relative selectors take their key from the stage's `part=` declaration
 `optional=True` permits a selector to match no shard. `as_paths=True` gives the function
 the selected file paths instead of loaded values.
 
+For a stage partitioned on more than one dimension, name every key and declare the valid
+universe on the pipeline. A mapping expands to its Cartesian product; use a list of
+dictionaries when only some combinations are valid.
+
+```python
+iv = Invalidator(
+    tree="data", project=".",
+    partitions={"league": ["nba", "wnba"], "season": ["2024", "2025"]},
+)
+raw_games = iv.source("raw/games/", why="league-season source files")
+
+@iv.data(dataset="processed/games/", why="one league-season table",
+         part=("league", "season"))
+def games(league, season, raw=iv.same_part(raw_games, why="the matching source shard")):
+    return raw
+
+games.for_each([{"league": "nba", "season": "2025"}])
+```
+
+`same_part()` matches every declared dimension. For a walk-forward read of a composite
+partition, name the dimension that varies; the other dimensions remain equal:
+`iv.before_part(games, key="season", why="earlier NBA seasons")`. `iv.parts()` accepts
+multiple keys, such as `iv.parts(games, league="nba", season=["2024", "2025"], why="...")`.
+
+### Stage versions
+
+Use an explicit `version=` when a meaningful code or configuration change should rebuild
+a stage without relying on source hashing:
+
+```python
+@iv.data(dataset="processed/features/", why="model features", version="3")
+def features(...):
+    ...
+```
+
+The version is part of the stage derivation key. Changing it reruns that stage, including
+when moving from no version to `version="1"`; downstream stages rerun only if the new
+output contents have a different fingerprint.
+
 ### Parquet schema contracts
 
 An important sharded dataset can declare its exact Polars schema in Python:
@@ -226,6 +265,11 @@ instance = "mypkg.pipeline:iv"
 | --- | --- |
 | `iv status` | Shows `current`, `maybe`, or `stale` datasets and shards |
 | `iv plan` | Shows work that would rebuild and work that may follow |
+| `iv run` | Runs the full pipeline in dependency order |
+| `iv run --up-to <stage>` | Runs a stage and its prerequisites |
+| `iv run --up-to-excluding <stage>` | Runs prerequisites but not that stage |
+| `iv run --from <stage>` | Runs a stage and descendants; refuses stale upstreams |
+| `iv run --only <stage>` | Runs one stage; refuses stale upstreams |
 | `iv why <dataset>` | Explains each shard's key, fingerprint, inputs, and status |
 | `iv graph` | Prints the DAG (`--focus <stage>`, `--full`) |
 | `iv stage <name>` | Shows one stage's reads, writes, and explanations |
@@ -235,6 +279,10 @@ instance = "mypkg.pipeline:iv"
 | `iv verify [dataset]` | Re-fingerprints shards and checks their filenames |
 | `iv gc [dataset]` | Removes superseded shards after an interrupted commit |
 | `iv viz --out dag.png` | Draws the DAG (requires the `viz` extra) |
+
+Repeat `--part key=value` to target a composite shard, for example
+`iv run --up-to games --part league=nba --part season=2025`. Runners enumerate
+partitioned work from `Invalidator(partitions=...)` rather than guessing a universe.
 
 `maybe` is deliberate: an upstream shard will rebuild, but if it produces identical
 contents, the downstream shard remains current. Set `IV_TRACE=<path>` while running a

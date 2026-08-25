@@ -88,6 +88,59 @@ def _graph_of():
         _die(e)
 
 
+def _stage_name(g, query: str) -> str:
+    hits = [n for n in g.stages if query == n or query in n]
+    if not hits:
+        raise IvError(f"no stage matching {query!r}. Try `iv graph`.")
+    if len(hits) > 1:
+        raise IvError(f"{query!r} matches more than one stage: {', '.join(hits)}.")
+    return hits[0]
+
+
+def _cone(parents: dict[str, list[str]], start: str, *, reverse=False) -> set[str]:
+    edges = parents
+    if reverse:
+        edges = {n: [] for n in parents}
+        for child, ps in parents.items():
+            for parent in ps:
+                edges[parent].append(child)
+    out, todo = set(), [start]
+    while todo:
+        node = todo.pop()
+        if node in out:
+            continue
+        out.add(node)
+        todo += edges[node]
+    return out
+
+
+def _part_flags(raw: list[str]) -> dict[str, str]:
+    out = {}
+    for item in raw:
+        key, sep, value = item.partition("=")
+        if not sep or not key or not value:
+            raise IvError(f"--part is key=value, got {item!r}.")
+        if key in out and out[key] != value:
+            raise IvError(f"--part names {key!r} twice with different values.")
+        out[key] = value
+    return out
+
+
+def _asset_parts(iv, asset, filters: dict[str, str]) -> list[dict | None]:
+    if not asset.part_keys:
+        return [None]
+    parts = iv.partitions_for(asset.part_keys)
+    return [p for p in parts if all(p.get(k) == v for k, v in filters.items() if k in p)]
+
+
+def _stale_asset_parts(iv, asset, filters) -> list[dict | None]:
+    out = []
+    for p in _asset_parts(iv, asset, filters):
+        if asset.why_stale(**p) if p is not None else asset.why_stale():
+            out.append(p)
+    return out
+
+
 @app.command()
 def graph(focus: str = typer.Option(None, "--focus", help="only this stage and its cone"),
           full: bool = typer.Option(False, "--full", help="every edge, not the reduction")):
@@ -418,6 +471,70 @@ def plan():
         tier, note = _line(shards, maybe, name)
         if tier == "maybe":
             typer.secho(f"  maybe    {name:<44} {note}", fg="cyan")
+
+
+@app.command()
+@reports
+def run(
+    up_to: str = typer.Option(None, "--up-to", help="run this stage and everything it needs"),
+    up_to_excluding: str = typer.Option(None, "--up-to-excluding", help="run prerequisites, not this stage"),
+    from_: str = typer.Option(None, "--from", help="run this stage and descendants; upstream must be current"),
+    only: str = typer.Option(None, "--only", help="run exactly this stage; upstream must be current"),
+    part: list[str] = typer.Option([], "--part", help="partition filter, repeat as key=value"),
+):
+    """Execute pipeline stages in dependency order.
+
+    Partitioned stages are expanded from Invalidator(partitions=...). `--from` and
+    `--only` are deliberately conservative: they never silently leave stale inputs behind.
+    """
+    choices = [x for x in (up_to, up_to_excluding, from_, only) if x]
+    if len(choices) > 1:
+        raise IvError("choose only one of --up-to, --up-to-excluding, --from, or --only.")
+    iv = _load()
+    g = _graph.build(iv)
+    parents = g.parent_map()
+    filters = _part_flags(part)
+    selected = set(g.stages)
+    safe = False
+    if up_to:
+        selected = _cone(parents, _stage_name(g, up_to))
+    elif up_to_excluding:
+        target = _stage_name(g, up_to_excluding)
+        selected = _cone(parents, target) - {target}
+    elif from_:
+        target = _stage_name(g, from_)
+        selected = _cone(parents, target, reverse=True)
+        safe = True
+    elif only:
+        selected = {_stage_name(g, only)}
+        safe = True
+
+    if safe:
+        required = set()
+        for node in selected:
+            required.update(_cone(parents, node) - selected)
+        stale = []
+        for node in g.order():
+            if node not in required:
+                continue
+            asset = iv._assets[node]
+            for p in _stale_asset_parts(iv, asset, filters):
+                stale.append(f"{node} {p or '(one shard)'}")
+        if stale:
+            raise IvError("refusing to run with stale upstream shard(s): " + "; ".join(stale)
+                          + ". Run `iv run --up-to " + choices[0] + "` first.")
+
+    ran = 0
+    for node in g.order():
+        if node not in selected:
+            continue
+        asset = iv._assets[node]
+        for p in _asset_parts(iv, asset, filters):
+            changed = asset(**p) if p is not None else asset()
+            if changed is not False:
+                ran += 1
+                typer.echo(f"  ran      {node}" + (f" {p}" if p else ""))
+    typer.echo(f"{ran} stage shard(s) ran")
 
 
 @app.command()

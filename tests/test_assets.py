@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import polars as pl
 import pytest
+from typer.testing import CliRunner
 
 from iv import Invalidator
 from iv import graph as _graph
+from iv.cli import app
 from iv import shards as _sh
 from iv.errors import DeclError, StateError
 
@@ -44,6 +46,76 @@ def test_a_derived_asset_builds_then_skips(iv):
     feed()
     assert out().height == 2 and len(ran) == 1
     assert out().height == 2 and len(ran) == 1, "nothing moved, so it must not run again"
+
+
+def test_composite_partitions_match_every_dimension_and_for_each_dicts(tmp_path):
+    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path,
+                     partitions={"league": ["nba", "wnba"], "season": ["2024", "2025"]})
+    raw = iv.source("raw/games/", why="league-season games")
+    for league in ("nba", "wnba"):
+        for season in ("2024", "2025"):
+            with iv.writes(raw.dataset, why="seed", part={"league": league, "season": season}) as out:
+                frame(extra=1 if league == "nba" else 2).write_parquet(out)
+
+    @iv.data(dataset="processed/games/", why="one league-season result",
+             part=("league", "season"))
+    def games(league, season, source=iv.same_part(raw, why="the matching games")):
+        return source.with_columns(pl.lit(f"{league}-{season}").alias("slice"))
+
+    rebuilt = games.for_each([{"league": "nba", "season": "2025"}])
+    assert rebuilt == [{"league": "nba", "season": "2025"}]
+    assert games(league="nba", season="2025").get_column("slice").unique().item() == "nba-2025"
+    with pytest.raises(DeclError, match="not in this pipeline's declared universe"):
+        games(league="nba", season="2026")
+
+
+def test_a_version_reruns_its_stage_but_identical_output_stops_downstream(iv):
+    calls = []
+
+    @iv.data(dataset="raw/feed/", why="stable feed", once=True)
+    def feed():
+        return frame()
+
+    @iv.data(dataset="processed/mid/", why="versioned transform")
+    def mid(source=iv.all_of(feed, why="the feed")):
+        calls.append("mid")
+        return source
+
+    @iv.data(dataset="processed/end/", why="consumer")
+    def end(source=iv.all_of(mid, why="the versioned output")):
+        calls.append("end")
+        return source
+
+    feed(); mid(); end()
+    iv._versions[mid.dataset] = "1"  # equivalent to adding version="1" and re-importing
+    assert mid.why_stale()
+    mid()
+    assert end.why_stale() is None
+    end()
+    assert calls == ["mid", "end", "mid"]
+
+
+def test_runner_targets_one_composite_partition_and_only_requires_current_upstream(tmp_path, monkeypatch):
+    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path,
+                     partitions={"league": ["nba", "wnba"], "season": ["2025"]})
+
+    @iv.data(dataset="raw/games/", why="one feed shard", part=("league", "season"), once=True)
+    def raw(league, season):
+        return frame(extra=1 if league == "nba" else 2)
+
+    @iv.data(dataset="processed/games/", why="one derived shard", part=("league", "season"))
+    def games(league, season, source=iv.same_part(raw, why="the matching feed")):
+        return source
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    runner = CliRunner()
+    blocked = runner.invoke(app, ["run", "--only", "games", "--part", "league=nba", "--part", "season=2025"])
+    assert blocked.exit_code == 1 and "stale upstream" in blocked.output
+    result = runner.invoke(app, ["run", "--up-to", "games", "--part", "league=nba", "--part", "season=2025"])
+    assert result.exit_code == 0, result.output
+    assert games.is_current(league="nba", season="2025")
+    assert not games.is_current(league="wnba", season="2025")
 
 
 def test_a_moved_upstream_rebuilds(iv):
