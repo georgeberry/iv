@@ -166,6 +166,188 @@ def test_a_stage_universe_decides_what_the_runner_enumerates(tmp_path, monkeypat
         ["season=2006", "season=2024", "season=2025"]
 
 
+def test_runner_prints_plan_progress_and_stage_output(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="a visible step", once=True)
+    def feed():
+        print("fetching the official feed")
+        return frame()
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    runner = CliRunner()
+    first = runner.invoke(app, ["run"])
+    assert first.exit_code == 0, first.output
+    assert "iv run · 1 stage shard(s)" in first.output
+    assert "[1/1]" in first.output
+    assert "output" in first.output and "│ fetching the official feed" in first.output
+    assert "reran (" in first.output and "1 reran, 0 current — skipped" in first.output
+
+    second = runner.invoke(app, ["run"])
+    assert second.exit_code == 0, second.output
+    assert "current — skipped (" in second.output
+    assert "0 reran, 1 current — skipped" in second.output
+
+
+def test_impact_shows_a_stage_cone_and_tick_propagation(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="a stable feed", once=True)
+    def feed():
+        return frame()
+
+    @iv.data(dataset="processed/out/", why="a consumer")
+    def out(source=iv.all_of(feed, why="the feed")):
+        return source
+
+    feed(); out()
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["impact", "feed", "--tick"])
+    assert result.exit_code == 0, result.output
+    assert "upstream" in result.output and "this stage" in result.output
+    assert "downstream" in result.output and "out" in result.output
+    assert "if " in result.output and "will run" in result.output
+    assert "may rebuild" in result.output
+    assert "processed/out/(one shard)" in result.output
+
+
+def test_impact_ignores_a_missing_dynamic_output_when_tracing(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="one season", part="season", once=True,
+             universe=["2025"])
+    def feed(season):
+        return frame()
+
+    @iv.data(dataset="processed/out/", why="one derived season", part="season",
+             universe=["2025"])
+    def out(season, source=iv.same_part(feed, why="the matching season")):
+        return source
+
+    feed("2025")                 # `out` is intentionally absent
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["impact", "feed", "--tick"])
+    assert result.exit_code == 0, result.output
+
+
+def test_impact_ticks_only_the_selected_output_partition(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="one shard per season", part="season",
+             universe=["2025", "2026"], once=True)
+    def feed(season):
+        return frame(extra=int(season))
+
+    @iv.data(dataset="processed/same/", why="the matching season", part="season",
+             universe=["2025", "2026"])
+    def same(season, source=iv.same_part(feed, why="this season")):
+        return source
+
+    @iv.data(dataset="processed/cumulative/", why="history through the season",
+             part="season", universe=["2025", "2026"])
+    def cumulative(season, source=iv.before_part(
+            feed, inclusive=True, why="history through this season")):
+        return source
+
+    feed.for_each(); same.for_each(); cumulative.for_each()
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(
+        app, ["impact", "feed", "--tick", "--tick-part", "season=2026"])
+    assert result.exit_code == 0, result.output
+    assert "if " in result.output and "[season=2026] changes" in result.output
+    assert "processed/same/season=2026" in result.output
+    assert "processed/cumulative/season=2026" in result.output
+    assert "processed/same/season=2025" not in result.output
+    assert "processed/cumulative/season=2025" not in result.output
+
+
+def test_impact_tick_part_is_an_exact_output_selector(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="an unpartitioned feed", once=True)
+    def feed():
+        return frame()
+
+    feed()
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    runner = CliRunner()
+
+    missing_tick = runner.invoke(app, ["impact", "feed", "--tick-part", "season=2026"])
+    assert missing_tick.exit_code == 1
+    assert "--tick-part requires --tick" in missing_tick.output
+
+    unpartitioned = runner.invoke(
+        app, ["impact", "feed", "--tick", "--tick-part", "season=2026"])
+    assert unpartitioned.exit_code == 1
+    assert "no output shards on disk matching season=2026" in unpartitioned.output
+    assert "Available: (one shard)" in unpartitioned.output
+
+
+def test_impact_tick_part_supports_composite_partitions(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="league-season shards",
+             part=("league", "season"), once=True)
+    def feed(league, season):
+        return frame(extra=len(league) + int(season))
+
+    for league in ("nba", "wnba"):
+        feed(league=league, season="2026")
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, [
+        "impact", "feed", "--tick",
+        "--tick-part", "league=wnba", "--tick-part", "season=2026",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "[league=wnba, season=2026] changes" in result.output
+
+
+def test_impact_propagation_respects_a_fixed_output_partition(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="the clock", once=True)
+    def feed():
+        return frame()
+
+    @iv.data(dataset="history/snapshots/", why="today's snapshot",
+             part={"date": "2026-08-25"})
+    def snapshot(source=iv.all_of(feed, why="what changed today")):
+        return source
+
+    feed(); snapshot()
+    with iv.writes("history/snapshots/", why="an older snapshot",
+                   part={"date": "2026-08-24"}) as out:
+        frame(extra=1).write_parquet(out)
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["impact", "feed", "--tick"])
+    assert result.exit_code == 0, result.output
+    assert "history/snapshots/date=2026-08-25" in result.output
+    assert "history/snapshots/date=2026-08-24" not in result.output
+
+
+def test_impact_ticks_only_shards_owned_by_a_writer_of_a_shared_dataset(iv,
+                                                                         monkeypatch):
+    blocks = iv.dataset("derived/blocks/", why="blocks with separate writers")
+
+    @iv.data(dataset=blocks, why="the named block", part={"source": "named"})
+    def named():
+        return frame()
+
+    @iv.data(dataset=blocks, why="the other named block", part={"source": "other"})
+    def other():
+        return frame(extra=1)
+
+    named(); other()
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    runner = CliRunner()
+
+    named_result = runner.invoke(app, ["impact", "named", "--tick"])
+    assert named_result.exit_code == 0, named_result.output
+    assert "derived/blocks/source=named" not in named_result.output  # no downstream
+    assert "Available" not in named_result.output
+
+    wrong_part = runner.invoke(app, [
+        "impact", "named", "--tick", "--tick-part", "source=other",
+    ])
+    assert wrong_part.exit_code == 1
+    assert "Available: source=named" in wrong_part.output
+
+
 def test_for_each_with_no_argument_builds_the_declared_universe(iv):
     @iv.data(dataset="raw/feed/", why="the feed", once=True)
     def feed():

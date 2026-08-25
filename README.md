@@ -292,6 +292,8 @@ instance = "mypkg.pipeline:iv"
 | `iv why <dataset>` | Explains each shard's key, fingerprint, inputs, and status |
 | `iv graph` | Prints the DAG (`--focus <stage>`, `--full`) |
 | `iv stage <name>` | Shows one stage's reads, writes, and explanations |
+| `iv impact <stage>` | Shows the full upstream/downstream cone with current state |
+| `iv impact <stage> --tick` | Shows what may rebuild if that stage's output changes |
 | `iv preflight` | Checks undefined names, missing modules, and cycles |
 | `iv check` | Checks the declared graph; `--trace <file>` also compares a run trace |
 | `iv drift` | Compares code with the most recent recorded run |

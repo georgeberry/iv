@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib
+import io
 import sys
 import tomllib
+import time
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import typer
@@ -114,14 +117,14 @@ def _cone(parents: dict[str, list[str]], start: str, *, reverse=False) -> set[st
     return out
 
 
-def _part_flags(raw: list[str]) -> dict[str, str]:
+def _part_flags(raw: list[str], option: str = "--part") -> dict[str, str]:
     out = {}
     for item in raw:
         key, sep, value = item.partition("=")
         if not sep or not key or not value:
-            raise IvError(f"--part is key=value, got {item!r}.")
+            raise IvError(f"{option} is key=value, got {item!r}.")
         if key in out and out[key] != value:
-            raise IvError(f"--part names {key!r} twice with different values.")
+            raise IvError(f"{option} names {key!r} twice with different values.")
         out[key] = value
     return out
 
@@ -141,6 +144,20 @@ def _stale_asset_parts(iv, asset, filters) -> list[dict | None]:
         if asset.why_stale(**p) if p is not None else asset.why_stale():
             out.append(p)
     return out
+
+
+def _part_label(part: dict | None) -> str:
+    if not part:
+        return ""
+    return " [" + ", ".join(f"{k}={v}" for k, v in sorted(part.items())) + "]"
+
+
+def _print_stage_output(text: str) -> None:
+    if not text:
+        return
+    typer.secho("  output", fg="bright_black")
+    for line in text.rstrip("\n").splitlines():
+        typer.echo(f"  │ {line}")
 
 
 @app.command()
@@ -163,6 +180,67 @@ def stage(name: str):
         _die(IvError(f"no stage matching {name!r}. Try `iv graph`."))
     for n in hits:
         typer.echo(_render.stage_card(n, g))
+
+
+@app.command()
+@reports
+def impact(stage: str, tick: bool = typer.Option(False, "--tick",
+                                                   help="assume this stage's output changes"),
+           tick_part: list[str] = typer.Option(
+               [], "--tick-part", help="output partition to tick, repeat as key=value")):
+    """Show a stage's dependency cone and, optionally, the effect of ticking it."""
+    if tick_part and not tick:
+        raise IvError("--tick-part requires --tick.")
+    iv = _load()
+    g = _graph.build(iv)
+    node = _stage_name(g, stage)
+    filters = _part_flags(tick_part, "--tick-part")
+    parents = g.parent_map()
+    upstream = _render.ancestors_of(node, parents)
+    downstream = _render.descendants_of(node, parents)
+    order = g.order()
+    with _sh.snapshot():
+        state = _staleness(iv, g)
+        maybe = _downstream_of(g, state)
+
+        typer.secho(node, bold=True)
+        _print_impact_list("upstream", [n for n in order if n in upstream], g, state, maybe)
+        _print_impact_list("this stage", [node], g, state, maybe)
+        _print_impact_list("downstream", [n for n in order if n in downstream], g, state, maybe)
+
+        if not tick:
+            return
+
+        moving = _stage_output_shards(g, node, state, filters)
+        if not moving:
+            available = sorted(
+                p or "(one shard)"
+                for _, p in _stage_output_shards(g, node, state)
+            )
+            wanted = ", ".join(f"{k}={v}" for k, v in sorted(filters.items()))
+            detail = f" matching {wanted}" if wanted else ""
+            have = f" Available: {', '.join(available)}." if available else ""
+            raise IvError(f"{node} has no output shards on disk{detail} to tick.{have}")
+        possible = _downstream_of(g, state, moving=moving)
+        affected: dict[str, list[tuple[str, str]]] = {}
+        for other in order:
+            if other not in downstream:
+                continue
+            outputs = {s.dataset for s in g.stages[other].outputs}
+            shards = sorted((ds, p) for ds, p in possible if ds in outputs)
+            if shards:
+                affected[other] = shards
+        typer.echo()
+        label = _part_label(filters)
+        typer.secho(f"if {node}{label} changes", bold=True)
+        typer.secho(f"  will run  {node}{label}", fg="yellow")
+        if affected:
+            for other, shards in affected.items():
+                typer.secho(f"  may rebuild {other}", fg="cyan")
+                for dataset, part in shards:
+                    typer.echo(f"    {dataset}{part or '(one shard)'}")
+        else:
+            typer.echo("  no downstream stage reads its current output shards")
 
 
 @app.command()
@@ -333,7 +411,7 @@ def _line(shards: dict, maybe: set, dataset: str) -> tuple:
     return ("stale" if bad else "maybe"), "; ".join(parts)
 
 
-def _downstream_of(g, state: dict, iv=None) -> set:
+def _downstream_of(g, state: dict, iv=None, moving=None) -> set:
     """Shards that read something being rebuilt: current now, and possibly not after.
 
     POSSIBLY, not certainly, which is the whole reason this is a third state rather than
@@ -348,22 +426,66 @@ def _downstream_of(g, state: dict, iv=None) -> set:
     shard that is moving — which is exactly what `select` asks of a directory.
     """
     from .core import _resolve_sel
-    moving = _stale_shards(state)
+    seed = _stale_shards(state) if moving is None else set(moving)
+    moving = set(seed)
     for node in g.order():                      # topological: parents decided first
         st = g.stages[node]
+        asset = getattr(g.iv, "_assets", {}).get(node)
         for site in st.outputs:
             fixed = dict(site.part) or None
             for p in state.get(site.dataset, {""}):
+                shard_part = _sh.decode_part(p)
+                if not _site_owns(g, node, site, shard_part):
+                    continue
                 if (site.dataset, p) in moving:
                     continue
-                part = _sh.decode_part(p) or fixed
+                part = shard_part or fixed
+                # `_staleness` represents an empty output directory as a synthetic blank
+                # shard so it can say "not on disk". A dynamic stage has no real blank
+                # shard to test here; resolving PART against it is meaningless, and it is
+                # stale already rather than a current shard that may follow.
+                if part is None and asset is not None and asset.part_keys:
+                    continue
                 for t in st.triggers:
                     where = _resolve_sel(t.sel, part, t.dataset)
                     if any(_sh.covers(where, _sh.decode_part(q) or {})
                            for (d, q) in moving if d == t.dataset):
                         moving.add((site.dataset, p))
                         break
-    return moving - _stale_shards(state)
+    return moving - seed
+
+
+def _part_matches(part: dict[str, str], filters: dict[str, str]) -> bool:
+    """True only when a shard contains every requested key at the requested value."""
+    return all(part.get(k) == v for k, v in filters.items())
+
+
+def _site_owns(g, node: str, site, part: dict[str, str]) -> bool:
+    """Whether this output declaration owns this shard under the graph's writer rules."""
+    fixed = dict(site.part)
+    if fixed:
+        return _part_matches(part, fixed)
+    return not any(
+        other != node and candidate.dataset == site.dataset and candidate.part
+        and _part_matches(part, dict(candidate.part))
+        for other, stage in g.stages.items()
+        for candidate in stage.outputs
+    )
+
+
+def _stage_output_shards(g, node: str, state: dict,
+                         filters: dict[str, str] | None = None) -> set[tuple[str, str]]:
+    """Existing shards owned by one stage, optionally narrowed to an exact partition."""
+    filters = filters or {}
+    out = set()
+    for site in g.stages[node].outputs:
+        for part_str in state.get(site.dataset, {}):
+            part = _sh.decode_part(part_str)
+            if not _site_owns(g, node, site, part):
+                continue
+            if _part_matches(part, filters):
+                out.add((site.dataset, part_str))
+    return out
 
 
 def _owner(owners, part) -> tuple:
@@ -380,6 +502,27 @@ def _owner(owners, part) -> tuple:
         if not fixed:
             return inputs
     return owners[0][1]
+
+
+def _stage_state(node: str, g, state: dict, maybe: set) -> str:
+    datasets = {s.dataset for s in g.stages[node].outputs}
+    shards = [(d, p, why) for d in datasets for p, why in state.get(d, {}).items()]
+    if any(why for _, _, why in shards):
+        return "stale"
+    if any((d, p) in maybe for d, p, _ in shards):
+        return "maybe"
+    return "current" if shards else "action"
+
+
+def _print_impact_list(title: str, nodes: list[str], g, state, maybe, *, target=None) -> None:
+    typer.secho(title, bold=True)
+    if not nodes:
+        typer.echo("  (none)")
+        return
+    colors = {"current": "green", "maybe": "cyan", "stale": "yellow", "action": "bright_black"}
+    for node in nodes:
+        status = "will run" if node == target else _stage_state(node, g, state, maybe)
+        typer.secho(f"  {status:<9} {node}", fg=colors.get(status, "yellow"))
 
 
 @app.command()
@@ -484,11 +627,7 @@ def run(
     only: str = typer.Option(None, "--only", help="run exactly this stage; upstream must be current"),
     part: list[str] = typer.Option([], "--part", help="partition filter, repeat as key=value"),
 ):
-    """Execute pipeline stages in dependency order.
-
-    Partitioned stages are expanded from Invalidator(partitions=...). `--from` and
-    `--only` are deliberately conservative: they never silently leave stale inputs behind.
-    """
+    """Execute pipeline stages in dependency order."""
     choices = [x for x in (up_to, up_to_excluding, from_, only) if x]
     if len(choices) > 1:
         raise IvError("choose only one of --up-to, --up-to-excluding, --from, or --only.")
@@ -526,17 +665,46 @@ def run(
             raise IvError("refusing to run with stale upstream shard(s): " + "; ".join(stale)
                           + ". Run `iv run --up-to " + choices[0] + "` first.")
 
-    ran = 0
-    for node in g.order():
-        if node not in selected:
-            continue
-        asset = iv._assets[node]
-        for p in _asset_parts(iv, asset, filters):
-            changed = asset(**p) if p is not None else asset()
-            if changed is not False:
-                ran += 1
-                typer.echo(f"  ran      {node}" + (f" {p}" if p else ""))
-    typer.echo(f"{ran} stage shard(s) ran")
+    work = [(node, iv._assets[node], p)
+            for node in g.order() if node in selected
+            for p in _asset_parts(iv, iv._assets[node], filters)]
+    if not work:
+        typer.secho("nothing selected", fg="yellow")
+        return
+
+    typer.secho(f"iv run · {len(work)} stage shard(s)", bold=True)
+    for i, (node, _, p) in enumerate(work, 1):
+        typer.echo(f"  {i:>3}. {node}{_part_label(p)}")
+    typer.echo()
+
+    ran = skipped = 0
+    started = time.perf_counter()
+    for i, (node, asset, p) in enumerate(work, 1):
+        typer.secho(f"[{i}/{len(work)}] {node}{_part_label(p)}", bold=True)
+        output = io.StringIO()
+        step_started = time.perf_counter()
+        args = p or {}
+        will_run = (iv.force or not asset.if_needed or not asset.may_skip
+                    or not asset.is_current(**args))
+        try:
+            with redirect_stdout(output), redirect_stderr(output):
+                asset(**p) if p is not None else asset()
+        except BaseException:
+            _print_stage_output(output.getvalue())
+            raise
+        _print_stage_output(output.getvalue())
+        elapsed = time.perf_counter() - step_started
+        if will_run:
+            ran += 1
+            typer.secho(f"  reran ({elapsed:.2f}s)", fg="green")
+        else:
+            skipped += 1
+            typer.secho(f"  current — skipped ({elapsed:.2f}s)", fg="cyan")
+    total = time.perf_counter() - started
+    typer.secho(
+        f"\ncomplete in {total:.2f}s · {ran} reran, {skipped} current — skipped",
+        bold=True,
+    )
 
 
 @app.command()
