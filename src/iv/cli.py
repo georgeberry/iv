@@ -127,9 +127,11 @@ def _part_flags(raw: list[str]) -> dict[str, str]:
 
 
 def _asset_parts(iv, asset, filters: dict[str, str]) -> list[dict | None]:
-    if not asset.part_keys:
+    if not asset.part_keys or asset.split:
         return [None]
-    parts = iv.partitions_for(asset.part_keys)
+    parts = asset.universe_parts()
+    if parts is None:
+        parts = iv.partitions_for(asset.part_keys)
     return [p for p in parts if all(p.get(k) == v for k, v in filters.items() if k in p)]
 
 

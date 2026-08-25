@@ -182,7 +182,10 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
         if name in produced:
             continue
         readers = g.consumers_of(name)
-        if readers:
+        required = [n for n in readers
+                    if any(site.dataset == name and not site.optional
+                           for site in g.stages[n].inputs)]
+        if required:
             # READ but never WRITTEN. Not a style problem: the read resolves to a selector
             # over a directory nothing fills, so it fails at BUILD time — after however
             # long the upstream stages took — with a message about an empty dataset rather
@@ -190,9 +193,16 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
             errors.append(
                 f"READ, NOBODY WRITES  {name}\n"
                 f"    declared with iv.dataset(...) — {d.why} — and read by "
-                f"{', '.join(readers)}, but named in no stage's output=. Nothing puts it "
+                f"{', '.join(required)}, but named in no stage's output=. Nothing puts it "
                 f"there, so the read cannot succeed. Write it with @iv.data or @iv.step, "
                 f"or declare it a source if it arrives from outside.")
+        elif readers:
+            warns.append(
+                f"OPTIONAL, NOBODY WRITES  {name}\n"
+                f"    declared with iv.dataset(...) — {d.why} — and named in no stage's "
+                f"output=, but every reader ({', '.join(readers)}) declares optional=True, "
+                f"which is what a dataset one configuration produces and another does not "
+                f"looks like. If this configuration should produce it, wire it up.")
         else:
             warns.append(
                 f"DECLARED, NOBODY WRITES  {name}\n"

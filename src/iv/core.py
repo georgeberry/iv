@@ -715,7 +715,8 @@ class Invalidator:
 
     def data(self, dataset, *, why: str, part=None, ext: str = _sh.EXT,
              allow_missing: bool = False, if_needed: bool = True, once: bool = False,
-             split: bool = False, external=None, schema=None, version=None) -> Callable:
+             split: bool = False, external=None, schema=None, version=None,
+             universe=None) -> Callable:
         """The function that builds ONE dataset. The body returns its contents.
 
             @iv.data(dataset="processed/features/", why="per-season box features",
@@ -745,7 +746,8 @@ class Invalidator:
             return self._register(_assets.Asset(
                 self, dataset, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
-                split=split, single=True, external=external, schema=schema, version=version))
+                split=split, single=True, external=external, schema=schema, version=version,
+                universe=universe))
         return declared
 
     def source(self, dataset: str, *, why: str, external=None, schema=None) -> _assets.Source:
@@ -826,7 +828,7 @@ class Invalidator:
     def step(self, output=None, *, why: str, part=None,
              ext: str = _sh.EXT, allow_missing: bool = False,
              if_needed: bool = True, once: bool = False, split: bool = False,
-             external=None, version=None) -> Callable:
+             external=None, version=None, universe=None) -> Callable:
         """The function that builds SEVERAL datasets, or none.
 
         `output=` is a dict naming each one, and the body returns a dict keyed by those
@@ -859,7 +861,8 @@ class Invalidator:
             return self._register(_assets.Asset(
                 self, output, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, if_needed=if_needed, once=once,
-                split=split, single=False, external=external, version=version))
+                split=split, single=False, external=external, version=version,
+                universe=universe))
         return declared
 
     def _node_name(self, fn: Callable) -> str:

@@ -199,6 +199,25 @@ The version is part of the stage derivation key. Changing it reruns that stage, 
 when moving from no version to `version="1"`; downstream stages rerun only if the new
 output contents have a different fingerprint.
 
+### Stage universes
+
+A partitioned stage can name the partitions it builds, so a runner enumerates them without
+a caller holding the list. Pass a sequence, or a callable where the answer depends on what
+is on disk:
+
+```python
+@iv.data(dataset="processed/fit/", why="one fit per cohort", part="season",
+         universe=lambda: [s for s in SEASONS if s >= FIRST_COHORT])
+def fit(season, prior=iv.same_part(rookie_prior, why="the draft-slot prior")):
+    ...
+```
+
+`iv run` builds exactly that set, and `for_each()` with no argument builds it too. A stage
+declaring one needs no entry in `Invalidator(partitions=...)`; a stage without one falls
+back to the pipeline universe. This is the alternative to building every partition and
+returning `None` for the ones that have nothing: the reads keep their coverage claim,
+because a partition the stage never builds is never resolved.
+
 ### Parquet schema contracts
 
 An important sharded dataset can declare its exact Polars schema in Python:

@@ -118,6 +118,118 @@ def test_runner_targets_one_composite_partition_and_only_requires_current_upstre
     assert not games.is_current(league="wnba", season="2025")
 
 
+def test_the_runner_builds_a_split_stage_once_not_once_per_partition(tmp_path, monkeypatch):
+    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path,
+                     partitions={"season": ["2024", "2025"]})
+    ran = []
+
+    @iv.data(dataset="raw/feed/", why="every season in one file", once=True)
+    def feed():
+        return pl.DataFrame({"season": ["2024", "2024", "2025"], "pts": [1, 2, 3]})
+
+    @iv.data(dataset="processed/features/", why="one pass, split by season",
+             part="season", split=True)
+    def features(source=iv.all_of(feed, why="every season at once")):
+        ran.append(1)
+        return {str(s): rows for (s,), rows in source.group_by("season", maintain_order=True)}
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["run", "--up-to", "features"])
+    assert result.exit_code == 0, result.output
+    assert ran == [1]
+    assert sorted(_sh.current_shards(iv.resolve_out("processed/features/"))) == \
+        ["season=2024", "season=2025"]
+
+
+def test_a_stage_universe_decides_what_the_runner_enumerates(tmp_path, monkeypatch):
+    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
+    built = []
+
+    @iv.data(dataset="raw/feed/", why="every season the feed has",
+             part="season", universe=["2006", "2024", "2025"], once=True)
+    def feed(season):
+        return frame()
+
+    @iv.data(dataset="processed/fit/", why="only the seasons with a prior behind them",
+             part="season", universe=lambda: ["2024", "2025"])
+    def fit(season, source=iv.same_part(feed, why="the matching feed")):
+        built.append(season)
+        return source
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["run", "--up-to", "fit"])
+    assert result.exit_code == 0, result.output
+    assert built == ["2024", "2025"], "2006 is outside this stage's universe"
+    assert sorted(_sh.current_shards(iv.resolve_out("raw/feed/"))) == \
+        ["season=2006", "season=2024", "season=2025"]
+
+
+def test_for_each_with_no_argument_builds_the_declared_universe(iv):
+    @iv.data(dataset="raw/feed/", why="the feed", once=True)
+    def feed():
+        return frame()
+
+    @iv.data(dataset="processed/out/", why="one shard per declared season",
+             part="season", universe=["2024", "2025"])
+    def out(season, source=iv.all_of(feed, why="the feed")):
+        return source
+
+    feed()
+    assert out.for_each() == ["2024", "2025"]
+    assert out.for_each() == [], "everything it declares is current"
+
+
+def test_for_each_with_no_argument_and_no_universe_says_so(iv):
+    @iv.data(dataset="raw/feed/", why="the feed", part="season")
+    def feed(season):
+        return frame()
+
+    with pytest.raises(DeclError, match="declares none"):
+        feed.for_each()
+
+
+def test_a_universe_needs_a_partition_to_be_keyed_on(iv):
+    with pytest.raises(DeclError, match="needs part= to say what they are keyed on"):
+        @iv.data(dataset="raw/feed/", why="unpartitioned", universe=["2024"])
+        def feed():
+            return frame()
+
+
+def test_a_split_stage_has_no_per_partition_universe(iv):
+    with pytest.raises(DeclError, match="no per-partition universe"):
+        @iv.data(dataset="raw/feed/", why="one pass", part="season", split=True,
+                 universe=["2024"])
+        def feed():
+            return {"2024": frame()}
+
+
+def test_a_partition_with_nothing_to_build_returns_none_under_allow_missing(iv):
+    ran = []
+
+    @iv.data(dataset="raw/feed/", why="the feed", part="season", allow_missing=True)
+    def feed(season):
+        ran.append(season)
+        return None if season == "2006" else frame()
+
+    feed("2006")
+    feed("2024")
+    assert ran == ["2006", "2024"]
+    assert sorted(_sh.current_shards(iv.resolve_out("raw/feed/"))) == ["season=2024"]
+    assert feed.why_stale("2006"), "an absent shard stays stale, so the next run retries"
+    assert feed.why_stale("2024") is None
+
+
+def test_returning_none_without_allow_missing_still_names_the_way_out(iv):
+    @iv.data(dataset="raw/feed/", why="the feed", part="season")
+    def feed(season):
+        return None
+
+    with pytest.raises(DeclError, match="allow_missing=True if this partition"):
+        feed("2006")
+
+
 def test_a_moved_upstream_rebuilds(iv):
     n = [2]
     ran = []
@@ -944,6 +1056,30 @@ def test_reading_a_declared_dataset_nothing_writes_is_an_error(iv):
     errors, _ = _graph.check(_graph.build(iv))
     assert any("READ, NOBODY WRITES  processed/ghost/" in e for e in errors)
     assert any("::y" in e for e in errors), "it names WHO reads it"
+
+
+def test_a_dataset_only_optional_readers_want_is_a_warning_not_an_error(iv):
+    ONE_LEAGUE_ONLY = iv.dataset("derived/tracking/", why="one league has this feed")
+
+    @iv.data(dataset="processed/features/", why="the box matrix")
+    def features(tracking=iv.all_of(ONE_LEAGUE_ONLY, optional=True,
+                                    why="present on one league, absent on the other")):
+        return frame()
+
+    errors, warns = _graph.check(_graph.build(iv))
+    assert not [e for e in errors if "derived/tracking/" in e]
+    assert any("OPTIONAL, NOBODY WRITES" in w and "derived/tracking/" in w for w in warns)
+
+
+def test_a_dataset_a_required_read_wants_and_nothing_writes_is_still_an_error(iv):
+    MISSING = iv.dataset("derived/tracking/", why="nothing writes this")
+
+    @iv.data(dataset="processed/features/", why="the box matrix")
+    def features(tracking=iv.all_of(MISSING, why="required, so it must be written")):
+        return frame()
+
+    errors, _ = _graph.check(_graph.build(iv))
+    assert any("READ, NOBODY WRITES" in e and "derived/tracking/" in e for e in errors)
 
 
 def test_a_declared_dataset_nothing_reads_or_writes_is_only_a_warning(iv):

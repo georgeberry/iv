@@ -295,7 +295,7 @@ class Asset:
     def __init__(self, pipeline, output, fn, *, why: str,
                  part=None, ext: str = _sh.EXT, allow_missing: bool = False, if_needed: bool = True,
                  once: bool = False, split: bool = False, single: bool = True,
-                 external=None, schema=None, version=None) -> None:
+                 external=None, schema=None, version=None, universe=None) -> None:
         self.pipeline = pipeline
         self.outputs = _outputs(output, ext, allow_missing, schema)
         self.single = single
@@ -315,6 +315,7 @@ class Asset:
                 f"@iv.step(..., part='season', split=True).")
         if split and len(self.part_keys or ()) != 1:
             raise DeclError(f"{self.primary}: split=True currently requires one partition key.")
+        self.universe = _universe(universe, self.primary, self.part_keys, split)
         check_signature(fn, self.part_keys, self.primary)
         if self.acts_only and (self.split or self.part_keys or self.fixed_part):
             raise DeclError(
@@ -512,10 +513,15 @@ class Asset:
                 return
             value = self.fn(**kw)
             if value is None:
+                if all(o.allow_missing for o in self.outputs.values()):
+                    for o in self.outputs.values():
+                        iv.record("io", op="skip-empty", rel=o.dataset, why=self.why)
+                    return
                 raise DeclError(
                     f"{self.primary}: {self.__name__} returned None and takes no "
                     f"{OUT_PARAM!r} parameter, so nothing was produced. Return the value "
-                    f"to store, or take `{OUT_PARAM}` and write to it.")
+                    f"to store, take `{OUT_PARAM}` and write to it, or pass "
+                    f"allow_missing=True if this partition legitimately has none.")
             if self.split:
                 self._commit_split(value)
             elif self.single:
@@ -637,13 +643,36 @@ class Asset:
             iv._validate_schema(o.dataset, [got])
             return load_value([got.path], got.ext)
 
-    def for_each(self, over) -> list[str]:
+    def universe_parts(self) -> list[dict] | None:
+        if self.universe is None:
+            return None
+        values = self.universe() if callable(self.universe) else self.universe
+        out = []
+        for v in values:
+            if isinstance(v, dict):
+                out.append({str(k): str(x) for k, x in v.items()})
+            elif len(self.part_keys) == 1:
+                out.append({self.part_keys[0]: str(v)})
+            else:
+                raise DeclError(
+                    f"{self.primary} is partitioned by {self.part_keys!r}, so its "
+                    f"universe= names every key per entry: "
+                    f"[{{'league': 'nba', 'season': '2025'}}]. Got {v!r}.")
+        return out
+
+    def for_each(self, over=None) -> list[str]:
         """Build one shard per key, skipping the ones already current."""
         if self.part_keys is None or self.split or self.fixed_part is not None:
             raise DeclError(
                 f"{self.primary} is not built one partition at a time, so there is "
                 f"nothing to iterate. Declare part='season' without split=.")
         iv = self.pipeline
+        if over is None:
+            over = self.universe_parts()
+            if over is None:
+                raise DeclError(
+                    f"{self.primary}: for_each() with no argument builds the stage's "
+                    f"declared universe=, and this stage declares none.")
         want = [self._coerce_part(p) for p in over]
         rebuild = [p for p in want
                    if iv.force or not self.may_skip or self.why_stale(**p) is not None]
@@ -706,6 +735,25 @@ def _part_spec(part, dataset) -> tuple:
         f"{dataset}: part= is key(s) this stage builds one shard per — part='season' or "
         "part=('league', 'season') — or "
         f"a literal shard it owns — part={{'source': 'ncaa'}}. Got {part!r}.")
+
+
+def _universe(value, dataset, part_keys, split):
+    if value is None:
+        return None
+    if not part_keys:
+        raise DeclError(
+            f"{dataset}: universe= names the partitions this stage builds, so it needs "
+            f"part= to say what they are keyed on.")
+    if split:
+        raise DeclError(
+            f"{dataset}: split=True builds every partition in one pass, so there is no "
+            f"per-partition universe to enumerate.")
+    if not callable(value) and not hasattr(value, "__iter__"):
+        raise DeclError(
+            f"{dataset}: universe= is the partitions to build \u2014 a sequence, or a "
+            f"callable returning one where the answer depends on what is on disk. "
+            f"Got {value!r}.")
+    return value
 
 
 def _version(value, dataset):
