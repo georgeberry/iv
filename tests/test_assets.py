@@ -188,6 +188,49 @@ def test_runner_prints_plan_progress_and_stage_output(iv, monkeypatch):
     assert "0 reran, 1 current — skipped" in second.output
 
 
+def test_runner_writes_one_incremental_output_log(iv, monkeypatch, tmp_path):
+    @iv.data(dataset="raw/feed/", why="a logged stage", once=True)
+    def feed():
+        print("first line")
+        print("second line", file=__import__("sys").stderr)
+        return frame()
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    log = tmp_path / "logs" / "run.log"
+    runner = CliRunner()
+
+    first = runner.invoke(app, ["run", "--log", str(log)])
+    assert first.exit_code == 0, first.output
+    text = log.read_text()
+    assert "iv run · 1 stage shard(s)" in text
+    assert "[1/1]" in text and "first line" in text and "second line" in text
+    assert "[iv] reran (" in text and "1 reran, 0 current — skipped" in text
+
+    second = runner.invoke(app, ["run", "--log", str(log)])
+    assert second.exit_code == 0, second.output
+    text = log.read_text()
+    assert text.count("iv run ·") == 1, "each run replaces rather than appends to the log"
+    assert "[iv] current — skipped (" in text
+    assert "0 reran, 1 current — skipped" in text
+
+
+def test_runner_preserves_output_log_when_a_stage_fails(iv, monkeypatch, tmp_path):
+    @iv.data(dataset="raw/feed/", why="a failing stage", once=True)
+    def feed():
+        print("evidence before failure")
+        raise RuntimeError("boom")
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    log = tmp_path / "failed.log"
+    result = CliRunner().invoke(app, ["run", "--log", str(log)])
+    assert result.exit_code == 1
+    text = log.read_text()
+    assert "evidence before failure" in text
+    assert "[iv] failed (" in text
+
+
 def test_impact_shows_a_stage_cone_and_tick_propagation(iv, monkeypatch):
     @iv.data(dataset="raw/feed/", why="a stable feed", once=True)
     def feed():

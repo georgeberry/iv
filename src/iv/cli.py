@@ -160,6 +160,38 @@ def _print_stage_output(text: str) -> None:
         typer.echo(f"  │ {line}")
 
 
+class _LogCapture(io.StringIO):
+    """The ordinary non-TTY capture, optionally teeing every write to a run log."""
+
+    def __init__(self, sink=None) -> None:
+        super().__init__()
+        self.sink = sink
+
+    def write(self, text) -> int:
+        if self.sink:
+            self.sink.write(text)
+        return super().write(text)
+
+    def flush(self) -> None:
+        if self.sink:
+            self.sink.flush()
+        super().flush()
+
+
+def _open_run_log(path: Path | None, total: int):
+    if path is None:
+        return None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out = path.open("w", encoding="utf-8", buffering=1)
+    except OSError as e:
+        raise IvError(f"cannot open --log {path}: {e}") from e
+    out.write(f"iv run · {total} stage shard(s)\n")
+    out.write(f"started {time.strftime('%Y-%m-%d %H:%M:%S %z')}\n")
+    out.flush()
+    return out
+
+
 @app.command()
 def graph(focus: str = typer.Option(None, "--focus", help="only this stage and its cone"),
           full: bool = typer.Option(False, "--full", help="every edge, not the reduction")):
@@ -626,6 +658,9 @@ def run(
     from_: str = typer.Option(None, "--from", help="run this stage and descendants; upstream must be current"),
     only: str = typer.Option(None, "--only", help="run exactly this stage; upstream must be current"),
     part: list[str] = typer.Option([], "--part", help="partition filter, repeat as key=value"),
+    log: Path = typer.Option(
+        None, "--log",
+        help="write all merged stage output and outcomes to this file"),
 ):
     """Execute pipeline stages in dependency order."""
     choices = [x for x in (up_to, up_to_excluding, from_, only) if x]
@@ -672,6 +707,7 @@ def run(
         typer.secho("nothing selected", fg="yellow")
         return
 
+    run_log = _open_run_log(log, len(work))
     typer.secho(f"iv run · {len(work)} stage shard(s)", bold=True)
     for i, (node, _, p) in enumerate(work, 1):
         typer.echo(f"  {i:>3}. {node}{_part_label(p)}")
@@ -680,31 +716,45 @@ def run(
     ran = skipped = 0
     started = time.perf_counter()
     for i, (node, asset, p) in enumerate(work, 1):
-        typer.secho(f"[{i}/{len(work)}] {node}{_part_label(p)}", bold=True)
-        output = io.StringIO()
+        heading = f"[{i}/{len(work)}] {node}{_part_label(p)}"
+        typer.secho(heading, bold=True)
+        if run_log:
+            run_log.write(f"\n{heading}\n")
+            run_log.flush()
+        output = _LogCapture(run_log)
         step_started = time.perf_counter()
-        args = p or {}
-        will_run = (iv.force or not asset.if_needed or not asset.may_skip
-                    or not asset.is_current(**args))
         try:
+            args = p or {}
+            will_run = (iv.force or not asset.if_needed or not asset.may_skip
+                        or not asset.is_current(**args))
             with redirect_stdout(output), redirect_stderr(output):
                 asset(**p) if p is not None else asset()
         except BaseException:
             _print_stage_output(output.getvalue())
+            if run_log:
+                elapsed = time.perf_counter() - step_started
+                run_log.write(f"\n[iv] failed ({elapsed:.2f}s)\n")
+                run_log.close()
             raise
         _print_stage_output(output.getvalue())
         elapsed = time.perf_counter() - step_started
         if will_run:
             ran += 1
-            typer.secho(f"  reran ({elapsed:.2f}s)", fg="green")
+            outcome = f"reran ({elapsed:.2f}s)"
+            typer.secho(f"  {outcome}", fg="green")
         else:
             skipped += 1
-            typer.secho(f"  current — skipped ({elapsed:.2f}s)", fg="cyan")
+            outcome = f"current — skipped ({elapsed:.2f}s)"
+            typer.secho(f"  {outcome}", fg="cyan")
+        if run_log:
+            run_log.write(f"\n[iv] {outcome}\n")
+            run_log.flush()
     total = time.perf_counter() - started
-    typer.secho(
-        f"\ncomplete in {total:.2f}s · {ran} reran, {skipped} current — skipped",
-        bold=True,
-    )
+    summary = f"complete in {total:.2f}s · {ran} reran, {skipped} current — skipped"
+    typer.secho(f"\n{summary}", bold=True)
+    if run_log:
+        run_log.write(f"\n{summary}\n")
+        run_log.close()
 
 
 @app.command()
