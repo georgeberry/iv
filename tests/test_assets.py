@@ -43,8 +43,7 @@ def test_a_derived_asset_builds_then_skips(iv):
 
 
 def test_composite_partitions_match_every_dimension_and_for_each_dicts(tmp_path):
-    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path,
-                     partitions={"league": ["nba", "wnba"], "season": ["2024", "2025"]})
+    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
     raw = iv.source("raw/games/", why="league-season games")
     for league in ("nba", "wnba"):
         for season in ("2024", "2025"):
@@ -52,15 +51,15 @@ def test_composite_partitions_match_every_dimension_and_for_each_dicts(tmp_path)
                 frame(extra=1 if league == "nba" else 2).write_parquet(out)
 
     @iv.data(dataset="processed/games/", why="one league-season result",
-             part=("league", "season"))
+             part=("league", "season"),
+             universe=[{"league": league, "season": season}
+                       for league in ("nba", "wnba") for season in ("2024", "2025")])
     def games(league, season, source=iv.same_part(raw, why="the matching games")):
         return source.with_columns(pl.lit(f"{league}-{season}").alias("slice"))
 
     rebuilt = games.for_each([{"league": "nba", "season": "2025"}])
     assert rebuilt == [{"league": "nba", "season": "2025"}]
     assert games(league="nba", season="2025").get_column("slice").unique().item() == "nba-2025"
-    with pytest.raises(DeclError, match="not in this pipeline's declared universe"):
-        games(league="nba", season="2026")
 
 
 def test_a_version_reruns_its_stage_but_identical_output_stops_downstream(iv):
@@ -89,15 +88,25 @@ def test_a_version_reruns_its_stage_but_identical_output_stops_downstream(iv):
     assert calls == ["mid", "end", "mid"]
 
 
-def test_runner_targets_one_composite_partition_and_only_requires_current_upstream(tmp_path, monkeypatch):
-    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path,
-                     partitions={"league": ["nba", "wnba"], "season": ["2025"]})
+def test_an_action_cannot_have_a_version(iv):
+    with pytest.raises(DeclError, match="version= belongs to an output"):
+        @iv.step(why="publishes a report", version="1")
+        def publish():
+            pass
 
-    @iv.data(dataset="raw/games/", why="one feed shard", part=("league", "season"), once=True)
+
+def test_runner_targets_one_composite_partition_and_only_requires_current_upstream(tmp_path, monkeypatch):
+    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
+
+    universe = [{"league": league, "season": "2025"} for league in ("nba", "wnba")]
+
+    @iv.data(dataset="raw/games/", why="one feed shard", part=("league", "season"),
+             universe=universe, once=True)
     def raw(league, season):
         return frame(extra=1 if league == "nba" else 2)
 
-    @iv.data(dataset="processed/games/", why="one derived shard", part=("league", "season"))
+    @iv.data(dataset="processed/games/", why="one derived shard", part=("league", "season"),
+             universe=universe)
     def games(league, season, source=iv.same_part(raw, why="the matching feed")):
         return source
 
@@ -113,8 +122,7 @@ def test_runner_targets_one_composite_partition_and_only_requires_current_upstre
 
 
 def test_the_runner_builds_a_split_stage_once_not_once_per_partition(tmp_path, monkeypatch):
-    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path,
-                     partitions={"season": ["2024", "2025"]})
+    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
     ran = []
 
     @iv.data(dataset="raw/feed/", why="every season in one file", once=True)
@@ -158,6 +166,19 @@ def test_a_stage_universe_decides_what_the_runner_enumerates(tmp_path, monkeypat
     assert built == ["2024", "2025"], "2006 is outside this stage's universe"
     assert sorted(_sh.current_shards(iv.resolve_out("raw/feed/"))) == \
         ["season=2006", "season=2024", "season=2025"]
+
+
+def test_runner_requires_a_stage_universe_for_dynamic_work(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="one shard per season", part="season", once=True)
+    def feed(season):
+        return frame()
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["run"])
+    assert result.exit_code == 1
+    assert "iv run needs universe=" in result.output
+    assert feed("2025").height == 2, "a direct, fully named shard stays valid"
 
 
 def test_runner_prints_plan_progress_and_stage_output(iv, monkeypatch):
@@ -959,6 +980,31 @@ def test_split_needs_a_partition_key(iv):
         @iv.data(dataset="derived/features/", why="split with nothing to split on", split=True)
         def features():
             return {"a": frame()}
+
+
+def test_split_cannot_write_through_out(iv):
+    with pytest.raises(DeclError, match="split=True returns many partition shards"):
+        @iv.data(dataset="derived/features/", why="wrong split protocol",
+                 part="season", split=True)
+        def features(out):
+            frame().write_parquet(out)
+
+
+def test_stage_part_and_output_shard_cannot_both_name_ownership(iv):
+    shared = iv.dataset("derived/features/", why="a shared table")
+    with pytest.raises(DeclError, match="partition ownership is declared both"):
+        @iv.data(dataset=shared.shard(source="intl"), why="wrong ownership source",
+                 part="season")
+        def features(season):
+            return frame()
+
+
+def test_one_stage_cannot_claim_the_same_output_shard_twice(iv):
+    with pytest.raises(DeclError, match="both write"):
+        @iv.step(output={"first": "derived/features/", "second": "derived/features/"},
+                 why="two names for one shard")
+        def features():
+            return {"first": frame(), "second": frame()}
 
 
 def test_an_external_source_is_declared_and_drawn(iv):

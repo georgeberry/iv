@@ -102,6 +102,9 @@ such as `part={"source": "ncaa"}` for a literal shard. `universe=` tells `iv run
 dynamic partitions to enumerate. `split=True` means one call returns all partitions as a
 mapping.
 
+Every dynamic stage run through `iv run` needs its own `universe=`. Direct calls and an
+explicit `for_each([...])` already name the shards to build and do not need one.
+
 Use `version=` to invalidate a stage deliberately. Use `schema=` on sources or datasets
 to enforce an exact ordered Polars schema. Supported stored values are DataFrames
 (`.parquet`), JSON-compatible dictionaries/lists (`.json`), picklable values (`.pkl`), and

@@ -95,7 +95,7 @@ def declared_nodes(iv) -> list[_static.Node]:
 
         out.append(_static.Node(name=f"{rel}::{fn_name}", file=rel, fn=fn_name,
                                 sites=tuple(sites),
-                                guarded=asset.if_needed and asset.may_skip))
+                                guarded=asset.may_skip))
     return out
 
 

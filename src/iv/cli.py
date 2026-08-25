@@ -16,7 +16,7 @@ from . import render as _render
 from . import shards as _sh
 from . import static as _static
 from .core import _canon, _resolve_sel
-from .errors import ConfigError, IvError
+from .errors import ConfigError, DeclError, IvError
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="Re-run a stage only when the data it reads has changed.")
@@ -130,7 +130,9 @@ def _asset_parts(iv, asset, filters: dict[str, str]) -> list[dict | None]:
         return [None]
     parts = asset.universe_parts()
     if parts is None:
-        parts = iv.partitions_for(asset.part_keys)
+        raise DeclError(
+            f"{asset.primary}: iv run needs universe= to enumerate this dynamic stage. "
+            "Use universe=[...] (or a callable), or build an explicit shard directly.")
     return [p for p in parts if all(p.get(k) == v for k, v in filters.items() if k in p)]
 
 
@@ -216,9 +218,58 @@ def _rebuild_reason(iv, asset, part: dict | None, stale: str | None,
         return stale
     if not asset.may_skip:
         return "root has no declared inputs"
-    if not asset.if_needed:
-        return "configured to run every time"
     return "declared inputs, version, or schema changed"
+
+
+def _execute_work(iv, work, log: Path | None) -> None:
+    run_log = _open_run_log(log, len(work))
+    typer.secho(f"iv run · {len(work)} stage shard(s)", bold=True)
+    for i, (node, _, p) in enumerate(work, 1):
+        typer.echo(f"  {i:>3}. {node}{_part_label(p)}")
+    typer.echo()
+    ran = skipped = 0
+    changed: set[tuple[str, str]] = set()
+    started = time.perf_counter()
+    for i, (node, asset, p) in enumerate(work, 1):
+        heading = f"[{i}/{len(work)}] {node}{_part_label(p)}"
+        typer.secho(heading, bold=True)
+        if run_log:
+            run_log.write(f"\n{heading}\n"); run_log.flush()
+        output = _LogCapture(run_log)
+        step_started = time.perf_counter()
+        try:
+            args = p or {}
+            stale = asset.why_stale(**args)
+            will_run = iv.force or not asset.may_skip or bool(stale)
+            reason = _rebuild_reason(iv, asset, p, stale, changed) if will_run else None
+            if reason:
+                typer.secho(f"  rebuild — {reason}", fg="yellow")
+                if run_log:
+                    run_log.write(f"[iv] rebuild — {reason}\n"); run_log.flush()
+            iv._changes.clear()
+            with redirect_stdout(output), redirect_stderr(output):
+                asset(**p) if p is not None else asset()
+            changed.update(iv._changes)
+        except BaseException:
+            _print_stage_output(output.getvalue())
+            if run_log:
+                run_log.write(f"\n[iv] failed ({time.perf_counter() - step_started:.2f}s)\n")
+                run_log.close()
+            raise
+        _print_stage_output(output.getvalue())
+        elapsed = time.perf_counter() - step_started
+        if will_run:
+            ran += 1; outcome = f"reran ({elapsed:.2f}s)"
+            typer.secho(f"  {outcome}", fg="green")
+        else:
+            skipped += 1; outcome = f"current — skipped ({elapsed:.2f}s)"
+            typer.secho(f"  {outcome}", fg="cyan")
+        if run_log:
+            run_log.write(f"\n[iv] {outcome}\n"); run_log.flush()
+    summary = f"complete in {time.perf_counter() - started:.2f}s · {ran} reran, {skipped} current — skipped"
+    typer.secho(f"\n{summary}", bold=True)
+    if run_log:
+        run_log.write(f"\n{summary}\n"); run_log.close()
 
 
 @app.command()
@@ -703,63 +754,8 @@ def run(
         typer.secho("nothing selected", fg="yellow")
         return
 
-    run_log = _open_run_log(log, len(work))
-    typer.secho(f"iv run · {len(work)} stage shard(s)", bold=True)
-    for i, (node, _, p) in enumerate(work, 1):
-        typer.echo(f"  {i:>3}. {node}{_part_label(p)}")
-    typer.echo()
-
-    ran = skipped = 0
-    changed: set[tuple[str, str]] = set()
-    started = time.perf_counter()
-    for i, (node, asset, p) in enumerate(work, 1):
-        heading = f"[{i}/{len(work)}] {node}{_part_label(p)}"
-        typer.secho(heading, bold=True)
-        if run_log:
-            run_log.write(f"\n{heading}\n")
-            run_log.flush()
-        output = _LogCapture(run_log)
-        step_started = time.perf_counter()
-        try:
-            args = p or {}
-            stale = asset.why_stale(**args)
-            will_run = iv.force or not asset.if_needed or not asset.may_skip or bool(stale)
-            reason = _rebuild_reason(iv, asset, p, stale, changed) if will_run else None
-            if reason:
-                typer.secho(f"  rebuild — {reason}", fg="yellow")
-                if run_log:
-                    run_log.write(f"[iv] rebuild — {reason}\n")
-                    run_log.flush()
-            iv._changes.clear()
-            with redirect_stdout(output), redirect_stderr(output):
-                asset(**p) if p is not None else asset()
-            changed.update(iv._changes)
-        except BaseException:
-            _print_stage_output(output.getvalue())
-            if run_log:
-                elapsed = time.perf_counter() - step_started
-                run_log.write(f"\n[iv] failed ({elapsed:.2f}s)\n")
-                run_log.close()
-            raise
-        _print_stage_output(output.getvalue())
-        elapsed = time.perf_counter() - step_started
-        if will_run:
-            ran += 1
-            outcome = f"reran ({elapsed:.2f}s)"
-            typer.secho(f"  {outcome}", fg="green")
-        else:
-            skipped += 1
-            outcome = f"current — skipped ({elapsed:.2f}s)"
-            typer.secho(f"  {outcome}", fg="cyan")
-        if run_log:
-            run_log.write(f"\n[iv] {outcome}\n")
-            run_log.flush()
-    total = time.perf_counter() - started
-    summary = f"complete in {total:.2f}s · {ran} reran, {skipped} current — skipped"
-    typer.secho(f"\n{summary}", bold=True)
-    if run_log:
-        run_log.write(f"\n{summary}\n")
-        run_log.close()
+    with _sh.snapshot():
+        _execute_work(iv, work, log)
 
 
 @app.command()

@@ -134,6 +134,20 @@ def test_a_commit_is_never_answered_from_a_snapshot(iv):
     assert pl.read_parquet(iv.reads("raw/feed/", why="check")).height == 9
 
 
+def test_a_snapshot_sees_a_commit_made_inside_it(iv):
+
+
+    seasons(iv, ["2021", "2022"])
+    with iv.snapshot():
+        assert iv.is_current("processed/features/", {"season": "2021"})
+        seed(iv, "raw/box/", part={"season": "2021"}, n=99)
+        assert not iv.is_current("processed/features/", {"season": "2021"}), (
+            "a stage wrote inside the block and the next staleness check was answered "
+            "from the listing taken before it — which is what stops `iv run` from "
+            "holding a snapshot at all")
+        assert iv.is_current("processed/features/", {"season": "2022"})
+
+
 def test_snapshots_nest_without_taking_a_second_view(iv):
     seasons(iv, ["2021"])
     with iv.snapshot():

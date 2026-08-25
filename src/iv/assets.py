@@ -219,7 +219,7 @@ class Asset:
 
 
     def __init__(self, pipeline, output, fn, *, why: str,
-                 part=None, ext: str = _sh.EXT, allow_missing: bool = False, if_needed: bool = True,
+                 part=None, ext: str = _sh.EXT, allow_missing: bool = False,
                  once: bool = False, split: bool = False, single: bool = True,
                  external=None, schema=None, version=None, universe=None) -> None:
         self.pipeline = pipeline
@@ -228,12 +228,21 @@ class Asset:
         self.fn = fn
         self.acts_only = not self.outputs
         self.why = _decl._why(why, self.primary)
-        self.if_needed = if_needed
         self.once = once
         self.split = split
         self.part_keys, self.fixed_part = _part_spec(part, self.primary)
         self.part_key = self.part_keys[0] if self.part_keys and len(self.part_keys) == 1 else None
         self.version = _version(version, self.primary)
+        if self.acts_only and self.version is not None:
+            raise DeclError(
+                f"{self.primary}: version= belongs to an output's derivation key, but "
+                "this action writes no output. Remove version=.")
+        if (self.part_keys or self.fixed_part) and any(o.part for o in self.outputs.values()):
+            raise DeclError(
+                f"{self.primary}: partition ownership is declared both on the stage and "
+                "on an output with .shard(...). Put part= on the stage for every output, "
+                "or put .shard(...) only on the individual outputs.")
+        self._check_output_ownership()
         if split and not self.part_keys:
             raise DeclError(
                 f"{self.primary}: split=True means the body computes every partition at "
@@ -254,6 +263,11 @@ class Asset:
             raise DeclError(
                 f"{self.primary}: a body that writes through `{OUT_PARAM}` produces one "
                 f"file, so it cannot serve several outputs.")
+        if self.wants_out and self.split:
+            raise DeclError(
+                f"{self.primary}: a body taking `{OUT_PARAM}` writes one staged file, "
+                "but split=True returns many partition shards. Use a returned mapping "
+                "instead of out.")
         self.__name__ = getattr(fn, "__name__", "asset")
         self.__doc__ = getattr(fn, "__doc__", None)
         self.__wrapped__ = fn
@@ -295,6 +309,21 @@ class Asset:
 
 
         return self.primary if len(self.outputs) == 1 else None
+
+    def _check_output_ownership(self) -> None:
+        """One stage cannot commit two values to the same physical shard."""
+        claimed = {}
+        stage_part = (tuple(sorted(self.fixed_part.items())) if self.fixed_part else
+                      ("<dynamic>", *self.part_keys) if self.part_keys else ())
+        for label, output in self.outputs.items():
+            shard = output.part or stage_part
+            key = (output.dataset, shard)
+            if key in claimed:
+                raise DeclError(
+                    f"{self.primary}: outputs {claimed[key]!r} and {label!r} both write "
+                    f"{output.dataset}{dict(shard) if output.part else ''}. Give shared "
+                    "datasets distinct .shard(...) partitions, or declare one output.")
+            claimed[key] = label
 
     def part_for(self, dataset: str) -> tuple:
 
@@ -378,7 +407,7 @@ class Asset:
                 f"and `iv status` cannot see the edge. Declare it as an upstream instead: "
                 f"x=iv.all_of({self.primary!r}, why='...').")
         part = self._part(args, kwargs)
-        if (self.if_needed and self.may_skip and not iv.force
+        if (self.may_skip and not iv.force
                 and self.why_stale(*args, **kwargs) is None):
             return self.load(part) if self.single and not self.split else False
         self.build(part)
@@ -578,7 +607,6 @@ class Asset:
         raise DeclError(f"{self.primary}: multi-partition for_each() takes dictionaries or {len(self.part_keys)}-tuples.")
 
     def _validate_part(self, part: dict) -> dict:
-        self.pipeline._validate_partition(part)
         return part
 
 

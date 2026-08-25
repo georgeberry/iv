@@ -49,6 +49,21 @@ def snapshot():
         _local.cache = None
 
 
+def _cache_put(dataset_dir, part_str: str, shard) -> None:
+    cache = getattr(_local, "cache", None)
+    if cache is None:
+        return
+    live = cache.get(str(dataset_dir))
+    if live is not None:
+        live[part_str] = shard
+
+
+def _cache_drop(dataset_dir) -> None:
+    cache = getattr(_local, "cache", None)
+    if cache is not None:
+        cache.pop(str(dataset_dir), None)
+
+
 def encode_part(part: dict[str, object] | None) -> str:
     if not part:
         return ""
@@ -281,6 +296,7 @@ def commit(staged, dataset_dir, *, part: dict[str, object] | None,
         _move(staged, final)
     for s in superseded:
         s.path.unlink()
+    _cache_put(dataset_dir, part_str, parse_name(final))
     if on_commit:
         on_commit(final, not any(s.fp == fp for s in superseded))
     return final
@@ -318,4 +334,6 @@ def gc(dataset_dir, *, keep: set[str] | None = None) -> list[str]:
             if s.name not in keep:
                 s.path.unlink()
                 removed.append(s.name)
+    if removed:
+        _cache_drop(dataset_dir)
     return sorted(removed)
