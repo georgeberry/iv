@@ -732,29 +732,30 @@ def run(
         selected = {_stage_name(g, only)}
         safe = True
 
-    if safe:
-        required = set()
-        for node in selected:
-            required.update(_cone(parents, node) - selected)
-        stale = []
-        for node in g.order():
-            if node not in required:
-                continue
-            asset = iv._assets[node]
-            for p in _stale_asset_parts(iv, asset, filters):
-                stale.append(f"{node} {p or '(one shard)'}")
-        if stale:
-            raise IvError("refusing to run with stale upstream shard(s): " + "; ".join(stale)
-                          + ". Run `iv run --up-to " + choices[0] + "` first.")
-
-    work = [(node, iv._assets[node], p)
-            for node in g.order() if node in selected
-            for p in _asset_parts(iv, iv._assets[node], filters)]
-    if not work:
-        typer.secho("nothing selected", fg="yellow")
-        return
-
     with _sh.snapshot():
+        if safe:
+            required = set()
+            for node in selected:
+                required.update(_cone(parents, node) - selected)
+            stale = []
+            for node in g.order():
+                if node not in required:
+                    continue
+                asset = iv._assets[node]
+                for p in _stale_asset_parts(iv, asset, filters):
+                    stale.append(f"{node} {p or '(one shard)'}")
+            if stale:
+                raise IvError("refusing to run with stale upstream shard(s): "
+                              + "; ".join(stale) + ". Run `iv run --up-to "
+                              + choices[0] + "` first.")
+
+        work = [(node, iv._assets[node], p)
+                for node in g.order() if node in selected
+                for p in _asset_parts(iv, iv._assets[node], filters)]
+        if not work:
+            typer.secho("nothing selected", fg="yellow")
+            return
+
         _execute_work(iv, work, log)
 
 
