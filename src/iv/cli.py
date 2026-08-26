@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import io
 import sys
+import tempfile
 import tomllib
 import time
 from contextlib import redirect_stderr, redirect_stdout
@@ -270,6 +271,49 @@ def _execute_work(iv, work, log: Path | None) -> None:
     typer.secho(f"\n{summary}", bold=True)
     if run_log:
         run_log.write(f"\n{summary}\n"); run_log.close()
+
+
+def _trial_outputs(iv, asset, part: dict | None, out_tree: Path) -> dict[str, dict[str, str]]:
+    """Force one stage into an isolated output tree and return content fingerprints."""
+    original_out, original_force = iv.out_tree, iv.force
+    try:
+        iv.out_tree, iv.force = out_tree, True
+        asset(**part) if part is not None else asset()
+        return {
+            output.dataset: {
+                key: shard.fp for key, shard in _sh.current_shards(iv.resolve_out(output.dataset)).items()
+            }
+            for output in asset.outputs.values()
+        }
+    finally:
+        iv.out_tree, iv.force = original_out, original_force
+
+
+def _determinism_differences(first, second) -> list[str]:
+    differences = []
+    for dataset in sorted(set(first) | set(second)):
+        left, right = first.get(dataset, {}), second.get(dataset, {})
+        for part in sorted(set(left) | set(right), key=_sh.sort_key):
+            if left.get(part) != right.get(part):
+                label = part or "(one shard)"
+                differences.append(
+                    f"{dataset}{label}: {left.get(part, '(absent)')} != {right.get(part, '(absent)')}")
+    return differences
+
+
+def _audit_determinism(iv, node: str, asset, parts: list[dict | None]) -> list[str]:
+    with tempfile.TemporaryDirectory(prefix="iv-determinism-") as root:
+        first = [_trial_outputs(iv, asset, p, Path(root) / "first") for p in parts]
+        second = [_trial_outputs(iv, asset, p, Path(root) / "second") for p in parts]
+    differences = []
+    for p, left, right in zip(parts, first, second):
+        prefix = f"{node}{_part_label(p)} — "
+        differences += [prefix + line for line in _determinism_differences(left, right)]
+    return differences
+
+
+def _last_part(parts: list[dict | None]) -> dict | None:
+    return max(parts, key=lambda p: _sh.sort_key(_sh.encode_part(p)))
 
 
 @app.command()
@@ -695,6 +739,60 @@ def plan():
         tier, note = _line(shards, maybe, name)
         if tier == "maybe":
             typer.secho(f"  maybe    {name:<44} {note}", fg="cyan")
+
+
+@app.command()
+@reports
+def determinism(
+    only: str = typer.Option(None, "--only", help="stage to run twice in isolated output trees"),
+    sample: bool = typer.Option(False, "--sample", help="audit every stage at its last declared partition"),
+    part: list[str] = typer.Option([], "--part", help="partition filter, repeat as key=value"),
+):
+    """Check that selected stages produce identical content from identical inputs."""
+    if bool(only) == sample:
+        raise IvError("choose exactly one of --only STAGE or --sample.")
+    if sample and part:
+        raise IvError("--part is only meaningful with `iv determinism --only STAGE`.")
+    iv = _load()
+    g = _graph.build(iv)
+    if only:
+        node = _stage_name(g, only)
+        asset = iv._assets[node]
+        if asset.acts_only:
+            raise IvError(f"{node} is an action with no output, so determinism cannot be measured.")
+        parts = _asset_parts(iv, asset, _part_flags(part))
+        differences = _audit_determinism(iv, node, asset, parts)
+        if differences:
+            typer.secho("not deterministic", fg="red", bold=True)
+            for line in differences:
+                typer.echo(f"  {line}")
+            raise typer.Exit(1)
+        typer.secho(f"deterministic · {node} · {len(parts)} stage shard(s) matched", fg="green")
+        return
+
+    failed = checked = skipped = 0
+    typer.secho("determinism sample", bold=True)
+    for node in g.order():
+        asset = iv._assets[node]
+        if asset.acts_only:
+            skipped += 1
+            typer.secho(f"  skipped  {node} — action", fg="bright_black")
+            continue
+        chosen = _last_part(_asset_parts(iv, asset, {}))
+        differences = _audit_determinism(iv, node, asset, [chosen])
+        checked += 1
+        if differences:
+            failed += 1
+            typer.secho(f"  failed   {node}{_part_label(chosen)}", fg="red")
+            for line in differences:
+                typer.echo(f"    {line}")
+        else:
+            typer.secho(f"  ok       {node}{_part_label(chosen)}", fg="green")
+    summary = f"{checked} checked, {failed} failed, {skipped} action(s) skipped"
+    if failed:
+        typer.secho(f"not deterministic · {summary}", fg="red", bold=True)
+        raise typer.Exit(1)
+    typer.secho(f"deterministic · {summary}", fg="green", bold=True)
 
 
 @app.command()

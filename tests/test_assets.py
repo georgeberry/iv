@@ -204,6 +204,83 @@ def test_runner_prints_plan_progress_and_stage_output(iv, monkeypatch):
     assert "0 reran, 1 current — skipped" in second.output
 
 
+def test_determinism_runs_one_stage_twice_without_touching_production_outputs(iv, monkeypatch):
+    @iv.data(dataset="processed/out/", why="a stable result")
+    def out():
+        return frame()
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["determinism", "--only", "out"])
+    assert result.exit_code == 0, result.output
+    assert "deterministic" in result.output
+    assert not iv.resolve_out(out.dataset).exists(), "trials must never write production output"
+
+
+def test_determinism_reports_different_output_fingerprints(iv, monkeypatch):
+    calls = [0]
+
+    @iv.data(dataset="processed/out/", why="an unstable result")
+    def out():
+        calls[0] += 1
+        return frame(extra=calls[0])
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["determinism", "--only", "out"])
+    assert result.exit_code == 1
+    assert "not deterministic" in result.output
+    assert "processed/out/" in result.output and "!=" in result.output
+
+
+def test_determinism_can_target_one_partition(iv, monkeypatch):
+    @iv.data(dataset="processed/out/", part="season", universe=["2024", "2025"],
+             why="one stable seasonal result")
+    def out(season):
+        return frame(extra=int(season))
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(
+        app, ["determinism", "--only", "out", "--part", "season=2025"])
+    assert result.exit_code == 0, result.output
+    assert "1 stage shard(s) matched" in result.output
+
+
+def test_determinism_sample_uses_the_last_declared_partition_and_skips_actions(iv, monkeypatch):
+    seen = []
+
+    @iv.data(dataset="processed/out/", part="season", universe=["2025", "2023", "2024"],
+             why="one stable seasonal result")
+    def out(season):
+        seen.append(season)
+        return frame(extra=int(season))
+
+    @iv.step(why="has no output")
+    def publish():
+        raise AssertionError("actions are skipped")
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["determinism", "--sample"])
+    assert result.exit_code == 0, result.output
+    assert seen == ["2025", "2025"]
+    assert "ok       " in result.output and "season=2025" in result.output
+    assert "skipped" in result.output and "publish" in result.output
+
+
+def test_determinism_refuses_actions(iv, monkeypatch):
+    @iv.step(why="has no output")
+    def publish():
+        raise AssertionError("must not run")
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["determinism", "--only", "publish"])
+    assert result.exit_code == 1
+    assert "action with no output" in result.output
+
+
 def test_runner_names_an_upstream_that_changed_earlier_in_the_run(iv, monkeypatch):
     value = [1]
 

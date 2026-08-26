@@ -121,6 +121,9 @@ strings (`.html` or `.txt`). A stage may accept `out` and write its staged file 
 | `iv run --only STAGE` | Run one stage; require current upstreams |
 | `iv run --part season=2025` | Filter partitioned work; repeat for composite keys |
 | `iv run --log run.log` | Save merged stdout, stderr, and outcomes incrementally |
+| `iv determinism --only STAGE` | Run a stage twice in isolated temporary output trees and compare content |
+| `iv determinism --only STAGE --part season=2025` | Audit one partition of a stage |
+| `iv determinism --sample` | Audit every stage at its last declared partition |
 | `iv status` | Show current, maybe, and stale shards |
 | `iv plan` | Show rebuilds and conditional downstream work |
 | `iv why DATASET` | Show shard fingerprints, keys, inputs, and status |
@@ -140,6 +143,13 @@ gets a new fingerprint. Set `IV_TRACE=path` during a pipeline run to record a tr
 During `iv run`, each rebuild reports its cause. If an upstream's content changed earlier
 in that run, the exact dataset shard is named; older aggregate keys can only identify that
 declared inputs, the version, or the schema changed.
+
+`iv determinism --only STAGE` forces the named output-producing stage twice, each time
+into a fresh temporary output tree, and compares its output partition set and content
+fingerprints. It never writes production outputs. It rejects actions because they have no
+artifact to compare; use `--part key=value` to audit a particular dynamic shard.
+`iv determinism --sample` visits every output-producing stage and chooses the last
+partition in IV's normal partition order, so its representative selection is repeatable.
 
 ## Safety
 
