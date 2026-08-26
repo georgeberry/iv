@@ -8,10 +8,10 @@ import tempfile
 
 import polars as pl
 
-from iv import Invalidator
+from iv import Pipeline
 
 root = pathlib.Path(tempfile.mkdtemp()) / "data"
-iv = Invalidator(tree=root, project=root.parent)
+iv = Pipeline(tree=root, project=root.parent)
 
 SEASONS = ["2022", "2023", "2024"]
 LIVE = "2024"

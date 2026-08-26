@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 
 from iv import shards as _sh
-from iv.core import Invalidator
+from iv.core import Pipeline
 from iv.errors import DeclError, StateError
 
 
@@ -14,7 +14,7 @@ from iv.errors import DeclError, StateError
 def iv(tmp_path, monkeypatch):
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    return Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+    return Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
                        project=tmp_path)
 
 
@@ -582,7 +582,7 @@ def test_a_schema_migration_rebuilds_partitions_one_at_a_time(iv, tmp_path):
 
     old_features.for_each(["2024", "2025"])
 
-    migrated = Invalidator(tree=iv.tree, stage_dir=tmp_path / "new-stage", project=tmp_path)
+    migrated = Pipeline(tree=iv.tree, stage_dir=tmp_path / "new-stage", project=tmp_path)
 
     @migrated.data(dataset="processed/features/", why="feature matrix", part="season",
                    once=True, schema=new)
@@ -605,7 +605,7 @@ def test_a_declared_schema_changes_a_once_artifacts_key(iv, tmp_path):
         return pl.DataFrame({"id": [1]})
 
     old_model()
-    changed = Invalidator(tree=iv.tree, stage_dir=tmp_path / "new-stage", project=tmp_path)
+    changed = Pipeline(tree=iv.tree, stage_dir=tmp_path / "new-stage", project=tmp_path)
 
     @changed.data(dataset="processed/model/", why="model input", once=True, schema=new)
     def new_model():

@@ -6,14 +6,14 @@ import polars as pl
 import pytest
 
 from iv import shards as _sh
-from iv.core import Invalidator
+from iv.core import Pipeline
 
 
 @pytest.fixture
 def iv(tmp_path, monkeypatch):
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    return Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+    return Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
                        project=tmp_path)
 
 
@@ -102,7 +102,7 @@ def test_the_saving_grows_with_partitions(iv, monkeypatch):
 
 
     def listings(keys):
-        pipe = Invalidator(tree=iv.tree.parent / f"d{len(keys)}",
+        pipe = Pipeline(tree=iv.tree.parent / f"d{len(keys)}",
                            stage_dir=iv.stage_dir, project=iv.project)
         seasons(pipe, keys)
         calls = counting(monkeypatch)

@@ -7,7 +7,7 @@ import json
 import polars as pl
 import pytest
 
-from iv import Invalidator
+from iv import Pipeline
 from iv import graph as _graph
 from iv import shards as _sh
 from iv import web as _web
@@ -20,7 +20,7 @@ _viz = pytest.importorskip("iv.viz", reason="needs the viz extra: networkx")
 def iv(tmp_path, monkeypatch):
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    return Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+    return Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
                        project=tmp_path)
 
 

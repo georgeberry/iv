@@ -9,16 +9,16 @@ import pytest
 
 from iv import graph as _graph
 from iv.cli import _downstream_of, _stale_shards, _staleness
-from iv.core import Invalidator
+from iv.core import Pipeline
 
 from tests.conftest import write_stage
 
 
 PIPE = '''
 import pathlib
-from iv.core import Invalidator
+from iv.core import Pipeline
 HERE = pathlib.Path(__file__).resolve().parent
-iv = Invalidator(tree=HERE / "data", code=["stages"], project=HERE,
+iv = Pipeline(tree=HERE / "data", code=["stages"], project=HERE,
                  stage_dir=HERE / "stage")
 feed = iv.source("raw/feed/", why="a fetcher drops it here")
 '''
@@ -270,7 +270,7 @@ def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkey
 
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+    iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
                      project=tmp_path)
     day = ["day1"]
 
@@ -316,7 +316,7 @@ def test_only_the_shards_a_selector_reaches_may_follow(tmp_path, monkeypatch):
 
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+    iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
                      project=tmp_path)
     feed = iv.source("raw/feed/", why="one season of raw feed, dropped in")
 

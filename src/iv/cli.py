@@ -29,7 +29,7 @@ _STALE_TRACE_S = 12 * 3600
 @app.callback()
 def main(instance: str = typer.Option(
         None, "--instance", "-i",
-        help="module:attr of the Invalidator. Default: [tool.iv] instance in pyproject.toml")):
+        help="module:attr of the Pipeline. Default: [tool.iv] instance in pyproject.toml")):
     global _INSTANCE
     _INSTANCE = instance
 

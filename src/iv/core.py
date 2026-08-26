@@ -95,7 +95,7 @@ def _stage_is_running() -> bool:
     return any(iv._in_step and not iv._depth for iv in _ACTIVE)
 
 
-class Invalidator:
+class Pipeline:
 
 
     def __init__(self, *,
@@ -151,7 +151,7 @@ class Invalidator:
         self._versions: dict[str, str | None] = {}
 
     def __repr__(self) -> str:
-        return f"<Invalidator {self.tree}>"
+        return f"<Pipeline {self.tree}>"
 
 
     def resolve(self, dataset: str):
@@ -296,9 +296,9 @@ class Invalidator:
             if getattr(fn, "_iv_checked", False):
                 continue
             if owner is os:
-                patched = Invalidator._checked_os_open(fn)
+                patched = Pipeline._checked_os_open(fn)
             else:
-                patched = Invalidator._checked_open(fn)
+                patched = Pipeline._checked_open(fn)
             setattr(owner, name, patched)
 
     @staticmethod
@@ -808,4 +808,4 @@ def _abs_trace(trace):
     return Path(t).expanduser().resolve() if t else None
 
 
-Invalidator.PART = PART
+Pipeline.PART = PART

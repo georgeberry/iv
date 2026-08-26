@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 from typer.testing import CliRunner
 
-from iv import Invalidator
+from iv import Pipeline
 from iv import graph as _graph
 from iv.cli import app
 from iv import shards as _sh
@@ -17,7 +17,7 @@ from iv.errors import DeclError, StateError
 def iv(tmp_path, monkeypatch):
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    return Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+    return Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
                        project=tmp_path)
 
 
@@ -43,7 +43,7 @@ def test_a_derived_asset_builds_then_skips(iv):
 
 
 def test_composite_partitions_match_every_dimension_and_for_each_dicts(tmp_path):
-    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
+    iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
     raw = iv.source("raw/games/", why="league-season games")
     for league in ("nba", "wnba"):
         for season in ("2024", "2025"):
@@ -96,7 +96,7 @@ def test_an_action_cannot_have_a_version(iv):
 
 
 def test_runner_targets_one_composite_partition_and_only_requires_current_upstream(tmp_path, monkeypatch):
-    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
+    iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
 
     universe = [{"league": league, "season": "2025"} for league in ("nba", "wnba")]
 
@@ -122,7 +122,7 @@ def test_runner_targets_one_composite_partition_and_only_requires_current_upstre
 
 
 def test_the_runner_builds_a_split_stage_once_not_once_per_partition(tmp_path, monkeypatch):
-    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
+    iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
     ran = []
 
     @iv.data(dataset="raw/feed/", why="every season in one file", once=True)
@@ -145,7 +145,7 @@ def test_the_runner_builds_a_split_stage_once_not_once_per_partition(tmp_path, m
 
 
 def test_a_stage_universe_decides_what_the_runner_enumerates(tmp_path, monkeypatch):
-    iv = Invalidator(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
+    iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
     built = []
 
     @iv.data(dataset="raw/feed/", why="every season the feed has",

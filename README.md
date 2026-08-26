@@ -29,9 +29,9 @@ Extras are `data` for Polars/Parquet, `cli` for the `iv` command, `viz` for grap
 
 ```python
 import polars as pl
-from iv import Invalidator
+from iv import Pipeline
 
-iv = Invalidator(tree="data", project=".", code=["pipeline.py"])
+iv = Pipeline(tree="data", project=".", code=["pipeline.py"])
 
 @iv.data(
     dataset="raw/scores/",
