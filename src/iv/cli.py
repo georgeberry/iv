@@ -261,10 +261,10 @@ def _execute_work(iv, work, log: Path | None) -> None:
         elapsed = time.perf_counter() - step_started
         if will_run:
             ran += 1; outcome = f"reran ({elapsed:.2f}s)"
-            typer.secho(f"  {outcome}", fg="green")
+            typer.secho(f"  {outcome}", fg="bright_green")
         else:
             skipped += 1; outcome = f"current — skipped ({elapsed:.2f}s)"
-            typer.secho(f"  {outcome}", fg="cyan")
+            typer.secho(f"  {outcome}", fg="bright_green")
         if run_log:
             run_log.write(f"\n[iv] {outcome}\n"); run_log.flush()
     summary = f"complete in {time.perf_counter() - started:.2f}s · {ran} reran, {skipped} current — skipped"
@@ -392,7 +392,7 @@ def impact(stage: str, tick: bool = typer.Option(False, "--tick",
         typer.secho(f"  will run  {node}{label}", fg="yellow")
         if affected:
             for other, shards in affected.items():
-                typer.secho(f"  may rebuild {other}", fg="cyan")
+                typer.secho(f"  may rebuild {other}", fg="bright_blue")
                 for dataset, part in shards:
                     typer.echo(f"    {dataset}{part or '(one shard)'}")
         else:
@@ -642,7 +642,7 @@ def _print_impact_list(title: str, nodes: list[str], g, state, maybe, *, target=
     if not nodes:
         typer.echo("  (none)")
         return
-    colors = {"current": "green", "maybe": "cyan", "stale": "yellow", "action": "bright_black"}
+    colors = {"current": "bright_green", "maybe": "bright_blue", "stale": "yellow", "action": "bright_black"}
     for node in nodes:
         status = "will run" if node == target else _stage_state(node, g, state, maybe)
         typer.secho(f"  {status:<9} {node}", fg=colors.get(status, "yellow"))
@@ -663,7 +663,7 @@ def status():
     for name, shards in state.items():
         tier, note = _line(shards, maybe, name)
         typer.secho(f"  {tier:<8} {name:<44} {note}",
-                    fg={"current": "green", "maybe": "cyan", "stale": "yellow"}[tier])
+                    fg={"current": "bright_green", "maybe": "bright_blue", "stale": "yellow"}[tier])
         for p, why in shards.items():
             tally["stale" if why else "maybe" if (name, p) in maybe else "current"] += 1
 
@@ -717,7 +717,7 @@ def why(dataset: str):
             if reason:
                 typer.secho(f"  stale: {reason}", fg="yellow")
             else:
-                typer.secho("  current", fg="green")
+                typer.secho("  current", fg="bright_green")
 
 
 @app.command()
@@ -738,7 +738,7 @@ def plan():
     for name, shards in state.items():
         tier, note = _line(shards, maybe, name)
         if tier == "maybe":
-            typer.secho(f"  maybe    {name:<44} {note}", fg="cyan")
+            typer.secho(f"  maybe    {name:<44} {note}", fg="bright_blue")
 
 
 @app.command()
