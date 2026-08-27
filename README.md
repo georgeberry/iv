@@ -119,6 +119,7 @@ strings (`.html` or `.txt`). A stage may accept `out` and write its staged file 
 | `iv run --up-to-excluding STAGE` | Run only a stage's prerequisites |
 | `iv run --from STAGE` | Run a stage and descendants; require current upstreams |
 | `iv run --only STAGE` | Run one stage; require current upstreams |
+| `iv run --only STAGE --force` | Run despite stale upstreams; does not rebuild them |
 | `iv run --part season=2025` | Filter partitioned work; repeat for composite keys |
 | `iv run --log run.log` | Save merged stdout, stderr, and outcomes incrementally |
 | `iv determinism --only STAGE` | Run a stage twice in isolated temporary output trees and compare content |

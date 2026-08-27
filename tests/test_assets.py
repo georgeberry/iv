@@ -121,6 +121,23 @@ def test_runner_targets_one_composite_partition_and_only_requires_current_upstre
     assert not games.is_current(league="wnba", season="2025")
 
 
+def test_runner_force_allows_only_with_a_stale_upstream(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="a root that may have changed")
+    def feed():
+        return frame()
+
+    @iv.data(dataset="processed/out/", why="uses the existing feed")
+    def out(source=iv.all_of(feed, why="the feed")):
+        return source
+
+    feed()
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["run", "--only", "out", "--force"])
+    assert result.exit_code == 0, result.output
+    assert out.is_current()
+
+
 def test_the_runner_builds_a_split_stage_once_not_once_per_partition(tmp_path, monkeypatch):
     iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
     ran = []
@@ -1485,3 +1502,25 @@ def test_shard_with_no_partition_is_refused(iv):
     college = iv.dataset("derived/college/", why="one row per amateur source")
     with pytest.raises(DeclError, match="names the literal partition"):
         college.shard()
+
+
+def test_gc_drops_a_partition_the_stage_no_longer_keys_on(iv, monkeypatch):
+    @iv.data(dataset="processed/thing/", why="was one shard, now one per season",
+             part="season", universe=["2025"])
+    def thing(season):
+        return frame()
+
+    thing(season="2025")
+    d = iv.resolve_out("processed/thing/")
+    tmp = _sh.stage("orphan", iv.stage_dir)
+    frame().write_parquet(tmp)
+    _sh.commit(tmp, d, part=None)
+    assert "" in _sh.list_shards(d)
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["gc", "processed/thing/"])
+    assert result.exit_code == 0, result.output
+    assert "orphaned partition" in result.output
+    assert sorted(_sh.list_shards(d)) == ["season=2025"]
+    assert thing.is_current(season="2025")

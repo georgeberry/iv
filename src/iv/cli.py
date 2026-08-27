@@ -495,6 +495,21 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
     typer.echo(f"wrote {_viz.draw(g, out, full=full, status=status)}")
 
 
+def _declared_part_keys(iv, g, name: str) -> set[tuple[str, ...]]:
+
+
+    out = set()
+    for node, stage in g.stages.items():
+        if not any(site.dataset == name for site in stage.outputs):
+            continue
+        asset = iv._assets.get(node)
+        if asset is None:
+            continue
+        out.add(tuple(sorted(asset.fixed_part)) if asset.fixed_part
+                else tuple(sorted(asset.part_keys or ())))
+    return out
+
+
 def _staleness(iv, g):
 
 
@@ -803,6 +818,10 @@ def run(
     from_: str = typer.Option(None, "--from", help="run this stage and descendants; upstream must be current"),
     only: str = typer.Option(None, "--only", help="run exactly this stage; upstream must be current"),
     part: list[str] = typer.Option([], "--part", help="partition filter, repeat as key=value"),
+    force: bool = typer.Option(
+        False, "--force",
+        help="rebuild the selected stages even when current, and let --only/--from "
+             "run over a stale upstream"),
     log: Path = typer.Option(
         None, "--log",
         help="write all merged stage output and outcomes to this file"),
@@ -829,6 +848,9 @@ def run(
     elif only:
         selected = {_stage_name(g, only)}
         safe = True
+    if force:
+        iv.force = True
+        safe = False
 
     with _sh.snapshot():
         if safe:
@@ -884,9 +906,20 @@ def gc(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
     for name in targets:
         d = iv.resolve_out(name)
         found = _sh.list_shards(d) if d.exists() else {}
-        keep = {sorted(v, key=lambda s: s.name)[0].name for v in found.values()}
-        removed = _sh.gc(d, keep=keep) if any(len(v) > 1 for v in found.values()) else []
-        for name in removed:
-            typer.echo(f"  dropped {name}{name}")
-        total += len(removed)
+        if not found:
+            continue
+        want = _declared_part_keys(iv, g, name)
+        live = {p: v for p, v in found.items()
+                if not want or tuple(sorted(_sh.decode_part(p))) in want}
+        orphaned = sorted(set(found) - set(live))
+        if not orphaned and not any(len(v) > 1 for v in live.values()):
+            continue
+        for p in orphaned:
+            typer.secho(f"  {name}: orphaned partition {p or '(no part)'} — the "
+                        f"stage does not key on {tuple(sorted(_sh.decode_part(p)))} "
+                        f"any more", fg="yellow")
+        keep = {sorted(v, key=lambda s: s.name)[0].name for v in live.values()}
+        for gone in _sh.gc(d, keep=keep):
+            typer.echo(f"  dropped {name}{gone}")
+            total += 1
     typer.echo(f"{total} shard(s) dropped")
