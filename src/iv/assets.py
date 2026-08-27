@@ -407,8 +407,14 @@ class Asset:
                 f"and `iv status` cannot see the edge. Declare it as an upstream instead: "
                 f"x=iv.all_of({self.primary!r}, why='...').")
         part = self._part(args, kwargs)
-        if (self.may_skip and not iv.force
-                and self.why_stale(*args, **kwargs) is None):
+        stale = self.why_stale(*args, **kwargs) if self.may_skip and not iv.force else None
+        return self._invoke(part, stale)
+
+    def _invoke(self, part: dict | None, stale: str | None):
+        iv = self.pipeline
+        if part is None:
+            part = self._part((), {})
+        if self.may_skip and not iv.force and stale is None:
             return self.load(part) if self.single and not self.split else False
         self.build(part)
         if self.acts_only:
@@ -417,6 +423,12 @@ class Asset:
 
     def build(self, part: dict | None) -> None:
 
+        if not self.split and (self.fixed_part or self.part_keys) and not part:
+            raise DeclError(
+                f"{self.primary} is keyed on "
+                f"{dict(self.fixed_part) if self.fixed_part else list(self.part_keys)} "
+                f"but was built with no partition. The shard would land unpartitioned "
+                f"beside the real ones, where the next read cannot find it.")
         iv = self.pipeline
         iv._fresh_scope()
         prev = (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs,
@@ -566,7 +578,13 @@ class Asset:
     def universe_parts(self) -> list[dict] | None:
         if self.universe is None:
             return None
-        values = self.universe() if callable(self.universe) else self.universe
+        try:
+            values = self.universe() if callable(self.universe) else self.universe
+        except Exception as e:
+            raise DeclError(
+                f"{self.primary}: universe= could not enumerate its partitions: {e}. "
+                "If an old shard no longer matches the dataset's partition layout, run "
+                "`iv gc DATASET --partition-key KEY` to inspect and drop it.") from e
         out = []
         for v in values:
             if isinstance(v, dict):

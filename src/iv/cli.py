@@ -249,7 +249,7 @@ def _execute_work(iv, work, log: Path | None) -> None:
                     run_log.write(f"[iv] rebuild — {reason}\n"); run_log.flush()
             iv._changes.clear()
             with redirect_stdout(output), redirect_stderr(output):
-                asset(**p) if p is not None else asset()
+                asset._invoke(p, stale)
             changed.update(iv._changes)
         except BaseException:
             _print_stage_output(output.getvalue())
@@ -924,7 +924,15 @@ def _orphan_datasets(iv, g) -> list[tuple[str, object]]:
 
 @app.command()
 @reports
-def gc(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
+def gc(
+    dataset: str = typer.Argument(None, help="one dataset, or all of them"),
+    partition_key: list[str] = typer.Option(
+        [], "--partition-key", help="expected shard key; repeat for a composite partition"),
+):
+    if partition_key and dataset is None:
+        raise IvError("--partition-key needs one DATASET so the repair scope is explicit.")
+    if len(set(partition_key)) != len(partition_key):
+        raise IvError("--partition-key names the same key more than once.")
     iv = _load()
     g = _graph_of()
     targets = [dataset] if dataset else g.produced
@@ -936,7 +944,8 @@ def gc(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
         found = _sh.list_shards(d) if d.exists() else {}
         if not found:
             continue
-        want = _declared_part_keys(iv, g, name)
+        want = ({tuple(sorted(partition_key))} if partition_key
+                else _declared_part_keys(iv, g, name))
         live = {p: v for p, v in found.items()
                 if not want or tuple(sorted(_sh.decode_part(p))) in want}
         orphaned = sorted(set(found) - set(live))

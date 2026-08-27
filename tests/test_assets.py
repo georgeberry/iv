@@ -221,6 +221,22 @@ def test_runner_prints_plan_progress_and_stage_output(iv, monkeypatch):
     assert "0 reran, 1 current — skipped" in second.output
 
 
+def test_runner_reuses_its_freshness_check_when_invoking_a_stage(iv, monkeypatch):
+    @iv.data(dataset="raw/feed/", why="one root", once=True)
+    def feed():
+        return frame()
+
+    calls = []
+    real = feed.why_stale
+    monkeypatch.setattr(feed, "why_stale",
+                        lambda *a, **kw: (calls.append(None), real(*a, **kw))[1])
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["run"])
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+
+
 def test_determinism_runs_one_stage_twice_without_touching_production_outputs(iv, monkeypatch):
     @iv.data(dataset="processed/out/", why="a stable result")
     def out():
@@ -1530,3 +1546,53 @@ def test_gc_drops_a_partition_the_stage_no_longer_keys_on(iv, monkeypatch):
     assert "orphaned partition" in result.output
     assert sorted(_sh.list_shards(d)) == ["season=2025"]
     assert thing.is_current(season="2025")
+
+
+def test_gc_can_be_told_the_partition_shape_of_an_external_source(iv, monkeypatch):
+    source = iv.source("raw/feed/", why="arrives from outside")
+    d = iv.resolve_out(source.dataset)
+    for part in (None, {"season": "2025"}):
+        tmp = _sh.stage(f"source-{part}", iv.stage_dir)
+        frame().write_parquet(tmp)
+        _sh.commit(tmp, d, part=part)
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(
+        app, ["gc", "raw/feed/", "--partition-key", "season"])
+    assert result.exit_code == 0, result.output
+    assert "orphaned partition (no part)" in result.output
+    assert sorted(_sh.list_shards(d)) == ["season=2025"]
+
+
+def test_a_broken_universe_is_reported_as_an_iv_error(iv, monkeypatch):
+    def broken():
+        raise ValueError("old.parquet carries no 'season' partition")
+
+    @iv.data(dataset="processed/out/", part="season", universe=broken,
+             why="one shard per season")
+    def out(season):
+        return frame(extra=int(season))
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["run"])
+    assert result.exit_code == 1
+    assert "universe= could not enumerate" in result.output
+    assert "iv gc DATASET --partition-key KEY" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_invoke_resolves_a_fixed_partition_the_way_a_call_does(iv):
+    @iv.data(dataset="history/snap/", part={"date": "2026-08-27"},
+             why="the snapshot as it stood today", version=1)
+    def snap():
+        return pl.DataFrame({"n": [1]})
+
+    snap._invoke(None, "forced")
+
+    live = _sh.current_shards(iv.resolve_out("history/snap/"))
+    assert sorted(live) == ["date=2026-08-27"], (
+        "iv run passes no part for a fixed-partition stage, so _invoke must resolve it "
+        "or the shard lands unpartitioned and load() cannot find it")
+    assert snap.load() is not None

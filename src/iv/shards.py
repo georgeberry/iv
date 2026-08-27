@@ -66,6 +66,17 @@ def _cache_drop(dataset_dir) -> None:
         cache.pop(str(dataset_dir), None)
 
 
+def _for_commit(dataset_dir, part_str: str) -> list[Shard]:
+    """Use an active snapshot when it has already listed this dataset."""
+    cache = getattr(_local, "cache", None)
+    if cache is not None:
+        live = cache.get(str(dataset_dir))
+        if live is not None:
+            shard = live.get(part_str)
+            return [shard] if shard is not None else []
+    return list_shards(dataset_dir).get(part_str, [])
+
+
 def encode_part(part: dict[str, object] | None) -> str:
     if not part:
         return ""
@@ -199,7 +210,7 @@ def commit_empty(dataset_dir, *, part: dict[str, object] | None,
                  key: str = "", ext: str = EXT) -> object:
     final = dataset_dir / shard_name(part, EMPTY_FP, ext, key)
     part_str = encode_part(part)
-    superseded = [s for s in list_shards(dataset_dir).get(part_str, [])
+    superseded = [s for s in _for_commit(dataset_dir, part_str)
                   if s.name != final.name]
     dataset_dir.mkdir(parents=True, exist_ok=True)
     if not final.exists():
@@ -218,18 +229,19 @@ def dataset_id(shards: Iterable[Shard]) -> str:
 
 def list_shards(dataset_dir) -> dict[str, list[Shard]]:
     out: dict[str, list[Shard]] = {}
-    if not dataset_dir.exists():
-        return out
-    for p in dataset_dir.iterdir():
-        got = parse_name(p)
-        if got is None:
-            raise StateError(
-                f"{p} is in a dataset directory but is not a shard of it. Expected "
-                f"<part>.<key>.<fingerprint>[{"|".join(sorted(FINGERPRINT_OF))}] and nothing else — a shard is "
-                f"staged on local disk and moved in whole, so there is no in-flight file to "
-                f"allow for. A name this cannot read would silently drop a partition and "
-                f"every read of {dataset_dir.name} would come back short, so it stops here.")
-        out.setdefault(got.part_str, []).append(got)
+    try:
+        for p in dataset_dir.iterdir():
+            got = parse_name(p)
+            if got is None:
+                raise StateError(
+                    f"{p} is in a dataset directory but is not a shard of it. Expected "
+                    f"<part>.<key>.<fingerprint>[{"|".join(sorted(FINGERPRINT_OF))}] and nothing else — a shard is "
+                    f"staged on local disk and moved in whole, so there is no in-flight file to "
+                    f"allow for. A name this cannot read would silently drop a partition and "
+                    f"every read of {dataset_dir.name} would come back short, so it stops here.")
+            out.setdefault(got.part_str, []).append(got)
+    except FileNotFoundError:
+        pass
     return out
 
 
@@ -311,7 +323,7 @@ def commit(staged, dataset_dir, *, part: dict[str, object] | None,
     fp = fingerprint_of_file(staged)
     final = dataset_dir / shard_name(part, fp, Path(str(staged)).suffix, key)
     part_str = encode_part(part)
-    superseded = [s for s in list_shards(dataset_dir).get(part_str, [])
+    superseded = [s for s in _for_commit(dataset_dir, part_str)
                   if s.name != final.name]
     dataset_dir.mkdir(parents=True, exist_ok=True)
     if final.exists():

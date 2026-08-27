@@ -80,6 +80,16 @@ def test_a_stray_file_of_any_shape_stops_the_run(tmp_path):
         (d / junk).unlink()
 
 
+def test_listing_a_missing_dataset_does_not_probe_then_list(tmp_path, monkeypatch):
+    missing = tmp_path / "missing"
+    real = type(missing).exists
+    probes = []
+    monkeypatch.setattr(type(missing), "exists",
+                        lambda self: (probes.append(self), real(self))[1])
+    assert sh.list_shards(missing) == {}
+    assert probes == []
+
+
 def test_numeric_partitions_sort_numerically_not_lexically(tmp_path):
     d = tmp_path / "ds"
     for gid in (1, 2, 9, 10, 100):

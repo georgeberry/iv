@@ -134,6 +134,16 @@ def test_a_commit_is_never_answered_from_a_snapshot(iv):
     assert pl.read_parquet(iv.reads("raw/feed/", why="check")).height == 9
 
 
+def test_commits_reuse_and_advance_a_snapshot_listing(iv, monkeypatch):
+    seed(iv, "raw/feed/", n=1)
+    calls = counting(monkeypatch)
+    with iv.snapshot():
+        _sh.current_shards(iv.resolve_out("raw/feed/"))
+        seed(iv, "raw/feed/", n=5)
+        seed(iv, "raw/feed/", n=9)
+    assert calls == [str(iv.resolve_out("raw/feed/"))]
+
+
 def test_a_snapshot_sees_a_commit_made_inside_it(iv):
 
 
