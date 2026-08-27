@@ -16,6 +16,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cloudpathlib"
+version = "0.25.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/9f/1791893f3d51ec36cd9e3f8da0130d278ee909a68bc17c83b3b3de98c91b/cloudpathlib-0.25.0.tar.gz", hash = "sha256:63612e17778c5e3a51b472def8d785d0aaaf347486d6b6786dc7be627556d4c6", size = 56441, upload-time = "2026-08-22T18:41:21.493Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/f9/9084c945d0b3ef8f129b4f0dd21baec759761a337902b70f17a3945015dd/cloudpathlib-0.25.0-py3-none-any.whl", hash = "sha256:8faef3ed3a0dd71d134e8617b4fdc5ce56a12a6b485c080cfe80106e5f1d1f5d", size = 66109, upload-time = "2026-08-22T18:41:20.417Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -187,9 +196,11 @@ data = [
     { name = "polars" },
 ]
 dev = [
+    { name = "cloudpathlib" },
     { name = "matplotlib" },
     { name = "networkx" },
     { name = "polars" },
+    { name = "pyflakes" },
     { name = "pytest" },
     { name = "typer" },
 ]
@@ -203,12 +214,14 @@ viz = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cloudpathlib", marker = "extra == 'dev'", specifier = ">=0.18" },
     { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.8" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.8" },
     { name = "networkx", marker = "extra == 'dev'", specifier = ">=3.0" },
     { name = "networkx", marker = "extra == 'viz'", specifier = ">=3.0" },
     { name = "polars", marker = "extra == 'data'", specifier = ">=1.0" },
     { name = "polars", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "pyflakes", marker = "extra == 'dev'", specifier = ">=3" },
     { name = "pyflakes", marker = "extra == 'lint'", specifier = ">=3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12" },

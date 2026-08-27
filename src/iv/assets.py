@@ -419,10 +419,12 @@ class Asset:
 
         iv = self.pipeline
         iv._fresh_scope()
-        prev = (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs)
+        prev = (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs,
+                iv._declared_externals)
         iv._part, iv._in_step = part, True
         iv._node = iv._node_name(self.fn)
         iv._inputs, iv._outputs = self.triples(), self.datasets
+        iv._declared_externals = self.externals
         try:
             kw = self._resolve(part)
             if self.wants_out:
@@ -453,7 +455,8 @@ class Asset:
             else:
                 self._commit_many(value, part)
         finally:
-            (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs) = prev
+            (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs,
+             iv._declared_externals) = prev
             iv._fresh_scope()
 
     def _commit(self, o: Dataset, value, part) -> None:

@@ -416,6 +416,10 @@ def preflight():
     cyc = _graph.find_cycle(g)
     if cyc:
         bad.append(f"CYCLE  {cyc}")
+    with iv.bookkeeping():
+        for name in sorted(iv._sources):
+            if not _sh.current_shards(iv.resolve(name)):
+                bad.append(f"EMPTY SOURCE  {name} is declared but nothing is there")
     for b in bad:
         typer.secho(b, fg="red")
     if bad:
@@ -896,6 +900,28 @@ def verify(dataset: str = typer.Argument(None, help="one dataset, or all of them
     typer.secho("ok — every shard matches its name", fg="green")
 
 
+def _orphan_datasets(iv, g) -> list[tuple[str, object]]:
+
+
+    known = set(g.produced) | set(iv._sources) | set(iv._datasets)
+    root = iv.out_tree
+    dirs = {}
+    with iv.bookkeeping():
+        if not root.exists():
+            return []
+        for path in root.rglob("*"):
+            if _sh.parse_name(path) is None:
+                continue
+            d = path.parent
+            dirs[str(d)] = d
+    out = []
+    for d in dirs.values():
+        name = _canon(str(d)[len(str(root)):].strip("/"))
+        if name not in known:
+            out.append((name, d))
+    return sorted(out)
+
+
 @app.command()
 @reports
 def gc(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
@@ -903,6 +929,8 @@ def gc(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
     g = _graph_of()
     targets = [dataset] if dataset else g.produced
     total = 0
+    stack = iv.bookkeeping()
+    stack.__enter__()
     for name in targets:
         d = iv.resolve_out(name)
         found = _sh.list_shards(d) if d.exists() else {}
@@ -922,4 +950,27 @@ def gc(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
         for gone in _sh.gc(d, keep=keep):
             typer.echo(f"  dropped {name}{gone}")
             total += 1
+    if dataset is None:
+        for name, d in _orphan_datasets(iv, g):
+            typer.secho(f"  {name}: no stage produces this and nothing declares it — "
+                        f"dropping the whole dataset", fg="yellow")
+            unknown = []
+            dropped = False
+            for path in sorted(d.iterdir()):
+                if _sh.parse_name(path) is None:
+                    unknown.append(path.name)
+                    continue
+                path.unlink()
+                typer.echo(f"  dropped {name}{path.name}")
+                total += 1
+                dropped = True
+            if dropped:
+                _sh._cache_drop(d)
+            if unknown:
+                typer.secho(f"  {name}: left {len(unknown)} file(s) iv did not write "
+                            f"(e.g. {unknown[0]}) — delete them yourself if they are "
+                            f"dead too", fg="yellow")
+            elif isinstance(d, Path) and not any(d.iterdir()):
+                d.rmdir()
+    stack.__exit__(None, None, None)
     typer.echo(f"{total} shard(s) dropped")

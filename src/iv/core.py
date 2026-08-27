@@ -23,10 +23,18 @@ from .paths import mkpath
 _ACTIVE: list = []
 
 
+try:
+    from cloudpathlib import CloudPath as _CloudPath
+except ImportError:
+    _CloudPath = ()
+
+
 def _path_text(target) -> str | None:
 
     if isinstance(target, int):
         return None
+    if _CloudPath and isinstance(target, _CloudPath):
+        return str(target)
     try:
         return os.fspath(target)
     except TypeError:
@@ -41,7 +49,27 @@ def _in_tree(target, base) -> bool:
     return s == root or s.startswith(root + "/")
 
 
-def _check_declared(target) -> None:
+def _path_owners():
+    from pathlib import Path as _P
+    owners = [_P]
+    try:
+        from cloudpathlib import CloudPath
+    except ImportError:
+        return owners
+    seen, stack = [], [CloudPath]
+    while stack:
+        c = stack.pop()
+        if c in seen:
+            continue
+        seen.append(c)
+        stack.extend(c.__subclasses__())
+    return owners + seen
+
+
+_PROBING = threading.local()
+
+
+def _check_declared(target, probe: str | None = None) -> None:
 
 
     s = _path_text(target)
@@ -52,15 +80,43 @@ def _check_declared(target) -> None:
             return
     for iv in _ACTIVE:
         for base in (iv.out_tree, iv.tree):
-            if _in_tree(s, base):
+            if not _in_tree(s, base):
+                continue
+            if probe is not None and not any(x._in_step for x in _ACTIVE):
+                return
+            if probe is None:
                 raise DeclError(
                     f"{s} is inside the data tree but was not handed back by iv.reads(). "
                     f"An undeclared read is absent from the graph and from the recorded "
                     f"inputs, so its source can change and this will never rebuild. "
                     f"Declare it: iv.reads('<dataset>/', why='...').")
+            raise DeclError(
+                f"{s}.{probe}() asks the data tree a question about a path nobody "
+                f"declared. A probe IS a read: branching on it lets a moved or missing "
+                f"dataset come back as silently empty instead of rebuilding, which is "
+                f"the failure declaring is meant to stop. Read it through the stage: "
+                f"iv.reads('<dataset>/', why='...'), or pass optional=True and branch "
+                f"on what came back.")
+    if any(x._in_step for x in _ACTIVE) and "://" in s and not _declared_external(s):
+        what = f"{s}.{probe}()" if probe else s
+        raise DeclError(
+            f"{what} reaches remote storage outside every declared tree. Cloud storage "
+            f"holds data, so a read of it belongs in the graph wherever it lives: "
+            f"declare it with iv.source('<dataset>/', why='...') and read it through "
+            f"the stage. Undeclared, it can move or empty without anything rebuilding, "
+            f"and the run has no record of what it actually read.")
 
 
-def _check_write(target) -> None:
+def _declared_external(s: str) -> bool:
+    for iv in _ACTIVE:
+        for name, _why in iv._declared_externals:
+            if "://" in name and (s == name.rstrip("/")
+                                  or s.startswith(name.rstrip("/") + "/")):
+                return True
+    return False
+
+
+def _check_write(target, removing: bool = False) -> None:
 
 
     s = _path_text(target)
@@ -70,11 +126,18 @@ def _check_write(target) -> None:
         if iv._depth or s in iv._staged:
             return
     for iv in _ACTIVE:
-        if s in iv._handed_out:
+        if s in iv._handed_out and not removing:
             raise DeclError(
                 f"{s} was handed back by iv.reads() and is being written to. A shard's "
                 f"name is a fingerprint of its contents, so overwriting one in place makes "
                 f"the name a lie that nothing can detect. Write through iv.writes().")
+        if iv._in_step and "://" in s and not _declared_external(s) and not any(
+                _in_tree(s, base) for base in (iv.out_tree, iv.tree)):
+            raise DeclError(
+                f"{s} is remote storage outside every declared tree and is being written "
+                f"from inside a stage. A write that lands outside the graph has no "
+                f"declared output and nothing downstream can key on it. Declare it as an "
+                f"output, or as external= if it leaves the pipeline for good.")
         if iv._in_step and any(_in_tree(s, base) for base in (iv.out_tree, iv.tree)):
             raise DeclError(
                 f"{s} is inside the data tree and is being written outside iv.writes(). "
@@ -119,15 +182,16 @@ class Pipeline:
         self._updating: set[str] = set()
         self._plain: set[str] = set()
         self._externals: list[str] = []
+        self._declared_externals: tuple = ()
         self._handed_out: set[str] = set()
         self._staged: set[str] = set()
 
 
+        self._part: dict | None = None
+        self._in_step = False
         _ACTIVE.append(self)
         self._enforce_writes()
         self._enforce_reads()
-        self._part: dict | None = None
-        self._in_step = False
         self._node = ""
         self._inputs: tuple = ()
         self._outputs: tuple[str, ...] = ()
@@ -264,14 +328,9 @@ class Pipeline:
 
     def _enforce_writes(self) -> None:
         self._patch_openers()
-        owners = [Path]
-        try:
-            from cloudpathlib import CloudPath
-            owners.append(CloudPath)
-        except ImportError:
-            pass
-        for owner in owners:
-            for name in ("write_text", "write_bytes", "open"):
+        for owner in _path_owners():
+            for name in ("write_text", "write_bytes", "open", "mkdir", "unlink",
+                         "rmdir", "rename", "replace", "touch", "write_parquet"):
                 fn = getattr(owner, name, None)
                 if fn is None or getattr(fn, "_iv_checked", False):
                     continue
@@ -306,8 +365,16 @@ class Pipeline:
         def patched(target, *a, **kw):
             mode = a[0] if a else kw.get("mode", "r")
             if name != "open" or any(flag in mode for flag in ("w", "a", "x", "+")):
-                _check_write(target)
+                _check_write(target, removing=name in ("unlink", "rmdir"))
             return fn(target, *a, **kw)
+        patched._iv_checked = True
+        return patched
+
+    @staticmethod
+    def _checked_frame_write(name, fn):
+        def patched(frame, target, *a, **kw):
+            _check_write(target)
+            return fn(frame, target, *a, **kw)
         patched._iv_checked = True
         return patched
 
@@ -370,12 +437,17 @@ class Pipeline:
             owners.append(CloudPath)
         except ImportError:
             pass
-        for owner in owners:
+        for owner in _path_owners():
             for name in ("read_text", "read_bytes", "open"):
                 fn = getattr(owner, name, None)
                 if fn is None or getattr(fn, "_iv_read_checked", False):
                     continue
                 setattr(owner, name, self._checked_read(name, fn))
+            for name in ("exists", "is_file", "is_dir", "iterdir", "glob", "rglob"):
+                fn = getattr(owner, name, None)
+                if fn is None or getattr(fn, "_iv_read_checked", False):
+                    continue
+                setattr(owner, name, self._checked_probe(name, fn))
         try:
             import polars as pl
         except ImportError:
@@ -385,6 +457,26 @@ class Pipeline:
             if fn is None or getattr(fn, "_iv_read_checked", False):
                 continue
             setattr(pl, name, self._checked_read(name, fn, first_arg=True))
+        for owner, name in ((pl.DataFrame, "write_parquet"), (pl.DataFrame, "write_csv"),
+                            (pl.DataFrame, "write_json"), (pl.LazyFrame, "sink_parquet")):
+            fn = getattr(owner, name, None)
+            if fn is None or getattr(fn, "_iv_checked", False):
+                continue
+            setattr(owner, name, self._checked_frame_write(name, fn))
+
+    @staticmethod
+    def _checked_probe(name, fn):
+        def patched(target, *a, **kw):
+            prev = getattr(_PROBING, "on", False)
+            _PROBING.on = True
+            try:
+                if not prev:
+                    _check_declared(target, probe=name)
+                return fn(target, *a, **kw)
+            finally:
+                _PROBING.on = prev
+        patched._iv_read_checked = True
+        return patched
 
     @staticmethod
     def _checked_read(name, fn, first_arg=False):
@@ -414,10 +506,11 @@ class Pipeline:
                     out.append(f"{shard.name}: contents fingerprint {actual}, name says "
                                f"{shard.fp} — the file was changed after it was committed")
             contract = self._schema(dataset)
-            by_schema = _sh.schemas_of(live.values()) if live else {}
+            parq = {p: s for p, s in live.items() if str(s.path).endswith(".parquet")}
+            by_schema = _sh.schemas_of(parq.values()) if parq else {}
             if contract is not None:
                 bad = [part or "(unpartitioned)" for part, cols in
-                       ((part, _sh.schema_of_file(shard.path)) for part, shard in live.items())
+                       ((part, _sh.schema_of_file(shard.path)) for part, shard in parq.items())
                        if cols != contract]
                 if bad:
                     out.append(
@@ -430,7 +523,7 @@ class Pipeline:
                 for cols, parts in groups[1:]:
                     d2 = set(c for c, _ in cols) ^ base
                     lines.append(f"{_span_parts(parts)} differ by {sorted(d2)}")
-                out.append(f"SCHEMA DRIFT: {len(by_schema)} column sets across {len(live)} "
+                out.append(f"SCHEMA DRIFT: {len(by_schema)} column sets across {len(parq)} "
                            f"shards — {_span_parts(groups[0][1])} is the majority; "
                            + "; ".join(lines)
                            + ". A read of the whole dataset cannot produce one frame.")

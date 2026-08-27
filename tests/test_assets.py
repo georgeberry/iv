@@ -873,7 +873,7 @@ def test_an_undeclared_read_of_the_tree_is_still_caught(iv):
     def out():
         return pl.read_parquet(list(iv.resolve_out("raw/feed/").iterdir())[0])
 
-    with pytest.raises(DeclError, match="was not handed back by iv.reads"):
+    with pytest.raises(DeclError, match="asks the data tree a question"):
         out()
 
 

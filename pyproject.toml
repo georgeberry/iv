@@ -15,7 +15,8 @@ lint = [
 data = ["polars>=1.0"]
 cli = ["typer>=0.12"]
 viz = ["networkx>=3.0", "matplotlib>=3.8"]
-dev = ["polars>=1.0", "typer>=0.12", "networkx>=3.0", "matplotlib>=3.8", "pytest>=8.0"]
+dev = ["polars>=1.0", "typer>=0.12", "networkx>=3.0", "matplotlib>=3.8",
+       "pytest>=8.0", "cloudpathlib>=0.18", "pyflakes>=3"]
 
 [project.scripts]
 # `iv` is the command. It matches what the instance is conventionally called in code,
