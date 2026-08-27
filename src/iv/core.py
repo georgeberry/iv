@@ -280,10 +280,11 @@ class Pipeline:
                 self._updating.discard(name)
             self.record("io", op="read", rel=name, why=why, n=len(sel),
                         update_file_on_disk=update_file_on_disk)
-        self._handed_out.update(str(s.path) for s in sel)
+        live = [s for s in sel if not _sh.is_empty(s)]
+        self._handed_out.update(str(s.path) for s in live)
         with self.bookkeeping():
-            self._validate_schema(name, sel)
-        return [s.path for s in sel]
+            self._validate_schema(name, live)
+        return [s.path for s in live]
 
     def _schema(self, dataset: str) -> tuple | None:
         return self._schemas.get(_canon(dataset))
@@ -501,12 +502,18 @@ class Pipeline:
             d = self.resolve_out(dataset)
             live = _sh.current_shards(d)
             for part, shard in live.items():
+                if _sh.is_empty(shard):
+                    if shard.path.stat().st_size:
+                        out.append(f"{shard.name}: named as an empty partition but the "
+                                   f"file has contents")
+                    continue
                 actual = _sh.fingerprint_of_file(shard.path)
                 if actual != shard.fp:
                     out.append(f"{shard.name}: contents fingerprint {actual}, name says "
                                f"{shard.fp} — the file was changed after it was committed")
             contract = self._schema(dataset)
-            parq = {p: s for p, s in live.items() if str(s.path).endswith(".parquet")}
+            parq = {p: s for p, s in live.items()
+                    if str(s.path).endswith(".parquet") and not _sh.is_empty(s)}
             by_schema = _sh.schemas_of(parq.values()) if parq else {}
             if contract is not None:
                 bad = [part or "(unpartitioned)" for part, cols in
@@ -586,7 +593,16 @@ class Pipeline:
             raise
         if not staged.exists():
             if allow_missing:
-                self.record("io", op="skip-empty", rel=name, why=why)
+                out_dir = self.resolve_out(name)
+                with self.bookkeeping():
+                    _sh.commit_empty(
+                        out_dir, part=part,
+                        key=self.key_of(name, part, self._inputs), ext=ext)
+                self.record("io", op="empty", rel=name, why=why,
+                            part=_sh.encode_part(part))
+                self._staged.discard(str(staged))
+                if not self._in_step:
+                    self._fresh_scope()
                 return
             raise DeclError(
                 f"{name} was declared written but nothing was written to {staged}. Pass "

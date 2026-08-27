@@ -279,7 +279,8 @@ def test_writing_nothing_is_an_error_unless_declared(iv):
             pass
     with iv.writes("processed/out/", why="nothing yet", allow_missing=True):
         pass
-    assert "not on disk" in iv.why_stale("processed/out/")
+    assert iv.why_stale("processed/out/") is None, (
+        "producing nothing is recorded, so it is current until inputs move")
 
 
 def test_a_read_that_selects_nothing_raises(iv):

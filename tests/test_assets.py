@@ -573,9 +573,15 @@ def test_a_partition_with_nothing_to_build_returns_none_under_allow_missing(iv):
     feed("2006")
     feed("2024")
     assert ran == ["2006", "2024"]
-    assert sorted(_sh.current_shards(iv.resolve_out("raw/feed/"))) == ["season=2024"]
-    assert feed.why_stale("2006"), "an absent shard stays stale, so the next run retries"
+    assert sorted(_sh.current_shards(iv.resolve_out("raw/feed/"))) == [
+        "season=2006", "season=2024"]
+    empty = _sh.current_shards(iv.resolve_out("raw/feed/"))["season=2006"]
+    assert _sh.is_empty(empty)
+    assert empty.path.stat().st_size == 0
+    assert feed.why_stale("2006") is None, (
+        "producing nothing is a recorded answer, current for these inputs")
     assert feed.why_stale("2024") is None
+    assert feed.load({"season": "2006"}) is None
 
 
 def test_returning_none_without_allow_missing_still_names_the_way_out(iv):

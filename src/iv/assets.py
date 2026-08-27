@@ -441,7 +441,7 @@ class Asset:
             if value is None:
                 if all(o.allow_missing for o in self.outputs.values()):
                     for o in self.outputs.values():
-                        iv.record("io", op="skip-empty", rel=o.dataset, why=self.why)
+                        self._commit(o, None, part)
                     return
                 raise DeclError(
                     f"{self.primary}: {self.__name__} returned None and takes no "
@@ -558,6 +558,8 @@ class Asset:
                 raise StateError(
                     f"{o.dataset} has no shard for "
                     f"{_sh.encode_part(part) or '(one shard)'} — it was not built.")
+            if _sh.is_empty(got):
+                return None
             iv._validate_schema(o.dataset, [got])
             return load_value([got.path], got.ext)
 

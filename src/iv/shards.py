@@ -25,6 +25,8 @@ FINGERPRINT_OF = {
     ".html": lambda p: _short("bytes:" + hashlib.sha256(Path(p).read_bytes()).hexdigest()),
 }
 
+EMPTY_FP = "0" * DIGEST_LEN
+
 _BAD_IN_VALUE = (".", "=", "/", "\\", PART_SEP)
 
 _NUM = re.compile(r"(\d+)")
@@ -183,7 +185,29 @@ def fingerprint_of_file(path) -> str:
     if ext is None:
         raise DeclError(
             f"no way to fingerprint {path}; known: {sorted(FINGERPRINT_OF)}.")
+    got = parse_name(path)
+    if got is not None and got.fp == EMPTY_FP:
+        return EMPTY_FP
     return FINGERPRINT_OF[ext](path)
+
+
+def is_empty(shard: "Shard") -> bool:
+    return shard.fp == EMPTY_FP
+
+
+def commit_empty(dataset_dir, *, part: dict[str, object] | None,
+                 key: str = "", ext: str = EXT) -> object:
+    final = dataset_dir / shard_name(part, EMPTY_FP, ext, key)
+    part_str = encode_part(part)
+    superseded = [s for s in list_shards(dataset_dir).get(part_str, [])
+                  if s.name != final.name]
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    if not final.exists():
+        final.write_bytes(b"")
+    for s in superseded:
+        s.path.unlink()
+    _cache_put(dataset_dir, part_str, parse_name(final))
+    return final
 
 
 def dataset_id(shards: Iterable[Shard]) -> str:
