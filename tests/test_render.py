@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tyke import render
-from tyke.static import Node, Site
+from iv import render
+from iv.static import Node, Site
 
 
 def test_transitive_reduction_removes_redundant_edges():

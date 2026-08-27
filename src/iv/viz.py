@@ -7,7 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import networkx as nx
 
-from .errors import TykeError
+from .errors import IvError
 from .graph import _overlaps
 
 
@@ -114,7 +114,7 @@ def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:
 
     try:
         order = {n: i for i, n in enumerate(g.order())}
-    except TykeError:
+    except IvError:
         order = {n: i for i, n in enumerate(g.stages)}
 
     broken = []

@@ -15,7 +15,7 @@ from .errors import DeclError, StateError
 
 DIGEST_LEN = 16
 PART_SEP = "__"
-STAGE_ENV = "TYKE_STAGE_DIR"
+STAGE_ENV = "IV_STAGE_DIR"
 EXT = ".parquet"
 
 FINGERPRINT_OF = {
@@ -257,7 +257,7 @@ def current_shards(dataset_dir) -> dict[str, Shard]:
             names = ", ".join(sorted(s.name for s in shards))
             raise StateError(
                 f"{dataset_dir} holds {len(shards)} shards for partition "
-                f"{part_str or '(none)'}: {names}. A commit was interrupted. Run `tyke gc` to "
+                f"{part_str or '(none)'}: {names}. A commit was interrupted. Run `iv gc` to "
                 f"drop the superseded one — this cannot be resolved by guessing.")
         out[part_str] = shards[0]
     if cache is not None:
@@ -298,7 +298,7 @@ def select(shards: dict[str, Shard], where: dict[str, object] | None = None,
             raise DeclError(
                 f"where={{{key!r}: <function>}} is not allowed. A selector has to be data "
                 f'so it can be re-evaluated later: {{"lt": "2021"}}, or an explicit list. '
-                f"See tyke.shards.matches for why.")
+                f"See iv.shards.matches for why.")
         if not isinstance(rule, dict):
             want = [str(v) for v in (rule if isinstance(rule, (list, tuple, set)) else [rule])]
             have = {s.part[key] for s in picked if key in s.part}
@@ -313,7 +313,7 @@ def select(shards: dict[str, Shard], where: dict[str, object] | None = None,
 
 
 def stage(tag: object = "", stage_dir=None, ext: str = EXT) -> Path:
-    d = Path(stage_dir or os.environ.get(STAGE_ENV) or tempfile.gettempdir()) / "tyke-stage"
+    d = Path(stage_dir or os.environ.get(STAGE_ENV) or tempfile.gettempdir()) / "iv-stage"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{os.getpid()}-{tag}{ext}"
 

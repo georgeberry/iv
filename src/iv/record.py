@@ -10,16 +10,16 @@ from .errors import StateError
 RECORDER_VERSION = 2
 
 
-def emit(tyke, kind: str, **fields) -> None:
-    if tyke.trace_path is None or tyke._depth:
+def emit(iv, kind: str, **fields) -> None:
+    if iv.trace_path is None or iv._depth:
         return
-    if tyke._trace_fh is None:
-        tyke.trace_path.parent.mkdir(parents=True, exist_ok=True)
-        tyke._trace_fh = tyke.trace_path.open("a", buffering=1)
-    tyke._trace_fh.write(json.dumps({
+    if iv._trace_fh is None:
+        iv.trace_path.parent.mkdir(parents=True, exist_ok=True)
+        iv._trace_fh = iv.trace_path.open("a", buffering=1)
+    iv._trace_fh.write(json.dumps({
         "v": RECORDER_VERSION,
         "kind": kind,
-        "node": tyke.node(),
+        "node": iv.node(),
         "pid": os.getpid(),
         "t": round(time.time(), 3),
         **fields,
@@ -46,7 +46,7 @@ def load(path: Path) -> list[dict]:
             raise StateError(
                 f"{path}:{n} is not parseable ({e}). A torn line means the trace was cut "
                 f"mid-write, so it no longer describes the run. Delete it and re-run with "
-                f"TYKE_TRACE set.") from e
+                f"IV_TRACE set.") from e
         if ev.get("v") != RECORDER_VERSION:
             stale += 1
             continue

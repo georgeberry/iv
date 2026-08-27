@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import static as _static
-from .errors import TykeError
+from .errors import IvError
 
 
 @dataclass(frozen=True)
 class Graph:
-    tyke: object
+    iv: object
     stages: dict[str, _static.Node]
 
 
@@ -54,24 +54,24 @@ class Graph:
         return [n for layer in toposort(self.parent_map()) for n in sorted(layer, key=at.get)]
 
 
-def build(tyke) -> Graph:
+def build(iv) -> Graph:
 
 
-    nodes = sorted(declared_nodes(tyke), key=lambda n: (n.file, _first_line(n), n.fn))
-    return Graph(tyke=tyke, stages={n.name: n for n in nodes})
+    nodes = sorted(declared_nodes(iv), key=lambda n: (n.file, _first_line(n), n.fn))
+    return Graph(iv=iv, stages={n.name: n for n in nodes})
 
 
 def _first_line(node) -> int:
     return min((s.line for s in node.sites), default=0)
 
 
-def declared_nodes(tyke) -> list[_static.Node]:
+def declared_nodes(iv) -> list[_static.Node]:
 
 
     out = []
-    for asset in getattr(tyke, "_assets", {}).values():
+    for asset in getattr(iv, "_assets", {}).values():
         fn_name = getattr(asset.fn, "__name__", "")
-        rel = tyke._rel_source(getattr(asset.fn, "__code__").co_filename)
+        rel = iv._rel_source(getattr(asset.fn, "__code__").co_filename)
         sites = [
             _static.Site(kind="read", dataset=r.dataset, why=r.why, file=rel,
                          line=_line_of(asset.fn), optional=r.optional,
@@ -119,7 +119,7 @@ def toposort(parents: dict[str, list[str]]) -> list[list[str]]:
     while remaining:
         layer = sorted(k for k, v in remaining.items() if not v)
         if not layer:
-            raise TykeError(f"cycle among {sorted(remaining)}")
+            raise IvError(f"cycle among {sorted(remaining)}")
         out.append(layer)
         remaining = {k: v - set(layer) for k, v in remaining.items() if k not in layer}
     return out
@@ -128,7 +128,7 @@ def toposort(parents: dict[str, list[str]]) -> list[list[str]]:
 def find_cycle(g: Graph) -> str | None:
     try:
         toposort(g.parent_map())
-    except TykeError as e:
+    except IvError as e:
         return str(e)
     return None
 
@@ -137,7 +137,7 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warns: list[str] = []
 
-    for name, src in sorted(getattr(g.tyke, "_sources", {}).items()):
+    for name, src in sorted(getattr(g.iv, "_sources", {}).items()):
         if not g.consumers_of(name):
             warns.append(
                 f"SOURCE NOBODY READS  {name}\n"
@@ -145,7 +145,7 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
                 f"stage. Delete the declaration, or wire it up.")
 
     produced = set(g.produced)
-    for name, d in sorted(getattr(g.tyke, "_datasets", {}).items()):
+    for name, d in sorted(getattr(g.iv, "_datasets", {}).items()):
         if name in produced:
             continue
         readers = g.consumers_of(name)
@@ -157,21 +157,21 @@ def check(g: Graph) -> tuple[list[str], list[str]]:
 
             errors.append(
                 f"READ, NOBODY WRITES  {name}\n"
-                f"    declared with tyke.dataset(...) — {d.why} — and read by "
+                f"    declared with iv.dataset(...) — {d.why} — and read by "
                 f"{', '.join(required)}, but named in no stage's output=. Nothing puts it "
-                f"there, so the read cannot succeed. Write it with @tyke.data or @tyke.step, "
+                f"there, so the read cannot succeed. Write it with @iv.data or @iv.step, "
                 f"or declare it a source if it arrives from outside.")
         elif readers:
             warns.append(
                 f"OPTIONAL, NOBODY WRITES  {name}\n"
-                f"    declared with tyke.dataset(...) — {d.why} — and named in no stage's "
+                f"    declared with iv.dataset(...) — {d.why} — and named in no stage's "
                 f"output=, but every reader ({', '.join(readers)}) declares optional=True, "
                 f"which is what a dataset one configuration produces and another does not "
                 f"looks like. If this configuration should produce it, wire it up.")
         else:
             warns.append(
                 f"DECLARED, NOBODY WRITES  {name}\n"
-                f"    declared with tyke.dataset(...) — {d.why} — and named in no stage's "
+                f"    declared with iv.dataset(...) — {d.why} — and named in no stage's "
                 f"output=, so nothing puts it there. Nothing reads it either, so this is a "
                 f"name a rename left behind. Wire it up, or delete it.")
 

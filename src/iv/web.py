@@ -27,11 +27,11 @@ def payload(g, status: dict | None = None, state: dict | None = None,
     status = status or {}
     state = state or {}
     maybe = maybe or set()
-    tyke = g.tyke
+    iv = g.iv
 
     stages = {}
     for name, st in g.stages.items():
-        a = getattr(tyke, "_assets", {}).get(name)
+        a = getattr(iv, "_assets", {}).get(name)
         stages[name] = {
             "why": getattr(a, "why", "") if a else "",
             "part": getattr(a, "part_key", None) if a else None,
@@ -47,8 +47,8 @@ def payload(g, status: dict | None = None, state: dict | None = None,
 
         shards = {k: v for k, v in state.get(ds, {}).items() if _owns(part, k)}
         writers = g.producers_of(ds)
-        src = getattr(tyke, "_sources", {}).get(ds)
-        decl = getattr(tyke, "_datasets", {}).get(ds)
+        src = getattr(iv, "_sources", {}).get(ds)
+        decl = getattr(iv, "_datasets", {}).get(ds)
         nodes.append({
             "id": _nid(n),
             "label": _viz.short(n),
@@ -145,7 +145,7 @@ def _nid(node) -> str:
 
 
 def write(g, out: Path, status: dict | None = None, state: dict | None = None,
-          maybe: set | None = None, title: str = "tyke", reduce: bool = False) -> Path:
+          maybe: set | None = None, title: str = "iv", reduce: bool = False) -> Path:
     out = Path(out)
     out.write_text(_PAGE.replace("__DATA__", json.dumps(
         payload(g, status, state, maybe, reduce), indent=None))

@@ -17,7 +17,7 @@ from . import render as _render
 from . import shards as _sh
 from . import static as _static
 from .core import _canon, _resolve_sel
-from .errors import ConfigError, DeclError, TykeError
+from .errors import ConfigError, DeclError, IvError
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="Re-run a stage only when the data it reads has changed.")
@@ -29,7 +29,7 @@ _STALE_TRACE_S = 12 * 3600
 @app.callback()
 def main(instance: str = typer.Option(
         None, "--instance", "-i",
-        help="module:attr of the Pipeline. Default: [tool.tyke] instance in pyproject.toml")):
+        help="module:attr of the Pipeline. Default: [tool.iv] instance in pyproject.toml")):
     global _INSTANCE
     _INSTANCE = instance
 
@@ -43,7 +43,7 @@ def reports(fn):
     def wrapper(*a, **kw):
         try:
             return fn(*a, **kw)
-        except TykeError as e:
+        except IvError as e:
             _die(e)
     return wrapper
 
@@ -67,11 +67,11 @@ def _load():
         if root is None:
             _die(ConfigError("no pyproject.toml found, and no --instance given."))
         cfg = tomllib.loads((root / "pyproject.toml").read_text())
-        spec = (cfg.get("tool", {}).get("tyke", {}) or {}).get("instance")
+        spec = (cfg.get("tool", {}).get("iv", {}) or {}).get("instance")
         if not spec:
             _die(ConfigError(
-                'no [tool.tyke] instance in pyproject.toml. Add:\n\n'
-                '    [tool.tyke]\n    instance = "mypkg.pipeline:tyke"\n'))
+                'no [tool.iv] instance in pyproject.toml. Add:\n\n'
+                '    [tool.iv]\n    instance = "mypkg.pipeline:iv"\n'))
     if root and str(root) not in sys.path:
         sys.path.insert(0, str(root))
     mod, _, attr = spec.partition(":")
@@ -84,16 +84,16 @@ def _load():
 def _graph_of():
     try:
         return _graph.build(_load())
-    except TykeError as e:
+    except IvError as e:
         _die(e)
 
 
 def _stage_name(g, query: str) -> str:
     hits = [n for n in g.stages if query == n or query in n]
     if not hits:
-        raise TykeError(f"no stage matching {query!r}. Try `tyke graph`.")
+        raise IvError(f"no stage matching {query!r}. Try `iv graph`.")
     if len(hits) > 1:
-        raise TykeError(f"{query!r} matches more than one stage: {', '.join(hits)}.")
+        raise IvError(f"{query!r} matches more than one stage: {', '.join(hits)}.")
     return hits[0]
 
 
@@ -119,27 +119,27 @@ def _part_flags(raw: list[str], option: str = "--part") -> dict[str, str]:
     for item in raw:
         key, sep, value = item.partition("=")
         if not sep or not key or not value:
-            raise TykeError(f"{option} is key=value, got {item!r}.")
+            raise IvError(f"{option} is key=value, got {item!r}.")
         if key in out and out[key] != value:
-            raise TykeError(f"{option} names {key!r} twice with different values.")
+            raise IvError(f"{option} names {key!r} twice with different values.")
         out[key] = value
     return out
 
 
-def _asset_parts(tyke, asset, filters: dict[str, str]) -> list[dict | None]:
+def _asset_parts(iv, asset, filters: dict[str, str]) -> list[dict | None]:
     if not asset.part_keys or asset.split:
         return [None]
     parts = asset.universe_parts()
     if parts is None:
         raise DeclError(
-            f"{asset.primary}: tyke run needs universe= to enumerate this dynamic stage. "
+            f"{asset.primary}: iv run needs universe= to enumerate this dynamic stage. "
             "Use universe=[...] (or a callable), or build an explicit shard directly.")
     return [p for p in parts if all(p.get(k) == v for k, v in filters.items() if k in p)]
 
 
-def _stale_asset_parts(tyke, asset, filters) -> list[dict | None]:
+def _stale_asset_parts(iv, asset, filters) -> list[dict | None]:
     out = []
-    for p in _asset_parts(tyke, asset, filters):
+    for p in _asset_parts(iv, asset, filters):
         if asset.why_stale(**p) if p is not None else asset.why_stale():
             out.append(p)
     return out
@@ -184,8 +184,8 @@ def _open_run_log(path: Path | None, total: int):
         path.parent.mkdir(parents=True, exist_ok=True)
         out = path.open("w", encoding="utf-8", buffering=1)
     except OSError as e:
-        raise TykeError(f"cannot open --log {path}: {e}") from e
-    out.write(f"tyke run · {total} stage shard(s)\n")
+        raise IvError(f"cannot open --log {path}: {e}") from e
+    out.write(f"iv run · {total} stage shard(s)\n")
     out.write(f"started {time.strftime('%Y-%m-%d %H:%M:%S %z')}\n")
     out.flush()
     return out
@@ -204,10 +204,10 @@ def _run_causes(asset, part: dict | None,
     return sorted(set(out))
 
 
-def _rebuild_reason(tyke, asset, part: dict | None, stale: str | None,
+def _rebuild_reason(iv, asset, part: dict | None, stale: str | None,
                     changed: set[tuple[str, str]]) -> str:
-    if tyke.force:
-        return "forced by TYKE_FORCE"
+    if iv.force:
+        return "forced by IV_FORCE"
     if asset.acts_only:
         return "action has no output to mark current"
     causes = _run_causes(asset, part, changed)
@@ -222,9 +222,9 @@ def _rebuild_reason(tyke, asset, part: dict | None, stale: str | None,
     return "declared inputs, version, or schema changed"
 
 
-def _execute_work(tyke, work, log: Path | None) -> None:
+def _execute_work(iv, work, log: Path | None) -> None:
     run_log = _open_run_log(log, len(work))
-    typer.secho(f"tyke run · {len(work)} stage shard(s)", bold=True)
+    typer.secho(f"iv run · {len(work)} stage shard(s)", bold=True)
     for i, (node, _, p) in enumerate(work, 1):
         typer.echo(f"  {i:>3}. {node}{_part_label(p)}")
     typer.echo()
@@ -241,20 +241,20 @@ def _execute_work(tyke, work, log: Path | None) -> None:
         try:
             args = p or {}
             stale = asset.why_stale(**args)
-            will_run = tyke.force or not asset.may_skip or bool(stale)
-            reason = _rebuild_reason(tyke, asset, p, stale, changed) if will_run else None
+            will_run = iv.force or not asset.may_skip or bool(stale)
+            reason = _rebuild_reason(iv, asset, p, stale, changed) if will_run else None
             if reason:
                 typer.secho(f"  rebuild — {reason}", fg="yellow")
                 if run_log:
-                    run_log.write(f"[tyke] rebuild — {reason}\n"); run_log.flush()
-            tyke._changes.clear()
+                    run_log.write(f"[iv] rebuild — {reason}\n"); run_log.flush()
+            iv._changes.clear()
             with redirect_stdout(output), redirect_stderr(output):
                 asset._invoke(p, stale)
-            changed.update(tyke._changes)
+            changed.update(iv._changes)
         except BaseException:
             _print_stage_output(output.getvalue())
             if run_log:
-                run_log.write(f"\n[tyke] failed ({time.perf_counter() - step_started:.2f}s)\n")
+                run_log.write(f"\n[iv] failed ({time.perf_counter() - step_started:.2f}s)\n")
                 run_log.close()
             raise
         _print_stage_output(output.getvalue())
@@ -266,27 +266,27 @@ def _execute_work(tyke, work, log: Path | None) -> None:
             skipped += 1; outcome = f"current — skipped ({elapsed:.2f}s)"
             typer.secho(f"  {outcome}", fg="bright_green")
         if run_log:
-            run_log.write(f"\n[tyke] {outcome}\n"); run_log.flush()
+            run_log.write(f"\n[iv] {outcome}\n"); run_log.flush()
     summary = f"complete in {time.perf_counter() - started:.2f}s · {ran} reran, {skipped} current — skipped"
     typer.secho(f"\n{summary}", bold=True)
     if run_log:
         run_log.write(f"\n{summary}\n"); run_log.close()
 
 
-def _trial_outputs(tyke, asset, part: dict | None, out_tree: Path) -> dict[str, dict[str, str]]:
+def _trial_outputs(iv, asset, part: dict | None, out_tree: Path) -> dict[str, dict[str, str]]:
     """Force one stage into an isolated output tree and return content fingerprints."""
-    original_out, original_force = tyke.out_tree, tyke.force
+    original_out, original_force = iv.out_tree, iv.force
     try:
-        tyke.out_tree, tyke.force = out_tree, True
+        iv.out_tree, iv.force = out_tree, True
         asset(**part) if part is not None else asset()
         return {
             output.dataset: {
-                key: shard.fp for key, shard in _sh.current_shards(tyke.resolve_out(output.dataset)).items()
+                key: shard.fp for key, shard in _sh.current_shards(iv.resolve_out(output.dataset)).items()
             }
             for output in asset.outputs.values()
         }
     finally:
-        tyke.out_tree, tyke.force = original_out, original_force
+        iv.out_tree, iv.force = original_out, original_force
 
 
 def _determinism_differences(first, second) -> list[str]:
@@ -301,10 +301,10 @@ def _determinism_differences(first, second) -> list[str]:
     return differences
 
 
-def _audit_determinism(tyke, node: str, asset, parts: list[dict | None]) -> list[str]:
-    with tempfile.TemporaryDirectory(prefix="tyke-determinism-") as root:
-        first = [_trial_outputs(tyke, asset, p, Path(root) / "first") for p in parts]
-        second = [_trial_outputs(tyke, asset, p, Path(root) / "second") for p in parts]
+def _audit_determinism(iv, node: str, asset, parts: list[dict | None]) -> list[str]:
+    with tempfile.TemporaryDirectory(prefix="iv-determinism-") as root:
+        first = [_trial_outputs(iv, asset, p, Path(root) / "first") for p in parts]
+        second = [_trial_outputs(iv, asset, p, Path(root) / "second") for p in parts]
     differences = []
     for p, left, right in zip(parts, first, second):
         prefix = f"{node}{_part_label(p)} — "
@@ -333,7 +333,7 @@ def stage(name: str):
     g = _graph_of()
     hits = [n for n in g.stages if name in n]
     if not hits:
-        _die(TykeError(f"no stage matching {name!r}. Try `tyke graph`."))
+        _die(IvError(f"no stage matching {name!r}. Try `iv graph`."))
     for n in hits:
         typer.echo(_render.stage_card(n, g))
 
@@ -346,9 +346,9 @@ def impact(stage: str, tick: bool = typer.Option(False, "--tick",
                [], "--tick-part", help="output partition to tick, repeat as key=value")):
 
     if tick_part and not tick:
-        raise TykeError("--tick-part requires --tick.")
-    tyke = _load()
-    g = _graph.build(tyke)
+        raise IvError("--tick-part requires --tick.")
+    iv = _load()
+    g = _graph.build(iv)
     node = _stage_name(g, stage)
     filters = _part_flags(tick_part, "--tick-part")
     parents = g.parent_map()
@@ -356,7 +356,7 @@ def impact(stage: str, tick: bool = typer.Option(False, "--tick",
     downstream = _render.descendants_of(node, parents)
     order = g.order()
     with _sh.snapshot():
-        state = _staleness(tyke, g)
+        state = _staleness(iv, g)
         maybe = _downstream_of(g, state)
 
         typer.secho(node, bold=True)
@@ -376,7 +376,7 @@ def impact(stage: str, tick: bool = typer.Option(False, "--tick",
             wanted = ", ".join(f"{k}={v}" for k, v in sorted(filters.items()))
             detail = f" matching {wanted}" if wanted else ""
             have = f" Available: {', '.join(available)}." if available else ""
-            raise TykeError(f"{node} has no output shards on disk{detail} to tick.{have}")
+            raise IvError(f"{node} has no output shards on disk{detail} to tick.{have}")
         possible = _downstream_of(g, state, moving=moving)
         affected: dict[str, list[tuple[str, str]]] = {}
         for other in order:
@@ -402,23 +402,23 @@ def impact(stage: str, tick: bool = typer.Option(False, "--tick",
 @app.command()
 def preflight():
 
-    tyke = _load()
-    g = _graph.build(tyke)
+    iv = _load()
+    g = _graph.build(iv)
     bad = []
-    names = _static.undefined_names(tyke)
+    names = _static.undefined_names(iv)
     if names is None:
         typer.secho("  pyflakes is not installed, so undefined names were NOT checked",
                     fg="yellow")
     for line in names or ():
         bad.append(f"UNDEFINED NAME  {line}")
-    for line in _static.missing_imports(tyke):
+    for line in _static.missing_imports(iv):
         bad.append(f"MISSING MODULE  {line}")
     cyc = _graph.find_cycle(g)
     if cyc:
         bad.append(f"CYCLE  {cyc}")
-    with tyke.bookkeeping():
-        for name in sorted(tyke._sources):
-            if not _sh.current_shards(tyke.resolve(name)):
+    with iv.bookkeeping():
+        for name in sorted(iv._sources):
+            if not _sh.current_shards(iv.resolve(name)):
                 bad.append(f"EMPTY SOURCE  {name} is declared but nothing is there")
     for b in bad:
         typer.secho(b, fg="red")
@@ -446,10 +446,10 @@ def check(trace: Path = typer.Option(None, "--trace", help="also diff against a 
 
 @app.command()
 def drift(trace: Path = typer.Option(None, "--trace")):
-    tyke = _load()
-    path = trace or tyke.trace_path
+    iv = _load()
+    path = trace or iv.trace_path
     if not path:
-        _die(ConfigError("no trace. Set TYKE_TRACE=... on the run, or pass --trace."))
+        _die(ConfigError("no trace. Set IV_TRACE=... on the run, or pass --trace."))
     events = _rec.load(Path(path))
     if not events:
         _die(ConfigError(f"{path} has no events this recorder can read."))
@@ -457,8 +457,8 @@ def drift(trace: Path = typer.Option(None, "--trace")):
     if age and age > _STALE_TRACE_S:
         _die(ConfigError(
             f"{path} is {age / 3600:.0f}h old. Every line would be fiction about code "
-            f"that has since changed — re-run with TYKE_TRACE set."))
-    errors, warns = _graph.drift(_graph.build(tyke), events)
+            f"that has since changed — re-run with IV_TRACE set."))
+    errors, warns = _graph.drift(_graph.build(iv), events)
     for w in warns:
         typer.secho(f"warn  {w}", fg="yellow")
     for e in errors:
@@ -480,12 +480,12 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
 
 
     from . import viz as _viz
-    tyke = _load()
-    g = _graph.build(tyke)
+    iv = _load()
+    g = _graph.build(iv)
     status, state, maybe = {}, {}, set()
     if not plain:
         with _sh.snapshot():
-            state = _staleness(tyke, g)
+            state = _staleness(iv, g)
             maybe = _downstream_of(g, state)
         status = _viz.states(state, maybe)
     if html:
@@ -493,20 +493,20 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
         if out.suffix == ".png":
             out = out.with_suffix(".html")
         got = _web.write(g, out, status=status, state=state, maybe=maybe,
-                         title=tyke.tree.name, reduce=reduce)
+                         title=iv.tree.name, reduce=reduce)
         typer.echo(f"wrote {got} — open it")
         return
     typer.echo(f"wrote {_viz.draw(g, out, full=full, status=status)}")
 
 
-def _declared_part_keys(tyke, g, name: str) -> set[tuple[str, ...]]:
+def _declared_part_keys(iv, g, name: str) -> set[tuple[str, ...]]:
 
 
     out = set()
     for node, stage in g.stages.items():
         if not any(site.dataset == name for site in stage.outputs):
             continue
-        asset = tyke._assets.get(node)
+        asset = iv._assets.get(node)
         if asset is None:
             continue
         out.add(tuple(sorted(asset.fixed_part)) if asset.fixed_part
@@ -514,7 +514,7 @@ def _declared_part_keys(tyke, g, name: str) -> set[tuple[str, ...]]:
     return out
 
 
-def _staleness(tyke, g):
+def _staleness(iv, g):
 
 
     writers: dict[str, list[tuple]] = {}
@@ -526,9 +526,9 @@ def _staleness(tyke, g):
     out: dict[str, dict] = {}
     for name, owners in writers.items():
         shards = {}
-        for p in (sorted(_sh.current_shards(tyke.resolve_out(name))) or [""]):
+        for p in (sorted(_sh.current_shards(iv.resolve_out(name))) or [""]):
             part = _sh.decode_part(p) or None
-            shards[p] = tyke.why_stale(name, part, inputs=_owner(owners, part))
+            shards[p] = iv.why_stale(name, part, inputs=_owner(owners, part))
         out[name] = shards
     return out
 
@@ -569,7 +569,7 @@ def _line(shards: dict, maybe: set, dataset: str) -> tuple:
     return ("stale" if bad else "maybe"), "; ".join(parts)
 
 
-def _downstream_of(g, state: dict, tyke=None, moving=None) -> set:
+def _downstream_of(g, state: dict, iv=None, moving=None) -> set:
 
 
     from .core import _resolve_sel
@@ -577,7 +577,7 @@ def _downstream_of(g, state: dict, tyke=None, moving=None) -> set:
     moving = set(seed)
     for node in g.order():
         st = g.stages[node]
-        asset = getattr(g.tyke, "_assets", {}).get(node)
+        asset = getattr(g.iv, "_assets", {}).get(node)
         for site in st.outputs:
             fixed = dict(site.part) or None
             for p in state.get(site.dataset, {""}):
@@ -670,12 +670,12 @@ def _print_impact_list(title: str, nodes: list[str], g, state, maybe, *, target=
 @app.command()
 @reports
 def status():
-    tyke = _load()
+    iv = _load()
     g = _graph_of()
 
 
     with _sh.snapshot():
-        state = _staleness(tyke, g)
+        state = _staleness(iv, g)
         maybe = _downstream_of(g, state)
 
     tally = {"current": 0, "maybe": 0, "stale": 0}
@@ -696,12 +696,12 @@ def status():
 @app.command()
 @reports
 def why(dataset: str):
-    tyke = _load()
+    iv = _load()
     g = _graph_of()
-    d = tyke.resolve_out(dataset)
+    d = iv.resolve_out(dataset)
     try:
         present = _sh.current_shards(d)
-    except TykeError as e:
+    except IvError as e:
         _die(e)
     if not present:
         typer.echo(f"{dataset}: nothing on disk")
@@ -715,7 +715,7 @@ def why(dataset: str):
     with _sh.snapshot():
         for part in sorted(present, key=_sh.sort_key):
             sh = present[part]
-            reason = tyke.why_stale(dataset, _sh.decode_part(part) or None, inputs=inputs)
+            reason = iv.why_stale(dataset, _sh.decode_part(part) or None, inputs=inputs)
             typer.echo(f"\n{_canon(dataset)}{part or '(one shard)'}")
             typer.echo(f"  fp      {sh.fp}")
             typer.echo(f"  key     {sh.key or ('(no key in the name — not written by the '
@@ -726,11 +726,11 @@ def why(dataset: str):
 
 
             for name, sel, _ in inputs:
-                live = _sh.current_shards(tyke.resolve(name))
+                live = _sh.current_shards(iv.resolve(name))
                 try:
                     got = _sh.select(live, _resolve_sel(sel, _sh.decode_part(part) or None,
                                                         name), dataset=name)
-                except TykeError:
+                except IvError:
                     got = []
                 typer.echo(f"  in      {name:<40} {_sh.dataset_id(got)} ({len(got)})")
             if reason:
@@ -742,10 +742,10 @@ def why(dataset: str):
 @app.command()
 @reports
 def plan():
-    tyke = _load()
+    iv = _load()
     g = _graph_of()
     with _sh.snapshot():
-        state = _staleness(tyke, g)
+        state = _staleness(iv, g)
         maybe = _downstream_of(g, state)
     if not _stale_shards(state):
         typer.echo("nothing to do")
@@ -769,18 +769,18 @@ def determinism(
 ):
     """Check that selected stages produce identical content from identical inputs."""
     if bool(only) == sample:
-        raise TykeError("choose exactly one of --only STAGE or --sample.")
+        raise IvError("choose exactly one of --only STAGE or --sample.")
     if sample and part:
-        raise TykeError("--part is only meaningful with `tyke determinism --only STAGE`.")
-    tyke = _load()
-    g = _graph.build(tyke)
+        raise IvError("--part is only meaningful with `iv determinism --only STAGE`.")
+    iv = _load()
+    g = _graph.build(iv)
     if only:
         node = _stage_name(g, only)
-        asset = tyke._assets[node]
+        asset = iv._assets[node]
         if asset.acts_only:
-            raise TykeError(f"{node} is an action with no output, so determinism cannot be measured.")
-        parts = _asset_parts(tyke, asset, _part_flags(part))
-        differences = _audit_determinism(tyke, node, asset, parts)
+            raise IvError(f"{node} is an action with no output, so determinism cannot be measured.")
+        parts = _asset_parts(iv, asset, _part_flags(part))
+        differences = _audit_determinism(iv, node, asset, parts)
         if differences:
             typer.secho("not deterministic", fg="red", bold=True)
             for line in differences:
@@ -792,13 +792,13 @@ def determinism(
     failed = checked = skipped = 0
     typer.secho("determinism sample", bold=True)
     for node in g.order():
-        asset = tyke._assets[node]
+        asset = iv._assets[node]
         if asset.acts_only:
             skipped += 1
             typer.secho(f"  skipped  {node} — action", fg="bright_black")
             continue
-        chosen = _last_part(_asset_parts(tyke, asset, {}))
-        differences = _audit_determinism(tyke, node, asset, [chosen])
+        chosen = _last_part(_asset_parts(iv, asset, {}))
+        differences = _audit_determinism(iv, node, asset, [chosen])
         checked += 1
         if differences:
             failed += 1
@@ -833,9 +833,9 @@ def run(
 
     choices = [x for x in (up_to, up_to_excluding, from_, only) if x]
     if len(choices) > 1:
-        raise TykeError("choose only one of --up-to, --up-to-excluding, --from, or --only.")
-    tyke = _load()
-    g = _graph.build(tyke)
+        raise IvError("choose only one of --up-to, --up-to-excluding, --from, or --only.")
+    iv = _load()
+    g = _graph.build(iv)
     parents = g.parent_map()
     filters = _part_flags(part)
     selected = set(g.stages)
@@ -853,7 +853,7 @@ def run(
         selected = {_stage_name(g, only)}
         safe = True
     if force:
-        tyke.force = True
+        iv.force = True
         safe = False
 
     with _sh.snapshot():
@@ -865,34 +865,34 @@ def run(
             for node in g.order():
                 if node not in required:
                     continue
-                asset = tyke._assets[node]
-                for p in _stale_asset_parts(tyke, asset, filters):
+                asset = iv._assets[node]
+                for p in _stale_asset_parts(iv, asset, filters):
                     stale.append(f"{node} {p or '(one shard)'}")
             if stale:
-                raise TykeError("refusing to run with stale upstream shard(s): "
-                              + "; ".join(stale) + ". Run `tyke run --up-to "
+                raise IvError("refusing to run with stale upstream shard(s): "
+                              + "; ".join(stale) + ". Run `iv run --up-to "
                               + choices[0] + "` first.")
 
-        work = [(node, tyke._assets[node], p)
+        work = [(node, iv._assets[node], p)
                 for node in g.order() if node in selected
-                for p in _asset_parts(tyke, tyke._assets[node], filters)]
+                for p in _asset_parts(iv, iv._assets[node], filters)]
         if not work:
             typer.secho("nothing selected", fg="yellow")
             return
 
-        _execute_work(tyke, work, log)
+        _execute_work(iv, work, log)
 
 
 @app.command()
 @reports
 def verify(dataset: str = typer.Argument(None, help="one dataset, or all of them")):
 
-    tyke = _load()
+    iv = _load()
     g = _graph_of()
     bad = []
     for name in ([dataset] if dataset else g.produced):
-        if tyke.resolve_out(name).exists():
-            bad += [f"{name}{line}" for line in tyke.verify(name)]
+        if iv.resolve_out(name).exists():
+            bad += [f"{name}{line}" for line in iv.verify(name)]
     for b in bad:
         typer.secho(b, fg="red")
     if bad:
@@ -900,13 +900,13 @@ def verify(dataset: str = typer.Argument(None, help="one dataset, or all of them
     typer.secho("ok — every shard matches its name", fg="green")
 
 
-def _orphan_datasets(tyke, g) -> list[tuple[str, object]]:
+def _orphan_datasets(iv, g) -> list[tuple[str, object]]:
 
 
-    known = set(g.produced) | set(tyke._sources) | set(tyke._datasets)
-    root = tyke.out_tree
+    known = set(g.produced) | set(iv._sources) | set(iv._datasets)
+    root = iv.out_tree
     dirs = {}
-    with tyke.bookkeeping():
+    with iv.bookkeeping():
         if not root.exists():
             return []
         for path in root.rglob("*"):
@@ -930,22 +930,22 @@ def gc(
         [], "--partition-key", help="expected shard key; repeat for a composite partition"),
 ):
     if partition_key and dataset is None:
-        raise TykeError("--partition-key needs one DATASET so the repair scope is explicit.")
+        raise IvError("--partition-key needs one DATASET so the repair scope is explicit.")
     if len(set(partition_key)) != len(partition_key):
-        raise TykeError("--partition-key names the same key more than once.")
-    tyke = _load()
+        raise IvError("--partition-key names the same key more than once.")
+    iv = _load()
     g = _graph_of()
     targets = [dataset] if dataset else g.produced
     total = 0
-    stack = tyke.bookkeeping()
+    stack = iv.bookkeeping()
     stack.__enter__()
     for name in targets:
-        d = tyke.resolve_out(name)
+        d = iv.resolve_out(name)
         found = _sh.list_shards(d) if d.exists() else {}
         if not found:
             continue
         want = ({tuple(sorted(partition_key))} if partition_key
-                else _declared_part_keys(tyke, g, name))
+                else _declared_part_keys(iv, g, name))
         live = {p: v for p, v in found.items()
                 if not want or tuple(sorted(_sh.decode_part(p))) in want}
         orphaned = sorted(set(found) - set(live))
@@ -960,7 +960,7 @@ def gc(
             typer.echo(f"  dropped {name}{gone}")
             total += 1
     if dataset is None:
-        for name, d in _orphan_datasets(tyke, g):
+        for name, d in _orphan_datasets(iv, g):
             typer.secho(f"  {name}: no stage produces this and nothing declares it — "
                         f"dropping the whole dataset", fg="yellow")
             unknown = []
@@ -976,7 +976,7 @@ def gc(
             if dropped:
                 _sh._cache_drop(d)
             if unknown:
-                typer.secho(f"  {name}: left {len(unknown)} file(s) tyke did not write "
+                typer.secho(f"  {name}: left {len(unknown)} file(s) iv did not write "
                             f"(e.g. {unknown[0]}) — delete them yourself if they are "
                             f"dead too", fg="yellow")
             elif isinstance(d, Path) and not any(d.iterdir()):

@@ -1,7 +1,7 @@
-# tyke
+# iv
 
-`tyke` is a small, database-free dependency tracker for Python data pipelines. Stages
-declare what they read and write; `tyke` runs only the shards whose declared inputs moved.
+`iv` is a small, database-free dependency tracker for Python data pipelines. Stages
+declare what they read and write; `iv` runs only the shards whose declared inputs moved.
 
 Each derived filename contains both its derivation key and content fingerprint:
 
@@ -14,26 +14,26 @@ rebuild stops before downstream stages.
 
 ## Install
 
-Install `tyke` from PyPI:
+The PyPI name belongs to another project, so install `iv` from GitHub:
 
 ```bash
-uv add "tyke[data,cli]"
+uv add "iv[data,cli] @ git+https://github.com/georgeberry/iv"
 # or
-pip install "tyke[data,cli]"
+pip install "iv[data,cli] @ git+https://github.com/georgeberry/iv"
 ```
 
-Extras are `data` for Polars/Parquet, `cli` for the `tyke` command, `viz` for graph images,
+Extras are `data` for Polars/Parquet, `cli` for the `iv` command, `viz` for graph images,
 `lint` for preflight source checks, and `dev` for development dependencies.
 
 ## Quick start
 
 ```python
 import polars as pl
-from tyke import Pipeline
+from iv import Pipeline
 
-tyke = Pipeline(tree="data", project=".", code=["pipeline.py"])
+iv = Pipeline(tree="data", project=".", code=["pipeline.py"])
 
-@tyke.data(
+@iv.data(
     dataset="raw/scores/",
     part="season",
     universe=["2024", "2025"],
@@ -42,7 +42,7 @@ tyke = Pipeline(tree="data", project=".", code=["pipeline.py"])
 def scores(season):
     return pl.DataFrame({"season": [season], "points": [100]})
 
-@tyke.data(
+@iv.data(
     dataset="processed/features/",
     part="season",
     universe=["2024", "2025"],
@@ -50,7 +50,7 @@ def scores(season):
 )
 def features(
     season,
-    scores=tyke.same_part(scores, why="scores for this season"),
+    scores=iv.same_part(scores, why="scores for this season"),
 ):
     return scores.with_columns((pl.col("points") * 2).alias("points_x2"))
 ```
@@ -58,16 +58,16 @@ def features(
 Configure the CLI in `pyproject.toml`:
 
 ```toml
-[tool.tyke]
-instance = "pipeline:tyke"
+[tool.iv]
+instance = "pipeline:iv"
 ```
 
 Then run:
 
 ```bash
-tyke preflight
-tyke run
-tyke status
+iv preflight
+iv run
+iv status
 ```
 
 Roots have no declared inputs and run whenever called. Add `once=True` for a root that
@@ -76,33 +76,33 @@ does not move downstream.
 
 ## Declarations
 
-- `tyke.source(...)` declares a dataset supplied outside the pipeline.
-- `@tyke.data(...)` declares a stage producing one dataset.
-- `tyke.dataset(...)` gives a dataset a reusable name or shared schema.
-- `@tyke.step(output={...})` declares a multi-output stage. With no output, it is an action
+- `iv.source(...)` declares a dataset supplied outside the pipeline.
+- `@iv.data(...)` declares a stage producing one dataset.
+- `iv.dataset(...)` gives a dataset a reusable name or shared schema.
+- `@iv.step(output={...})` declares a multi-output stage. With no output, it is an action
   and runs whenever called.
 
 Stage parameters declare reads:
 
 | Selector | Shards selected |
 | --- | --- |
-| `tyke.all_of(data, why=...)` | Every shard |
-| `tyke.same_part(data, why=...)` | The current output partition |
-| `tyke.before_part(data, why=..., inclusive=False)` | Earlier partitions |
-| `tyke.after_part(data, why=..., inclusive=False)` | Later partitions |
-| `tyke.between(data, why=..., ge=..., lt=...)` | A bounded range |
-| `tyke.parts(data, why=..., season=[...])` | Explicit partition values |
-| `tyke.own_last_copy(why=...)` | The stage's previous output for append/update workflows |
+| `iv.all_of(data, why=...)` | Every shard |
+| `iv.same_part(data, why=...)` | The current output partition |
+| `iv.before_part(data, why=..., inclusive=False)` | Earlier partitions |
+| `iv.after_part(data, why=..., inclusive=False)` | Later partitions |
+| `iv.between(data, why=..., ge=..., lt=...)` | A bounded range |
+| `iv.parts(data, why=..., season=[...])` | Explicit partition values |
+| `iv.own_last_copy(why=...)` | The stage's previous output for append/update workflows |
 
 Use `optional=True` when no matching shard is valid and `as_paths=True` when the function
-needs paths instead of loaded values. `tyke.PART` is available inside range bounds.
+needs paths instead of loaded values. `iv.PART` is available inside range bounds.
 
 Set `part="season"` for one shard per call, a tuple for composite partitions, or a mapping
-such as `part={"source": "ncaa"}` for a literal shard. `universe=` tells `tyke run` which
+such as `part={"source": "ncaa"}` for a literal shard. `universe=` tells `iv run` which
 dynamic partitions to enumerate. `split=True` means one call returns all partitions as a
 mapping.
 
-Every dynamic stage run through `tyke run` needs its own `universe=`. Direct calls and an
+Every dynamic stage run through `iv run` needs its own `universe=`. Direct calls and an
 explicit `for_each([...])` already name the shards to build and do not need one.
 
 Use `version=` to invalidate a stage deliberately. Use `schema=` on sources or datasets
@@ -114,48 +114,48 @@ strings (`.html` or `.txt`). A stage may accept `out` and write its staged file 
 
 | Command | Purpose |
 | --- | --- |
-| `tyke run` | Run the pipeline in dependency order |
-| `tyke run --up-to STAGE` | Run a stage and its prerequisites |
-| `tyke run --up-to-excluding STAGE` | Run only a stage's prerequisites |
-| `tyke run --from STAGE` | Run a stage and descendants; require current upstreams |
-| `tyke run --only STAGE` | Run one stage; require current upstreams |
-| `tyke run --only STAGE --force` | Run despite stale upstreams; does not rebuild them |
-| `tyke run --part season=2025` | Filter partitioned work; repeat for composite keys |
-| `tyke run --log run.log` | Save merged stdout, stderr, and outcomes incrementally |
-| `tyke determinism --only STAGE` | Run a stage twice in isolated temporary output trees and compare content |
-| `tyke determinism --only STAGE --part season=2025` | Audit one partition of a stage |
-| `tyke determinism --sample` | Audit every stage at its last declared partition |
-| `tyke status` | Show current, maybe, and stale shards |
-| `tyke plan` | Show rebuilds and conditional downstream work |
-| `tyke why DATASET` | Show shard fingerprints, keys, inputs, and status |
-| `tyke graph` | Print the DAG; supports `--focus` and `--full` |
-| `tyke stage NAME` | Show a stage's reads and writes |
-| `tyke impact STAGE --tick` | Show possible impact if all output shards change |
-| `tyke impact STAGE --tick --tick-part season=2025` | Tick one existing output partition |
-| `tyke preflight` | Check undefined names, missing modules, and cycles |
-| `tyke check [--trace FILE]` | Validate declarations and optionally compare a trace |
-| `tyke drift [--trace FILE]` | Compare code with a recorded run |
-| `tyke verify [DATASET]` | Re-fingerprint shards and verify their filenames |
-| `tyke gc [DATASET]` | Remove superseded shards |
-| `tyke viz --out dag.png` | Render the DAG; requires the `viz` extra |
+| `iv run` | Run the pipeline in dependency order |
+| `iv run --up-to STAGE` | Run a stage and its prerequisites |
+| `iv run --up-to-excluding STAGE` | Run only a stage's prerequisites |
+| `iv run --from STAGE` | Run a stage and descendants; require current upstreams |
+| `iv run --only STAGE` | Run one stage; require current upstreams |
+| `iv run --only STAGE --force` | Run despite stale upstreams; does not rebuild them |
+| `iv run --part season=2025` | Filter partitioned work; repeat for composite keys |
+| `iv run --log run.log` | Save merged stdout, stderr, and outcomes incrementally |
+| `iv determinism --only STAGE` | Run a stage twice in isolated temporary output trees and compare content |
+| `iv determinism --only STAGE --part season=2025` | Audit one partition of a stage |
+| `iv determinism --sample` | Audit every stage at its last declared partition |
+| `iv status` | Show current, maybe, and stale shards |
+| `iv plan` | Show rebuilds and conditional downstream work |
+| `iv why DATASET` | Show shard fingerprints, keys, inputs, and status |
+| `iv graph` | Print the DAG; supports `--focus` and `--full` |
+| `iv stage NAME` | Show a stage's reads and writes |
+| `iv impact STAGE --tick` | Show possible impact if all output shards change |
+| `iv impact STAGE --tick --tick-part season=2025` | Tick one existing output partition |
+| `iv preflight` | Check undefined names, missing modules, and cycles |
+| `iv check [--trace FILE]` | Validate declarations and optionally compare a trace |
+| `iv drift [--trace FILE]` | Compare code with a recorded run |
+| `iv verify [DATASET]` | Re-fingerprint shards and verify their filenames |
+| `iv gc [DATASET]` | Remove superseded shards |
+| `iv viz --out dag.png` | Render the DAG; requires the `viz` extra |
 
 `maybe` means an upstream may change: downstream work runs only if the rebuilt content
-gets a new fingerprint. Set `TYKE_TRACE=path` during a pipeline run to record a trace.
-During `tyke run`, each rebuild reports its cause. If an upstream's content changed earlier
+gets a new fingerprint. Set `IV_TRACE=path` during a pipeline run to record a trace.
+During `iv run`, each rebuild reports its cause. If an upstream's content changed earlier
 in that run, the exact dataset shard is named; older aggregate keys can only identify that
 declared inputs, the version, or the schema changed.
 
-`tyke determinism --only STAGE` forces the named output-producing stage twice, each time
+`iv determinism --only STAGE` forces the named output-producing stage twice, each time
 into a fresh temporary output tree, and compares its output partition set and content
 fingerprints. It never writes production outputs. It rejects actions because they have no
 artifact to compare; use `--part key=value` to audit a particular dynamic shard.
-`tyke determinism --sample` visits every output-producing stage and chooses the last
-partition in TYKE's normal partition order, so its representative selection is repeatable.
+`iv determinism --sample` visits every output-producing stage and chooses the last
+partition in IV's normal partition order, so its representative selection is repeatable.
 
 ## Safety
 
 Within an active stage, reads and writes under the data tree must go through declared
-`tyke` inputs and outputs. `tyke` rejects undeclared I/O, conflicting writers, invalid
+`iv` inputs and outputs. `iv` rejects undeclared I/O, conflicting writers, invalid
 partition selectors, missing required shards, schema mismatches, and nested stage calls.
 
 ## Development

@@ -122,11 +122,11 @@ def check_signature(fn, part_keys: tuple[str, ...] | None, dataset: str) -> None
             continue
         if p.default is not inspect.Parameter.empty:
             continue
-        known = ["a read (tyke.all_of(...) and friends)", repr(OUT_PARAM)]
+        known = ["a read (iv.all_of(...) and friends)", repr(OUT_PARAM)]
         if part_keys:
             known += [repr(k) for k in part_keys]
         raise DeclError(
-            f"{dataset}: parameter {name!r} of {fn.__name__} is not something tyke can "
+            f"{dataset}: parameter {name!r} of {fn.__name__} is not something iv can "
             f"supply. A parameter is one of: {', '.join(known)}, or has a default. "
             f"A partition value is named after the stage's part=.")
 
@@ -157,7 +157,7 @@ class Dataset:
 
     def __repr__(self) -> str:
         p = " " + ",".join(f"{k}={v}" for k, v in self.part) if self.part else ""
-        return f"<tyke dataset {self.dataset}{p}>"
+        return f"<iv dataset {self.dataset}{p}>"
 
 
 def _outputs(spec, ext, allow_missing, schema=None) -> dict:
@@ -170,7 +170,7 @@ def _outputs(spec, ext, allow_missing, schema=None) -> dict:
         return {d.dataset: d}
     if not isinstance(spec, dict) or not spec:
         raise DeclError(
-            "output= is one dataset — a path, or an tyke.data(...) declared above — or a "
+            "output= is one dataset — a path, or an iv.data(...) declared above — or a "
             'dict of {name: dataset} naming several: output={"ratings": XPM, '
             '"summary": XPM_SUMMARY}. The names are the keys the body returns.')
     return {k: _dataset(v, ext, allow_missing) for k, v in spec.items()}
@@ -190,13 +190,13 @@ def _fixed(part, dataset) -> tuple:
 def _dataset(v, ext, allow_missing, schema=None) -> Dataset:
     if isinstance(v, Dataset):
         if schema is not None:
-            raise DeclError(f"{v.dataset}: schema= belongs on its tyke.dataset declaration.")
+            raise DeclError(f"{v.dataset}: schema= belongs on its iv.dataset declaration.")
         return Dataset(_decl._canon(v.dataset), v.ext, v.allow_missing, v.part, v.why,
                        v.schema, v.standalone)
     if isinstance(v, Source):
         raise DeclError(
             f"{v.dataset} was declared a source — something outside this pipeline puts it "
-            f"there — so no stage here writes it. Declare it with tyke.data(...) instead.")
+            f"there — so no stage here writes it. Declare it with iv.data(...) instead.")
     d = _decl._canon(v)
     return Dataset(d, ext, allow_missing, schema=schema_contract(schema, ext, d))
 
@@ -212,7 +212,7 @@ class Source:
         self.__name__ = self.dataset.rstrip("/").rsplit("/", 1)[-1]
 
     def __repr__(self) -> str:
-        return f"<tyke source {self.dataset}>"
+        return f"<iv source {self.dataset}>"
 
 
 class Asset:
@@ -247,7 +247,7 @@ class Asset:
             raise DeclError(
                 f"{self.primary}: split=True means the body computes every partition at "
                 f"once and returns {{partition: value}}, so it needs a partition key — "
-                f"@tyke.step(..., part='season', split=True).")
+                f"@iv.step(..., part='season', split=True).")
         if split and len(self.part_keys or ()) != 1:
             raise DeclError(f"{self.primary}: split=True currently requires one partition key.")
         self.universe = _universe(universe, self.primary, self.part_keys, split)
@@ -297,7 +297,7 @@ class Asset:
                 f"returns it under — {self.__name__}[{sorted(self.outputs)[0]!r}], one of "
                 f"{sorted(self.outputs)} — or, better where the read is far from here, "
                 f"declare it above so the read can name the DATASET: "
-                f"X = tyke.data('...', why='...'), then output={{...}} and tyke.all_of(X, ...). "
+                f"X = iv.data('...', why='...'), then output={{...}} and iv.all_of(X, ...). "
                 f"A key means something only next to the dict it is a key of.")
         return self.primary
 
@@ -337,7 +337,7 @@ class Asset:
 
     def __repr__(self) -> str:
         p = f", part={self.part_keys or self.fixed_part!r}" if (self.part_keys or self.fixed_part) else ""
-        return f"<tyke stage {', '.join(self.datasets)}{p}>"
+        return f"<iv stage {', '.join(self.datasets)}{p}>"
 
 
     @property
@@ -399,22 +399,22 @@ class Asset:
         return self.why_stale(*args, **kwargs) is None
 
     def __call__(self, *args, **kwargs):
-        tyke = self.pipeline
-        if tyke._in_step:
+        iv = self.pipeline
+        if iv._in_step:
             raise DeclError(
                 f"{self.primary} was called from inside another stage. Building one stage "
                 f"from within another puts it outside the graph, so nothing orders the two "
-                f"and `tyke status` cannot see the edge. Declare it as an upstream instead: "
-                f"x=tyke.all_of({self.primary!r}, why='...').")
+                f"and `iv status` cannot see the edge. Declare it as an upstream instead: "
+                f"x=iv.all_of({self.primary!r}, why='...').")
         part = self._part(args, kwargs)
-        stale = self.why_stale(*args, **kwargs) if self.may_skip and not tyke.force else None
+        stale = self.why_stale(*args, **kwargs) if self.may_skip and not iv.force else None
         return self._invoke(part, stale)
 
     def _invoke(self, part: dict | None, stale: str | None):
-        tyke = self.pipeline
+        iv = self.pipeline
         if part is None:
             part = self._part((), {})
-        if self.may_skip and not tyke.force and stale is None:
+        if self.may_skip and not iv.force and stale is None:
             return self.load(part) if self.single and not self.split else False
         self.build(part)
         if self.acts_only:
@@ -429,19 +429,19 @@ class Asset:
                 f"{dict(self.fixed_part) if self.fixed_part else list(self.part_keys)} "
                 f"but was built with no partition. The shard would land unpartitioned "
                 f"beside the real ones, where the next read cannot find it.")
-        tyke = self.pipeline
-        tyke._fresh_scope()
-        prev = (tyke._part, tyke._in_step, tyke._node, tyke._inputs, tyke._outputs,
-                tyke._declared_externals)
-        tyke._part, tyke._in_step = part, True
-        tyke._node = tyke._node_name(self.fn)
-        tyke._inputs, tyke._outputs = self.triples(), self.datasets
-        tyke._declared_externals = self.externals
+        iv = self.pipeline
+        iv._fresh_scope()
+        prev = (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs,
+                iv._declared_externals)
+        iv._part, iv._in_step = part, True
+        iv._node = iv._node_name(self.fn)
+        iv._inputs, iv._outputs = self.triples(), self.datasets
+        iv._declared_externals = self.externals
         try:
             kw = self._resolve(part)
             if self.wants_out:
                 o = next(iter(self.outputs.values()))
-                with tyke.writes(o.dataset, why=self.why, part=part, ext=o.ext,
+                with iv.writes(o.dataset, why=self.why, part=part, ext=o.ext,
                                allow_missing=o.allow_missing) as staged:
                     kw[OUT_PARAM] = staged
                     self.fn(**kw)
@@ -467,9 +467,9 @@ class Asset:
             else:
                 self._commit_many(value, part)
         finally:
-            (tyke._part, tyke._in_step, tyke._node, tyke._inputs, tyke._outputs,
-             tyke._declared_externals) = prev
-            tyke._fresh_scope()
+            (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs,
+             iv._declared_externals) = prev
+            iv._fresh_scope()
 
     def _commit(self, o: Dataset, value, part) -> None:
         part = dict(o.part) if o.part else part
@@ -539,7 +539,7 @@ class Asset:
 
 
         from .core import _resolve_sel
-        tyke = self.pipeline
+        iv = self.pipeline
         params = inspect.signature(self.fn).parameters
         kw: dict = {}
         if self.part_keys and part:
@@ -547,7 +547,7 @@ class Asset:
                 if key in params:
                     kw[key] = part[key]
         for name, r in self.by_param.items():
-            paths = tyke.reads(r.dataset, why=r.why,
+            paths = iv.reads(r.dataset, why=r.why,
                              where=_resolve_sel(r.sel(), part, r.dataset),
                              optional=r.optional, update_file_on_disk=r.is_own)
             if r.as_paths:
@@ -559,10 +559,10 @@ class Asset:
     def load(self, part: dict | None = None):
 
 
-        tyke = self.pipeline
+        iv = self.pipeline
         o = next(iter(self.outputs.values()))
-        with tyke.bookkeeping():
-            live = _sh.current_shards(tyke.resolve_out(o.dataset))
+        with iv.bookkeeping():
+            live = _sh.current_shards(iv.resolve_out(o.dataset))
             got = live.get(_sh.encode_part(part if part is not None else self.fixed_part))
             if got is None:
                 if o.allow_missing:
@@ -572,7 +572,7 @@ class Asset:
                     f"{_sh.encode_part(part) or '(one shard)'} — it was not built.")
             if _sh.is_empty(got):
                 return None
-            tyke._validate_schema(o.dataset, [got])
+            iv._validate_schema(o.dataset, [got])
             return load_value([got.path], got.ext)
 
     def universe_parts(self) -> list[dict] | None:
@@ -584,7 +584,7 @@ class Asset:
             raise DeclError(
                 f"{self.primary}: universe= could not enumerate its partitions: {e}. "
                 "If an old shard no longer matches the dataset's partition layout, run "
-                "`tyke gc DATASET --partition-key KEY` to inspect and drop it.") from e
+                "`iv gc DATASET --partition-key KEY` to inspect and drop it.") from e
         out = []
         for v in values:
             if isinstance(v, dict):
@@ -604,7 +604,7 @@ class Asset:
             raise DeclError(
                 f"{self.primary} is not built one partition at a time, so there is "
                 f"nothing to iterate. Declare part='season' without split=.")
-        tyke = self.pipeline
+        iv = self.pipeline
         if over is None:
             over = self.universe_parts()
             if over is None:
@@ -613,7 +613,7 @@ class Asset:
                     f"declared universe=, and this stage declares none.")
         want = [self._coerce_part(p) for p in over]
         rebuild = [p for p in want
-                   if tyke.force or not self.may_skip or self.why_stale(**p) is not None]
+                   if iv.force or not self.may_skip or self.why_stale(**p) is not None]
         for p in rebuild:
             self.build(p)
         return [p[self.part_keys[0]] for p in rebuild] if len(self.part_keys) == 1 else rebuild

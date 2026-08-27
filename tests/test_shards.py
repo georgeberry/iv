@@ -7,8 +7,8 @@ import hashlib
 import polars as pl
 import pytest
 
-from tyke import shards as sh
-from tyke.errors import DeclError, StateError
+from iv import shards as sh
+from iv.errors import DeclError, StateError
 
 
 def dg(tag: str) -> str:

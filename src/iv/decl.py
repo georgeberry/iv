@@ -30,9 +30,9 @@ def _target(dataset) -> str:
     if not isinstance(named, str):
         raise DeclError(
             f"a read names a DECLARED dataset, not a path: {dataset!r}. Every dataset is "
-            f"declared exactly once — one this pipeline writes, named in a @tyke.step's "
-            f"output= or declared on its own with tyke.data(...), one that arrives from "
-            f"outside with tyke.source(...) — and read by naming that "
+            f"declared exactly once — one this pipeline writes, named in a @iv.step's "
+            f"output= or declared on its own with iv.data(...), one that arrives from "
+            f"outside with iv.source(...) — and read by naming that "
             f"declaration. A path written a second time is a path a rename can get half "
             f"of, and one the graph cannot tell from a typo.")
     return _canon(named)
@@ -83,7 +83,7 @@ class Read:
             raise DeclError(
                 f"{self.dataset} is read relative to the partition being built, but the "
                 f"stage declares no part=. A partition-relative selector only means "
-                f"something where there is a partition: @tyke.step(..., part='season').")
+                f"something where there is a partition: @iv.step(..., part='season').")
         if self.kind == "range" and self.key is None and len(part_keys) != 1:
             raise DeclError(
                 f"{self.dataset} is a range relative to a multi-partition stage. Name "
@@ -110,9 +110,9 @@ class Read:
                 "overwrite, and this stage writes several — name which. It cannot name "
                 "the stage, which does not exist yet where the default is evaluated, so "
                 "the output has to be declared above and named here:\n"
-                "    BOX = tyke.data('raw/box/', why='...')\n"
-                "    @tyke.step(output={'box': BOX, 'pbp': PBP}, why='...')\n"
-                "    def patch(was=tyke.own_last_copy(BOX, why='the copy this amends')):")
+                "    BOX = iv.data('raw/box/', why='...')\n"
+                "    @iv.step(output={'box': BOX, 'pbp': PBP}, why='...')\n"
+                "    def patch(was=iv.own_last_copy(BOX, why='the copy this amends')):")
         return Read(own, self.kind, self.body, self.optional, self.key, self.why,
                     self.as_paths, self.preserve)
 

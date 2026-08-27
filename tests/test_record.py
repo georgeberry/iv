@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tyke import record
-from tyke.errors import StateError
+from iv import record
+from iv.errors import StateError
 
 
 def recorder(path, *, depth=0):
@@ -20,11 +20,11 @@ def recorder(path, *, depth=0):
 
 def test_emit_writes_a_versioned_json_event(tmp_path, monkeypatch):
     path = tmp_path / "nested" / "trace.jsonl"
-    tyke = recorder(path)
+    iv = recorder(path)
     monkeypatch.setattr(record.time, "time", lambda: 12.3456)
     monkeypatch.setattr(record.os, "getpid", lambda: 42)
 
-    record.emit(tyke, "built", output=tmp_path / "result")
+    record.emit(iv, "built", output=tmp_path / "result")
 
     event = json.loads(path.read_text())
     assert event == {

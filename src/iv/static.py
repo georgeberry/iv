@@ -60,7 +60,7 @@ class Node:
         return self.of("external")
 
 
-def undefined_names(tyke) -> list[str] | None:
+def undefined_names(iv) -> list[str] | None:
     try:
         from pyflakes.api import check as _pf_check
         from pyflakes.reporter import Reporter
@@ -68,16 +68,16 @@ def undefined_names(tyke) -> list[str] | None:
         return None
     import io
     out, err = io.StringIO(), io.StringIO()
-    for project, f in _sources(tyke):
+    for project, f in _sources(iv):
         _pf_check(f.read_text(), str(f.relative_to(project)), Reporter(out, err))
     return [l for l in out.getvalue().splitlines() if "undefined name" in l]
 
 
-def _sources(tyke):
+def _sources(iv):
 
 
-    project = Path(tyke.project or Path.cwd())
-    for d in tyke.code:
+    project = Path(iv.project or Path.cwd())
+    for d in iv.code:
         base = project / d
         if not base.exists():
             continue
@@ -108,12 +108,12 @@ def _imported_modules(path: Path) -> set[str]:
     return out
 
 
-def missing_imports(tyke) -> list[str]:
+def missing_imports(iv) -> list[str]:
 
 
-    tops = {d.split("/")[0].removesuffix(".py") for d in tyke.code}
+    tops = {d.split("/")[0].removesuffix(".py") for d in iv.code}
     bad = []
-    for project, f in _sources(tyke):
+    for project, f in _sources(iv):
         node = str(f.relative_to(project))
         for mod in sorted(_imported_modules(f)):
             if mod.split(".")[0] not in tops:
