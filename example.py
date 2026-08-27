@@ -391,8 +391,8 @@ run("one of the fit's four outputs is deleted")
 tree()
 
 
-from iv import graph as _graph  # noqa: E402
-from iv import render as _render  # noqa: E402
+from iv import graph as _graph
+from iv import render as _render
 
 print("\n\n=== the graph, from the declarations alone ===\n")
 g = _graph.build(iv)

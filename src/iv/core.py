@@ -109,7 +109,7 @@ def _check_declared(target, probe: str | None = None) -> None:
 
 def _declared_external(s: str) -> bool:
     for iv in _ACTIVE:
-        for name, _why in iv._declared_externals:
+        for name, _reason in iv._declared_externals:
             if "://" in name and (s == name.rstrip("/")
                                   or s.startswith(name.rstrip("/") + "/")):
                 return True

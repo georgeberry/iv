@@ -10,8 +10,6 @@ dependencies = []
 lint = [
     "pyflakes>=3",
 ]
-# The default fingerprint strategy hashes the DATA, not the bytes, so it needs a
-# dataframe library. Everything else in the core is stdlib.
 data = ["polars>=1.0"]
 cli = ["typer>=0.12"]
 viz = ["networkx>=3.0", "matplotlib>=3.8"]
@@ -19,8 +17,6 @@ dev = ["polars>=1.0", "typer>=0.12", "networkx>=3.0", "matplotlib>=3.8",
        "pytest>=8.0", "cloudpathlib>=0.18", "pyflakes>=3"]
 
 [project.scripts]
-# `iv` is the command. It matches what the instance is conventionally called in code,
-# and it is what you actually type twenty times an hour.
 iv = "iv.cli:app"
 
 [build-system]
@@ -32,8 +28,4 @@ packages = ["src/iv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Five tests reuse `run` from `tests.test_partition` rather than copying a helper that
-# would then drift. That import needs the project root importable, which pytest does not
-# do on its own once `tests/` has no `__init__.py` — and it should not have one, because a
-# package there changes how conftest is resolved.
 pythonpath = ["."]

@@ -4,11 +4,11 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt             # noqa: E402
-import networkx as nx                       # noqa: E402
+import matplotlib.pyplot as plt
+import networkx as nx
 
-from .errors import IvError          # noqa: E402
-from .graph import _overlaps        # noqa: E402
+from .errors import IvError
+from .graph import _overlaps
 
 
 def to_networkx(g) -> nx.DiGraph:

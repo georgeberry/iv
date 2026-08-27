@@ -113,7 +113,7 @@ def test_removing_a_handed_back_shard_outside_a_stage_is_allowed(iv):
 
 
 def test_removing_a_tree_path_inside_a_stage_is_refused(iv):
-    d = seeded(iv)
+    seeded(iv)
     shard = iv.reads("raw/feed/", why="declared")[0]
 
     @iv.data(dataset="processed/out/", why="deletes behind iv's back")

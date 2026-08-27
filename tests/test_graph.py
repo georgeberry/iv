@@ -68,7 +68,7 @@ def test_a_cycle_cannot_be_written(iv):
 
     with pytest.raises(NameError):
         @iv.data(dataset="processed/b/", why="b")
-        def b(x=iv.all_of(later_stage, why="not defined yet")):   # noqa: F821
+        def b(x=iv.all_of(eval("later_stage"), why="not defined yet")):
             return x
 
 
