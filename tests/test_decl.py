@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from iv import decl
-from iv.errors import DeclError
-from iv.decl import PART
+from tyke import decl
+from tyke.errors import DeclError
+from tyke.decl import PART
 
 
 class _Declared:

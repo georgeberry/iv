@@ -3,81 +3,81 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from iv.core import Pipeline
+from tyke.core import Pipeline
 
 
 @pytest.fixture
-def iv(tmp_path, monkeypatch):
-    for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
+def tyke(tmp_path, monkeypatch):
+    for var in ("TYKE_TRACE", "TYKE_FORCE", "TYKE_STAGE"):
         monkeypatch.delenv(var, raising=False)
     return Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
                     project=tmp_path)
 
 
-def _pages(iv, seed, produced, seen):
-    @iv.data(dataset="derived/pages/", part="player", split=True, ext=".html",
+def _pages(tyke, seed, produced, seen):
+    @tyke.data(dataset="derived/pages/", part="player", split=True, ext=".html",
              why="one cached page per player", external={"site": "the pages"},
              version=1)
-    def pages(s=iv.all_of(seed, why="an upstream that moves the key"),
-              have=iv.own_last_copy(as_paths=True, why="what a previous run fetched")):
+    def pages(s=tyke.all_of(seed, why="an upstream that moves the key"),
+              have=tyke.own_last_copy(as_paths=True, why="what a previous run fetched")):
         seen.append(sorted(str(x).rsplit("/", 1)[-1].split(".")[0] for x in (have or ())))
         return dict(produced)
 
     return pages
 
 
-def _write_seed(iv, n):
-    with iv.writes("raw/seed/", why="an upstream feed") as out:
+def _write_seed(tyke, n):
+    with tyke.writes("raw/seed/", why="an upstream feed") as out:
         pl.DataFrame({"n": [n]}).write_parquet(out)
 
 
-def _seed(iv, n):
-    _write_seed(iv, n)
-    return iv.source("raw/seed/", why="an upstream feed")
+def _seed(tyke, n):
+    _write_seed(tyke, n)
+    return tyke.source("raw/seed/", why="an upstream feed")
 
 
-def _parts(iv):
+def _parts(tyke):
     return sorted(p.name.split(".")[0] for p in
-                  (iv.resolve_out("derived/pages/")).glob("*.html"))
+                  (tyke.resolve_out("derived/pages/")).glob("*.html"))
 
 
-def test_split_keeps_partitions_it_did_not_return(iv):
-    seed = _seed(iv, 1)
+def test_split_keeps_partitions_it_did_not_return(tyke):
+    seed = _seed(tyke, 1)
     produced, seen = {"a": "AAA"}, []
-    pages = _pages(iv, seed, produced, seen)
+    pages = _pages(tyke, seed, produced, seen)
     pages.build(None)
-    assert _parts(iv) == ["player=a"]
+    assert _parts(tyke) == ["player=a"]
 
     produced.clear()
     produced["b"] = "BBB"
-    _write_seed(iv, 2)
+    _write_seed(tyke, 2)
     pages.build(None)
 
-    assert _parts(iv) == ["player=a", "player=b"]
+    assert _parts(tyke) == ["player=a", "player=b"]
     assert seen[-1] == ["player=a"]
 
 
-def test_an_empty_page_is_a_committed_shard_not_an_absence(iv):
-    seed = _seed(iv, 1)
-    pages = _pages(iv, seed, {"gone": ""}, [])
+def test_an_empty_page_is_a_committed_shard_not_an_absence(tyke):
+    seed = _seed(tyke, 1)
+    pages = _pages(tyke, seed, {"gone": ""}, [])
     pages.build(None)
 
-    shard = next((iv.resolve_out("derived/pages/")).glob("*.html"))
+    shard = next((tyke.resolve_out("derived/pages/")).glob("*.html"))
     assert shard.stat().st_size == 0
     assert shard.name.split(".")[0] == "player=gone"
-    assert iv.verify("derived/pages/") == []
+    assert tyke.verify("derived/pages/") == []
 
 
-def test_verify_does_not_read_a_html_dataset_as_parquet(iv):
-    seed = _seed(iv, 1)
-    pages = _pages(iv, seed, {"a": "AAA", "b": "BB"}, [])
+def test_verify_does_not_read_a_html_dataset_as_parquet(tyke):
+    seed = _seed(tyke, 1)
+    pages = _pages(tyke, seed, {"a": "AAA", "b": "BB"}, [])
     pages.build(None)
 
-    assert iv.verify("derived/pages/") == []
+    assert tyke.verify("derived/pages/") == []
 
 
 def test_a_pipeline_is_usable_by_the_guard_during_its_own_init(tmp_path):
-    import iv.core as core
+    import tyke.core as core
 
     seen = []
     real = core._check_declared
@@ -89,15 +89,15 @@ def test_a_pipeline_is_usable_by_the_guard_during_its_own_init(tmp_path):
     assert core._ACTIVE[-1]._in_step is False
 
 
-def test_split_returning_nothing_new_keeps_every_shard(iv):
-    seed = _seed(iv, 1)
+def test_split_returning_nothing_new_keeps_every_shard(tyke):
+    seed = _seed(tyke, 1)
     produced, seen = {"a": "AAA"}, []
-    pages = _pages(iv, seed, produced, seen)
+    pages = _pages(tyke, seed, produced, seen)
     pages.build(None)
 
     produced.clear()
-    _write_seed(iv, 2)
+    _write_seed(tyke, 2)
     pages.build(None)
 
-    assert _parts(iv) == ["player=a"]
-    assert iv.verify("derived/pages/") == []
+    assert _parts(tyke) == ["player=a"]
+    assert tyke.verify("derived/pages/") == []

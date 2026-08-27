@@ -7,18 +7,18 @@ import json
 import polars as pl
 import pytest
 
-from iv import Pipeline
-from iv import graph as _graph
-from iv import shards as _sh
-from iv import web as _web
-from iv.cli import _downstream_of, _staleness
+from tyke import Pipeline
+from tyke import graph as _graph
+from tyke import shards as _sh
+from tyke import web as _web
+from tyke.cli import _downstream_of, _staleness
 
-_viz = pytest.importorskip("iv.viz", reason="needs the viz extra: networkx")
+_viz = pytest.importorskip("tyke.viz", reason="needs the viz extra: networkx")
 
 
 @pytest.fixture
-def iv(tmp_path, monkeypatch):
-    for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
+def tyke(tmp_path, monkeypatch):
+    for var in ("TYKE_TRACE", "TYKE_FORCE", "TYKE_STAGE"):
         monkeypatch.delenv(var, raising=False)
     return Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
                        project=tmp_path)
@@ -29,40 +29,40 @@ def frame():
 
 
 @pytest.fixture
-def built(iv):
+def built(tyke):
 
 
-    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+    feed = tyke.source("raw/feed/", why="a fetcher drops it here")
 
-    @iv.data(dataset="processed/box/", why="one season", part="season")
-    def box(season, f=iv.all_of(feed, why="the feed")):
+    @tyke.data(dataset="processed/box/", why="one season", part="season")
+    def box(season, f=tyke.all_of(feed, why="the feed")):
         return frame()
 
-    @iv.data(dataset="processed/preds/", part={"completed": "true"},
+    @tyke.data(dataset="processed/preds/", part={"completed": "true"},
              why="games already played")
-    def played(b=iv.all_of(box, why="the box")):
+    def played(b=tyke.all_of(box, why="the box")):
         return frame()
 
-    @iv.data(dataset="processed/preds/", part={"completed": "false"},
+    @tyke.data(dataset="processed/preds/", part={"completed": "false"},
              why="games not yet played")
-    def upcoming(b=iv.all_of(box, why="the box")):
+    def upcoming(b=tyke.all_of(box, why="the box")):
         return frame()
 
-    @iv.data(dataset="dump/site/", why="the app reads it")
-    def site(p=iv.all_of(played, why="both halves")):
+    @tyke.data(dataset="dump/site/", why="the app reads it")
+    def site(p=tyke.all_of(played, why="both halves")):
         return frame()
 
-    with iv.writes("raw/feed/", why="out of band") as out:
+    with tyke.writes("raw/feed/", why="out of band") as out:
         frame().write_parquet(out)
     box.for_each(["2023", "2024"])
     played(); upcoming(); site()
-    return iv
+    return tyke
 
 
-def load(iv):
-    g = _graph.build(iv)
+def load(tyke):
+    g = _graph.build(tyke)
     with _sh.snapshot():
-        state = _staleness(iv, g)
+        state = _staleness(tyke, g)
         maybe = _downstream_of(g, state)
     return g, state, maybe, _web.payload(g, _viz.states(state, maybe), state, maybe)
 
@@ -130,20 +130,20 @@ def test_upstream_and_downstream_are_reachable_from_the_edges(built):
     assert len(p["nodes"]) == _viz.to_networkx(g).number_of_nodes()
 
 
-def test_every_declared_edge_is_drawn_and_reduce_drops_the_implied_ones(iv):
+def test_every_declared_edge_is_drawn_and_reduce_drops_the_implied_ones(tyke):
 
 
-    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+    feed = tyke.source("raw/feed/", why="a fetcher drops it here")
 
-    @iv.data(dataset="processed/mid/", why="the middle")
-    def mid(f=iv.all_of(feed, why="the feed")):
+    @tyke.data(dataset="processed/mid/", why="the middle")
+    def mid(f=tyke.all_of(feed, why="the feed")):
         return frame()
 
-    @iv.data(dataset="processed/end/", why="reads both, so feed->end is implied")
-    def end(f=iv.all_of(feed, why="the feed"), m=iv.all_of(mid, why="the middle")):
+    @tyke.data(dataset="processed/end/", why="reads both, so feed->end is implied")
+    def end(f=tyke.all_of(feed, why="the feed"), m=tyke.all_of(mid, why="the middle")):
         return frame()
 
-    g = _graph.build(iv)
+    g = _graph.build(tyke)
     assert _viz.to_networkx(g).number_of_edges() == 3
     assert len(_web.payload(g)["edges"]) == 3, "every declared read is drawn"
     assert len(_web.payload(g, reduce=True)["edges"]) == 2, "feed -> end is implied"
@@ -194,35 +194,35 @@ def test_every_edge_points_right(built):
             f"{e['source']} -> {e['target']} does not point right"
 
 
-def test_outputs_of_one_stage_share_a_column(iv):
+def test_outputs_of_one_stage_share_a_column(tyke):
 
 
-    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+    feed = tyke.source("raw/feed/", why="a fetcher drops it here")
 
-    @iv.step(output={"a": "processed/a/", "b": "processed/b/", "c": "processed/c/"},
+    @tyke.step(output={"a": "processed/a/", "b": "processed/b/", "c": "processed/c/"},
              why="one fit, three tables")
-    def fit(f=iv.all_of(feed, why="the feed")):
+    def fit(f=tyke.all_of(feed, why="the feed")):
         return {"a": frame(), "b": frame(), "c": frame()}
 
-    p = _web.payload(_graph.build(iv))
+    p = _web.payload(_graph.build(tyke))
     xs = {n["position"]["x"] for n in p["nodes"] if n["dataset"] != "raw/feed/"}
     assert len(xs) == 1, "three outputs of one stage, three columns"
 
 
-def test_a_column_is_as_wide_as_its_own_longest_label(iv):
+def test_a_column_is_as_wide_as_its_own_longest_label(tyke):
 
 
-    feed = iv.source("raw/x/", why="short name")
+    feed = tyke.source("raw/x/", why="short name")
 
-    @iv.data(dataset="processed/a_very_long_dataset_name_indeed/", why="long")
-    def long_one(f=iv.all_of(feed, why="the feed")):
+    @tyke.data(dataset="processed/a_very_long_dataset_name_indeed/", why="long")
+    def long_one(f=tyke.all_of(feed, why="the feed")):
         return frame()
 
-    @iv.data(dataset="processed/b/", why="short")
-    def short_one(f=iv.all_of(long_one, why="the long one")):
+    @tyke.data(dataset="processed/b/", why="short")
+    def short_one(f=tyke.all_of(long_one, why="the long one")):
         return frame()
 
-    at = {n["dataset"]: n["position"]["x"] for n in _web.payload(_graph.build(iv))["nodes"]}
+    at = {n["dataset"]: n["position"]["x"] for n in _web.payload(_graph.build(tyke))["nodes"]}
     wide = at["processed/b/"] - at["processed/a_very_long_dataset_name_indeed/"]
     narrow = at["processed/a_very_long_dataset_name_indeed/"] - at["raw/x/"]
     assert wide > narrow, "the long name's own column pays for it, not the one before"
@@ -236,23 +236,23 @@ def test_the_page_needs_only_a_renderer(built, tmp_path):
     assert "dagre" not in text
 
 
-def test_the_panel_lists_the_reads_the_code_declares_not_the_drawn_ones(iv):
+def test_the_panel_lists_the_reads_the_code_declares_not_the_drawn_ones(tyke):
 
 
-    feed = iv.source("raw/feed/", why="a fetcher drops it here")
+    feed = tyke.source("raw/feed/", why="a fetcher drops it here")
 
-    @iv.data(dataset="processed/mid/", why="the middle")
-    def mid(f=iv.all_of(feed, why="the feed")):
+    @tyke.data(dataset="processed/mid/", why="the middle")
+    def mid(f=tyke.all_of(feed, why="the feed")):
         return frame()
 
-    @iv.data(dataset="processed/end/", why="reads both")
-    def end(f=iv.all_of(feed, why="the feed"), m=iv.all_of(mid, why="the middle")):
+    @tyke.data(dataset="processed/end/", why="reads both")
+    def end(f=tyke.all_of(feed, why="the feed"), m=tyke.all_of(mid, why="the middle")):
         return frame()
 
-    p = _web.payload(_graph.build(iv))
+    p = _web.payload(_graph.build(tyke))
     node, = [n for n in p["nodes"] if n["dataset"] == "processed/end/"]
     assert node["reads"] == ["processed/mid/", "raw/feed/"]
-    r = _web.payload(_graph.build(iv), reduce=True)
+    r = _web.payload(_graph.build(tyke), reduce=True)
     assert len(r["edges"]) == 2, "the drawn edge is dropped under --reduce"
     assert [n for n in r["nodes"] if n["dataset"] == "processed/end/"][0]["reads"] == \
         ["processed/mid/", "raw/feed/"], "but the panel still says what the code declares"

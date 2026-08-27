@@ -6,8 +6,8 @@ from types import ModuleType
 
 import pytest
 
-from iv import paths
-from iv.errors import ConfigError
+from tyke import paths
+from tyke.errors import ConfigError
 
 
 def test_mkpath_preserves_path_objects_and_resolves_local_strings(tmp_path):

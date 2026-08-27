@@ -75,41 +75,41 @@ def _check_declared(target, probe: str | None = None) -> None:
     s = _path_text(target)
     if s is None:
         return
-    for iv in _ACTIVE:
-        if s in iv._handed_out or iv._depth:
+    for tyke in _ACTIVE:
+        if s in tyke._handed_out or tyke._depth:
             return
-    for iv in _ACTIVE:
-        for base in (iv.out_tree, iv.tree):
+    for tyke in _ACTIVE:
+        for base in (tyke.out_tree, tyke.tree):
             if not _in_tree(s, base):
                 continue
             if probe is not None and not any(x._in_step for x in _ACTIVE):
                 return
             if probe is None:
                 raise DeclError(
-                    f"{s} is inside the data tree but was not handed back by iv.reads(). "
+                    f"{s} is inside the data tree but was not handed back by tyke.reads(). "
                     f"An undeclared read is absent from the graph and from the recorded "
                     f"inputs, so its source can change and this will never rebuild. "
-                    f"Declare it: iv.reads('<dataset>/', why='...').")
+                    f"Declare it: tyke.reads('<dataset>/', why='...').")
             raise DeclError(
                 f"{s}.{probe}() asks the data tree a question about a path nobody "
                 f"declared. A probe IS a read: branching on it lets a moved or missing "
                 f"dataset come back as silently empty instead of rebuilding, which is "
                 f"the failure declaring is meant to stop. Read it through the stage: "
-                f"iv.reads('<dataset>/', why='...'), or pass optional=True and branch "
+                f"tyke.reads('<dataset>/', why='...'), or pass optional=True and branch "
                 f"on what came back.")
     if any(x._in_step for x in _ACTIVE) and "://" in s and not _declared_external(s):
         what = f"{s}.{probe}()" if probe else s
         raise DeclError(
             f"{what} reaches remote storage outside every declared tree. Cloud storage "
             f"holds data, so a read of it belongs in the graph wherever it lives: "
-            f"declare it with iv.source('<dataset>/', why='...') and read it through "
+            f"declare it with tyke.source('<dataset>/', why='...') and read it through "
             f"the stage. Undeclared, it can move or empty without anything rebuilding, "
             f"and the run has no record of what it actually read.")
 
 
 def _declared_external(s: str) -> bool:
-    for iv in _ACTIVE:
-        for name, _reason in iv._declared_externals:
+    for tyke in _ACTIVE:
+        for name, _reason in tyke._declared_externals:
             if "://" in name and (s == name.rstrip("/")
                                   or s.startswith(name.rstrip("/") + "/")):
                 return True
@@ -122,40 +122,40 @@ def _check_write(target, removing: bool = False) -> None:
     s = _path_text(target)
     if s is None:
         return
-    for iv in _ACTIVE:
-        if iv._depth or s in iv._staged:
+    for tyke in _ACTIVE:
+        if tyke._depth or s in tyke._staged:
             return
-    for iv in _ACTIVE:
-        if s in iv._handed_out and not removing:
+    for tyke in _ACTIVE:
+        if s in tyke._handed_out and not removing:
             raise DeclError(
-                f"{s} was handed back by iv.reads() and is being written to. A shard's "
+                f"{s} was handed back by tyke.reads() and is being written to. A shard's "
                 f"name is a fingerprint of its contents, so overwriting one in place makes "
-                f"the name a lie that nothing can detect. Write through iv.writes().")
-        if iv._in_step and "://" in s and not _declared_external(s) and not any(
-                _in_tree(s, base) for base in (iv.out_tree, iv.tree)):
+                f"the name a lie that nothing can detect. Write through tyke.writes().")
+        if tyke._in_step and "://" in s and not _declared_external(s) and not any(
+                _in_tree(s, base) for base in (tyke.out_tree, tyke.tree)):
             raise DeclError(
                 f"{s} is remote storage outside every declared tree and is being written "
                 f"from inside a stage. A write that lands outside the graph has no "
                 f"declared output and nothing downstream can key on it. Declare it as an "
                 f"output, or as external= if it leaves the pipeline for good.")
-        if iv._in_step and any(_in_tree(s, base) for base in (iv.out_tree, iv.tree)):
+        if tyke._in_step and any(_in_tree(s, base) for base in (tyke.out_tree, tyke.tree)):
             raise DeclError(
-                f"{s} is inside the data tree and is being written outside iv.writes(). "
+                f"{s} is inside the data tree and is being written outside tyke.writes(). "
                 f"A direct write has no declared output, staged commit, or fingerprinted "
-                f"name. Write it through iv.writes(...), or write outside the data tree.")
+                f"name. Write it through tyke.writes(...), or write outside the data tree.")
 
 
 @contextmanager
 def _internal_io():
 
     with ExitStack() as stack:
-        for iv in _ACTIVE:
-            stack.enter_context(iv.bookkeeping())
+        for tyke in _ACTIVE:
+            stack.enter_context(tyke.bookkeeping())
         yield
 
 
 def _stage_is_running() -> bool:
-    return any(iv._in_step and not iv._depth for iv in _ACTIVE)
+    return any(tyke._in_step and not tyke._depth for tyke in _ACTIVE)
 
 
 class Pipeline:
@@ -549,7 +549,7 @@ class Pipeline:
                 raise DeclError(
                     f"{name} is read with a where= this cannot read without running the "
                     f"stage, so the shard's key cannot be computed and nothing can decide "
-                    f"whether to skip. Selectors have to be data: a literal, or iv.PART for "
+                    f"whether to skip. Selectors have to be data: a literal, or tyke.PART for "
                     f"the partition being built.")
             live = _sh.current_shards(self.resolve(name))
             try:
@@ -728,8 +728,8 @@ class Pipeline:
         _why(why, _canon(dataset) if isinstance(dataset, str) else str(dataset))
         if isinstance(dataset, dict):
             raise DeclError(
-                "@iv.data builds ONE dataset and its body returns that dataset's "
-                "contents. For several — one fit, six tables — @iv.step(output=...) "
+                "@tyke.data builds ONE dataset and its body returns that dataset's "
+                "contents. For several — one fit, six tables — @tyke.step(output=...) "
                 "takes the dict and the body returns one keyed by the same names.")
 
         def declared(fn: Callable) -> _assets.Asset:
@@ -750,7 +750,7 @@ class Pipeline:
                 f"{self._sources[src.dataset].why!r}. A dataset is declared once.")
         if src.dataset in self._datasets:
             raise DeclError(
-                f"{src.dataset} was declared with iv.data(...) — a dataset this pipeline "
+                f"{src.dataset} was declared with tyke.data(...) — a dataset this pipeline "
                 f"writes — so it does not arrive from outside. It is one or the other.")
         if src.dataset in self._assets:
             raise DeclError(
@@ -793,7 +793,7 @@ class Pipeline:
             if known is not None and output.schema is not None and known != output.schema:
                 raise DeclError(
                     f"{output.dataset} has conflicting declared schemas. A dataset has one "
-                    f"contract, so declare it once with iv.dataset(..., schema=...).")
+                    f"contract, so declare it once with tyke.dataset(..., schema=...).")
         self._assets[self._node_name(asset.fn)] = asset
         for name in asset.datasets:
             self._declared[name] = asset.triples()
@@ -816,8 +816,8 @@ class Pipeline:
         _why(why, "step")
         if output is not None and not isinstance(output, dict):
             raise DeclError(
-                f"@iv.step builds SEVERAL datasets — output= is a dict naming each, and "
-                f"the body returns one keyed the same way. For one, @iv.data(dataset="
+                f"@tyke.step builds SEVERAL datasets — output= is a dict naming each, and "
+                f"the body returns one keyed the same way. For one, @tyke.data(dataset="
                 f"{output!r}) is the same stage with the body returning its contents.")
 
         def declared(fn: Callable) -> _assets.Asset:
@@ -847,7 +847,7 @@ class Pipeline:
         import sys
         if self._node:
             return self._node
-        override = os.environ.get("IV_STAGE")
+        override = os.environ.get("TYKE_STAGE")
         if override:
             return override
         return self._rel_source(sys.argv[0] or "<repl>")
@@ -865,7 +865,7 @@ def _sub_part(where: dict | None, part: dict | None, name: str):
             return v
         if not part or k not in part:
             raise DeclError(
-                f"{name} selects on iv.PART for {k!r}, but this stage is not building a "
+                f"{name} selects on tyke.PART for {k!r}, but this stage is not building a "
                 f"partition keyed on {k!r}. PART stands for the shard being built, so it "
                 f"only means something where there is one.")
         return str(part[k])
@@ -890,7 +890,7 @@ def _resolve_sel(sel, part: dict | None, name: str):
             return v
         if not part or k not in part:
             raise DeclError(
-                f"{name} selects on iv.PART for {k!r}, but this stage is not building a "
+                f"{name} selects on tyke.PART for {k!r}, but this stage is not building a "
                 f"partition keyed on {k!r}. PART stands for the shard being built, so it "
                 f"only means something where there is one.")
         return str(part[k])
@@ -908,12 +908,12 @@ def _span_parts(parts: list[str]) -> str:
 
 
 def _env_force() -> bool:
-    return os.environ.get("IV_FORCE", "").lower() in ("1", "true", "yes")
+    return os.environ.get("TYKE_FORCE", "").lower() in ("1", "true", "yes")
 
 
 def _abs_trace(trace):
     from pathlib import Path
-    t = trace or os.environ.get("IV_TRACE")
+    t = trace or os.environ.get("TYKE_TRACE")
     return Path(t).expanduser().resolve() if t else None
 
 

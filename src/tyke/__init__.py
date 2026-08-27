@@ -4,7 +4,7 @@ from .assets import Asset, Dataset
 from .core import Pipeline
 from .decl import (Read, after_part, all_of, before_part, between, own_last_copy, parts,
                    same_part)
-from .errors import ConfigError, DeclError, IvError, StateError
+from .errors import ConfigError, DeclError, TykeError, StateError
 from .shards import Shard, fingerprint
 
 __version__ = "2.0.0"
@@ -14,5 +14,5 @@ __all__ = [
 
     "all_of", "same_part", "before_part", "after_part", "between", "parts",
     "own_last_copy",
-    "IvError", "ConfigError", "DeclError", "StateError",
+    "TykeError", "ConfigError", "DeclError", "StateError",
 ]
