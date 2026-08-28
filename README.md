@@ -1,5 +1,7 @@
 # iv
 
+![Four agents happily working in separate colorful lanes](assets/iv-agents-in-lanes.jpeg)
+
 `iv` is a small, database-free dependency tracker for Python data pipelines. Stages
 declare what they read and write; `iv` runs only the shards whose declared inputs moved.
 
@@ -22,8 +24,13 @@ uv add "iv[data,cli] @ git+https://github.com/georgeberry/iv"
 pip install "iv[data,cli] @ git+https://github.com/georgeberry/iv"
 ```
 
-Extras are `data` for Polars/Parquet, `cli` for the `iv` command, `viz` for graph images,
-`lint` for preflight source checks, and `dev` for development dependencies.
+Extras are `data` for Polars/Parquet, `cli` for the `iv` command, `cloud` for GCS-backed
+trees and parallel transfers, `viz` for graph images, `lint` for preflight source checks,
+and `dev` for development dependencies. A typical cloud installation is:
+
+```bash
+uv add "iv[data,cli,cloud] @ git+https://github.com/georgeberry/iv"
+```
 
 ## Quick start
 
@@ -125,7 +132,7 @@ explicit `for_each([...])` already name the shards to build and do not need one.
 Use `version=` to invalidate a stage deliberately. Use `schema=` on sources or datasets
 to enforce an exact ordered Polars schema. Supported stored values are DataFrames
 (`.parquet`), JSON-compatible dictionaries/lists (`.json`), picklable values (`.pkl`), and
-strings (`.html` or `.txt`). A stage may accept `out` and write its staged file directly.
+strings (`.html`). A stage may accept `out` and write its staged file directly.
 
 ## CLI
 
@@ -154,15 +161,15 @@ strings (`.html` or `.txt`). A stage may accept `out` and write its staged file 
 | `iv drift [--trace FILE]` | Compare code with a recorded run |
 | `iv verify [DATASET]` | Re-fingerprint shards and verify their filenames |
 | `iv gc [DATASET]` | Remove superseded shards |
+| `iv gc DATASET --partition-key season` | Drop shards outside an explicitly named layout |
 | `iv viz --out dag.png` | Render the DAG; requires the `viz` extra |
 
-When the pipeline tree is a cloud URI, `iv run` lists it once and downloads its files in
-parallel into a temporary local tree before planning, with progress printed throughout.
-Every stage then reads and writes locally. IV publishes new shards only
-after the complete run succeeds, uploads all additions before removing superseded shards,
-and cleans up the local snapshot afterward. If a later stage fails, IV publishes the last
-completed-stage checkpoint but excludes every uncommitted result from the failed stage.
-Downloads use 64 workers by default; set `IV_DOWNLOAD_WORKERS` to tune that concurrency.
+When the pipeline tree is a GCS URI, `iv run` lists it once and uses GCS Transfer Manager
+to download its files in parallel into a printed temporary directory before planning.
+Every stage then reads and writes locally. After a successful run, IV uploads all additions
+before removing superseded shards and cleans up the local snapshot. If a later stage fails,
+IV publishes the last completed-stage checkpoint but excludes every result from the failed
+stage. Downloads use 64 workers by default; set `IV_DOWNLOAD_WORKERS` to tune concurrency.
 
 `maybe` means an upstream may change: downstream work runs only if the rebuilt content
 gets a new fingerprint. Set `IV_TRACE=path` during a pipeline run to record a trace.
