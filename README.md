@@ -2,8 +2,21 @@
 
 ![Four agents happily working in separate colorful lanes](assets/iv-agents-in-lanes.jpeg)
 
-`iv` is a small, database-free dependency tracker for Python data pipelines. Stages
-declare what they read and write; `iv` runs only the shards whose declared inputs moved.
+**Keep agents in their lanes—and make the whole system legible to humans.**
+
+`iv` helps a collection of agents stay focused on specific, bounded tasks. Each task
+declares what it reads, what it writes, and why that dependency exists. Those declarations
+give an agent a clear working boundary while giving humans a shared map of how the tasks
+fit together, what is current, what needs attention, and what a change could affect.
+
+Underneath, `iv` is a small, database-free dependency tracker for Python data pipelines.
+Tasks are ordinary Python stages, and their outputs are content-addressed shards. IV uses
+the declared graph to run only the work whose inputs actually moved—useful whether stages
+are written by people, executed by agents, or maintained by a mixture of both.
+
+The CLI makes the collection understandable: `iv graph` shows how tasks connect,
+`iv status` and `iv plan` show where work stands, `iv why` explains a decision, and
+`iv impact` shows the downstream reach of a proposed change.
 
 Each derived filename contains both its derivation key and content fingerprint:
 
