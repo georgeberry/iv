@@ -2,30 +2,13 @@
 
 ![Four agents happily working in separate colorful lanes](assets/iv-agents-in-lanes.jpeg)
 
-**Keep agents in their lanes—and make the whole system legible to humans.**
+**Keep agents focused and do replicable data science work.**
 
-`iv` helps a collection of agents stay focused on specific, bounded tasks. Each task
-declares what it reads, what it writes, and why that dependency exists. Those declarations
-give an agent a clear working boundary while giving humans a shared map of how the tasks
-fit together, what is current, what needs attention, and what a change could affect.
+`iv` forces code to follow a set of strict guidelines that prevents agents from doing things like handling nulls wrong, constructing dependency cycles, sideloading data, and building on top of stale data.
 
-Underneath, `iv` is a small, database-free dependency tracker for Python data pipelines.
-Tasks are ordinary Python stages, and their outputs are content-addressed shards. IV uses
-the declared graph to run only the work whose inputs actually moved—useful whether stages
-are written by people, executed by agents, or maintained by a mixture of both.
+`iv` is designed for local and bespoke data science work that values correctness and legibility. 
 
-The CLI makes the collection understandable: `iv graph` shows how tasks connect,
-`iv status` and `iv plan` show where work stands, `iv why` explains a decision, and
-`iv impact` shows the downstream reach of a proposed change.
-
-Each derived filename contains both its derivation key and content fingerprint:
-
-```text
-<partition>.<key>.<fingerprint><extension>
-```
-
-If a stage reruns but produces identical content, its fingerprint stays unchanged and the
-rebuild stops before downstream stages.
+You force your coding agents to generate data according to an `iv` graph, 
 
 ## Install
 
