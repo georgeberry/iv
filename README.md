@@ -160,7 +160,8 @@ When the pipeline tree is a cloud URI, `iv run` lists it once and downloads its 
 parallel into a temporary local tree before planning, with progress printed throughout.
 Every stage then reads and writes locally. IV publishes new shards only
 after the complete run succeeds, uploads all additions before removing superseded shards,
-and cleans up the local snapshot afterward. A failed stage never mutates the remote tree.
+and cleans up the local snapshot afterward. If a later stage fails, IV publishes the last
+completed-stage checkpoint but excludes every uncommitted result from the failed stage.
 Downloads use 64 workers by default; set `IV_DOWNLOAD_WORKERS` to tune that concurrency.
 
 `maybe` means an upstream may change: downstream work runs only if the rebuilt content

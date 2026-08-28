@@ -252,6 +252,9 @@ def _execute_work(iv, work, log: Path | None) -> None:
             with redirect_stdout(output), redirect_stderr(output):
                 asset._invoke(p, stale)
             changed.update(iv._changes)
+            checkpoint = getattr(iv, "_remote_checkpoint", None)
+            if checkpoint is not None:
+                checkpoint()
         except BaseException:
             _print_stage_output(output.getvalue())
             if run_log:

@@ -160,6 +160,28 @@ def test_a_failed_run_never_mutates_remote_storage():
     assert iv.tree is remote and iv.out_tree is remote
 
 
+def test_a_failed_run_publishes_only_its_last_completed_stage():
+    remote = Remote({"raw/old.parquet": b"old"})
+    iv = pipeline(remote)
+
+    with pytest.raises(RuntimeError, match="later stage failed"):
+        with local_tree_snapshot(iv) as result:
+            (iv.out_tree / "raw/old.parquet").unlink()
+            completed = iv.out_tree / "derived/completed.parquet"
+            completed.parent.mkdir(parents=True, exist_ok=True)
+            completed.write_bytes(b"completed")
+            iv._remote_checkpoint()
+
+            completed.unlink()
+            partial = iv.out_tree / "derived/partial.parquet"
+            partial.write_bytes(b"partial")
+            raise RuntimeError("later stage failed")
+
+    assert result.partial
+    assert remote.files == {"derived/completed.parquet": b"completed"}
+    assert "derived/partial.parquet" not in remote.files
+
+
 def test_an_interrupted_upload_rolls_back_additions_before_any_removal():
     remote = Remote({"raw/old.parquet": b"old"}, fail_upload="raw/z.parquet")
     iv = pipeline(remote)

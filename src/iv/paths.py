@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,6 +42,7 @@ class RemoteSnapshot:
     bytes_downloaded: int = 0
     uploaded: int = 0
     removed: int = 0
+    partial: bool = False
 
 
 def _say(report, message: str) -> None:
@@ -138,8 +140,8 @@ def _download(remote, local: Path, report=None) -> set[str]:
 
 
 def _publish(remote, local: Path, before: set[str], result: RemoteSnapshot,
-             report=None) -> None:
-    after = _manifest(local)
+             report=None, after: set[str] | None = None) -> None:
+    after = _manifest(local) if after is None else after
     additions = sorted(after - before)
     removals = sorted(before - after)
     _say(report, f"remote publish · {len(additions)} upload(s), {len(removals)} removal(s)")
@@ -221,13 +223,40 @@ def local_tree_snapshot(iv, report=None):
             local_out, before_out = original_out, set()
         iv.tree = local_tree if remote_tree is not None else original_tree
         iv.out_tree = local_out
+        checkpoint_dir = root / "checkpoint"
+        checkpoint: set[str] | None = None
+        previous_checkpoint = getattr(iv, "_remote_checkpoint", None)
+
+        def save_checkpoint() -> None:
+            nonlocal checkpoint
+            checkpoint = _manifest(local_out)
+            for rel in checkpoint - before_out:
+                source, target = local_out / rel, checkpoint_dir / rel
+                if target.exists():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.link(source, target)
+                except OSError:
+                    shutil.copy2(source, target)
+
+        iv._remote_checkpoint = save_checkpoint
         try:
             yield result
         except BaseException:
+            if remote_out is not None and checkpoint is not None and checkpoint != before_out:
+                result.partial = True
+                _say(report, "remote publish · preserving completed stages after failure")
+                _publish(remote_out, checkpoint_dir, before_out, result, report,
+                         after=checkpoint)
             raise
         else:
             if remote_out is not None:
                 _publish(remote_out, local_out, before_out, result, report)
         finally:
+            if previous_checkpoint is None:
+                del iv._remote_checkpoint
+            else:
+                iv._remote_checkpoint = previous_checkpoint
             iv.tree, iv.out_tree = original_tree, original_out
             _say(report, "remote snapshot · local cleanup complete")
