@@ -138,6 +138,43 @@ def test_runner_force_allows_only_with_a_stale_upstream(iv, monkeypatch):
     assert out.is_current()
 
 
+def test_dev_run_reads_production_and_writes_only_to_the_local_tree(iv, tmp_path,
+                                                                    monkeypatch):
+    @iv.data(dataset="raw/feed/", why="production input", once=True)
+    def feed():
+        return frame(extra=7)
+
+    @iv.data(dataset="processed/model/", why="model under evaluation")
+    def model(source=iv.all_of(feed, why="production training data")):
+        return source
+
+    feed()
+    production = iv.out_tree
+    dev = tmp_path / "model-evaluation"
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(
+        app, ["run", "--only", "model", "--dev", str(dev), "--force"])
+
+    assert result.exit_code == 0, result.output
+    assert f"development output · {dev}" in result.output
+    assert not iv.resolve_out("processed/model/").exists()
+    built = _sh.current_shards(dev / "processed/model")
+    assert len(built) == 1
+    assert pl.read_parquet(next(iter(built.values())).path).equals(frame(extra=7))
+    assert iv.out_tree == production
+
+
+def test_dev_requires_one_explicit_stage(iv, tmp_path, monkeypatch):
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    dev = tmp_path / "dev"
+    result = CliRunner().invoke(app, ["run", "--dev", str(dev)])
+    assert result.exit_code == 1
+    assert "--dev currently requires --only" in result.output
+    assert not dev.exists()
+
+
 def test_the_runner_builds_a_split_stage_once_not_once_per_partition(tmp_path, monkeypatch):
     iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
     ran = []

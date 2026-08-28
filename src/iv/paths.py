@@ -139,6 +139,24 @@ def _download(remote, local: Path, report=None) -> set[str]:
     return {rel for rel, _ in files}
 
 
+def fetch_tree(remote, destination: Path, report=None) -> set[str]:
+    if not is_remote(remote):
+        raise ConfigError(f"iv fetch needs a remote pipeline tree, got {remote}.")
+    target = destination.expanduser().resolve()
+    if target.exists():
+        raise ConfigError(
+            f"iv fetch destination already exists: {target}. Choose a new directory so "
+            "IV cannot overwrite local work.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{target.name}.iv-fetch-",
+                                     dir=target.parent) as tmp:
+        staged = Path(tmp) / "tree"
+        files = _download(remote, staged, report)
+        staged.rename(target)
+    _say(report, f"remote fetch complete · {len(files)} file(s) · {target}")
+    return files
+
+
 def _publish(remote, local: Path, before: set[str], result: RemoteSnapshot,
              report=None, after: set[str] | None = None) -> None:
     after = _manifest(local) if after is None else after

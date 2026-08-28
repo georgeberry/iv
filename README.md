@@ -157,8 +157,10 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv run --from STAGE` | Run a stage and descendants; require current upstreams |
 | `iv run --only STAGE` | Run one stage; require current upstreams |
 | `iv run --only STAGE --force` | Run despite stale upstreams; does not rebuild them |
+| `iv run --only STAGE --dev PATH --force` | Evaluate one stage against production inputs and write locally |
 | `iv run --part season=2025` | Filter partitioned work; repeat for composite keys |
 | `iv run --log run.log` | Save merged stdout, stderr, and outcomes incrementally |
+| `iv fetch PATH` | Download remote production state into a new local directory |
 | `iv determinism --only STAGE` | Run a stage twice in isolated temporary output trees and compare content |
 | `iv determinism --only STAGE --part season=2025` | Audit one partition of a stage |
 | `iv determinism --sample` | Audit every stage at its last declared partition |
@@ -183,6 +185,12 @@ Every stage then reads and writes locally. After a successful run, IV uploads al
 before removing superseded shards and cleans up the local snapshot. If a later stage fails,
 IV publishes the last completed-stage checkpoint but excludes every result from the failed
 stage. Downloads use 64 workers by default; set `IV_DOWNLOAD_WORKERS` to tune concurrency.
+
+Use `iv run --only model --dev local/evaluation --force` to evaluate a changed stage
+against production inputs without publishing its output. The development directory is a
+normal IV output tree, so its fingerprinted result can be inspected or compared directly.
+`--dev` currently requires `--only`; this prevents downstream work from accidentally
+mixing production and development versions of the same dataset.
 
 `maybe` means an upstream may change: downstream work runs only if the rebuilt content
 gets a new fingerprint. Set `IV_TRACE=path` during a pipeline run to record a trace.

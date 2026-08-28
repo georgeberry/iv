@@ -6,7 +6,7 @@ import sys
 import tempfile
 import tomllib
 import time
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import typer
@@ -835,11 +835,37 @@ def run(
     log: Path = typer.Option(
         None, "--log",
         help="write all merged stage output and outcomes to this file"),
+    dev: Path = typer.Option(
+        None, "--dev",
+        help="write --only output to this local tree instead of production"),
 ):
 
+    if dev is not None and only is None:
+        raise IvError("--dev currently requires --only so no downstream stage reads a "
+                      "mixture of production and development outputs.")
     iv = _load()
-    with _paths.local_tree_snapshot(iv, report=typer.echo):
-        _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log)
+    with _dev_output(iv, dev):
+        with _paths.local_tree_snapshot(iv, report=typer.echo):
+            _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log)
+
+
+@contextmanager
+def _dev_output(iv, dev: Path | None):
+    if dev is None:
+        yield
+        return
+    target = dev.expanduser().resolve()
+    if not _paths.is_remote(iv.out_tree):
+        production = Path(iv.out_tree).expanduser().resolve()
+        if target == production:
+            raise IvError("--dev must differ from the production output tree.")
+    original = iv.out_tree
+    iv.out_tree = target
+    typer.echo(f"development output · {target}")
+    try:
+        yield
+    finally:
+        iv.out_tree = original
 
 
 def _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log):
@@ -893,6 +919,13 @@ def _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log):
             return
 
         _execute_work(iv, work, log)
+
+
+@app.command()
+@reports
+def fetch(destination: Path = typer.Argument(..., help="new local directory for remote state")):
+    iv = _load()
+    _paths.fetch_tree(iv.tree, destination, report=typer.echo)
 
 
 @app.command()

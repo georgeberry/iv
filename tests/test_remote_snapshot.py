@@ -194,6 +194,24 @@ def test_a_failed_run_never_mutates_remote_storage():
     assert iv.tree is remote and iv.out_tree is remote
 
 
+def test_a_local_dev_output_is_never_published_to_the_remote_tree(tmp_path):
+    remote = Remote({"raw/input.parquet": b"input"})
+    iv = pipeline(remote)
+    dev = tmp_path / "evaluation"
+    from iv.cli import _dev_output
+
+    with _dev_output(iv, dev):
+        with local_tree_snapshot(iv):
+            target = iv.out_tree / "processed/model.parquet"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"model")
+
+    assert (dev / "processed/model.parquet").read_bytes() == b"model"
+    assert remote.files == {"raw/input.parquet": b"input"}
+    assert not any(op in {"upload", "unlink"} for op, _ in remote.events)
+    assert iv.out_tree is remote
+
+
 def test_a_failed_run_publishes_only_its_last_completed_stage():
     remote = Remote({"raw/old.parquet": b"old"})
     iv = pipeline(remote)
@@ -292,3 +310,52 @@ def test_iv_run_enters_the_local_snapshot_before_planning(monkeypatch):
     assert "remote snapshot ready · 1 file(s)" in result.output
     assert "remote publish complete" in result.output
     assert "remote snapshot · local cleanup complete" in result.output
+
+
+def test_iv_fetch_downloads_remote_state_to_a_new_local_directory(tmp_path,
+                                                                  monkeypatch):
+    remote = Remote({"raw/a.parquet": b"a", "derived/b.json": b"b"})
+    iv = pipeline(remote)
+    destination = tmp_path / "state"
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+
+    result = CliRunner().invoke(app, ["fetch", str(destination)])
+    assert result.exit_code == 0, result.output
+    assert (destination / "raw/a.parquet").read_bytes() == b"a"
+    assert (destination / "derived/b.json").read_bytes() == b"b"
+    assert f"remote fetch complete · 2 file(s) · {destination}" in result.output
+    assert not any(op in {"upload", "unlink"} for op, _ in remote.events)
+
+
+def test_iv_fetch_refuses_to_merge_over_an_existing_directory(tmp_path, monkeypatch):
+    remote = Remote({"raw/a.parquet": b"remote"})
+    iv = pipeline(remote)
+    destination = tmp_path / "state"
+    destination.mkdir()
+    existing = destination / "notes.txt"
+    existing.write_text("mine")
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+
+    result = CliRunner().invoke(app, ["fetch", str(destination)])
+    assert result.exit_code == 1
+    assert "destination already exists" in result.output
+    assert existing.read_text() == "mine"
+
+
+def test_iv_fetch_cleans_up_an_interrupted_staging_directory(tmp_path, monkeypatch):
+    remote = Remote({"raw/a.parquet": b"a"})
+    destination = tmp_path / "state"
+    import iv.paths as paths
+
+    def interrupted(source, staged, report=None):
+        staged.mkdir(parents=True)
+        (staged / "partial").write_text("partial")
+        raise StateError("download interrupted")
+
+    monkeypatch.setattr(paths, "_download", interrupted)
+    with pytest.raises(StateError, match="download interrupted"):
+        paths.fetch_tree(remote, destination)
+    assert not destination.exists()
+    assert list(tmp_path.iterdir()) == []
