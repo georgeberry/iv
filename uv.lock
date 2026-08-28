@@ -625,19 +625,8 @@ wheels = [
 name = "iv"
 version = "2.0.0"
 source = { editable = "." }
-
-[package.optional-dependencies]
-cli = [
-    { name = "typer" },
-]
-cloud = [
+dependencies = [
     { name = "cloudpathlib", extra = ["gs"] },
-]
-data = [
-    { name = "polars" },
-]
-dev = [
-    { name = "cloudpathlib" },
     { name = "matplotlib" },
     { name = "networkx" },
     { name = "polars" },
@@ -645,31 +634,17 @@ dev = [
     { name = "pytest" },
     { name = "typer" },
 ]
-lint = [
-    { name = "pyflakes" },
-]
-viz = [
-    { name = "matplotlib" },
-    { name = "networkx" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "cloudpathlib", marker = "extra == 'dev'", specifier = ">=0.18" },
-    { name = "cloudpathlib", extras = ["gs"], marker = "extra == 'cloud'", specifier = ">=0.18" },
-    { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.8" },
-    { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.8" },
-    { name = "networkx", marker = "extra == 'dev'", specifier = ">=3.0" },
-    { name = "networkx", marker = "extra == 'viz'", specifier = ">=3.0" },
-    { name = "polars", marker = "extra == 'data'", specifier = ">=1.0" },
-    { name = "polars", marker = "extra == 'dev'", specifier = ">=1.0" },
-    { name = "pyflakes", marker = "extra == 'dev'", specifier = ">=3" },
-    { name = "pyflakes", marker = "extra == 'lint'", specifier = ">=3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12" },
-    { name = "typer", marker = "extra == 'dev'", specifier = ">=0.12" },
+    { name = "cloudpathlib", extras = ["gs"], specifier = ">=0.18" },
+    { name = "matplotlib", specifier = ">=3.8" },
+    { name = "networkx", specifier = ">=3.0" },
+    { name = "polars", specifier = ">=1.0" },
+    { name = "pyflakes", specifier = ">=3" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "typer", specifier = ">=0.12" },
 ]
-provides-extras = ["lint", "data", "cli", "cloud", "viz", "dev"]
 
 [[package]]
 name = "kiwisolver"

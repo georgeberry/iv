@@ -15,18 +15,14 @@ You force your coding agents to generate data according to an `iv` graph,
 The PyPI name belongs to another project, so install `iv` from GitHub:
 
 ```bash
-uv add "iv[data,cli] @ git+https://github.com/georgeberry/iv"
+uv add "iv @ git+https://github.com/georgeberry/iv"
 # or
-pip install "iv[data,cli] @ git+https://github.com/georgeberry/iv"
+pip install "iv @ git+https://github.com/georgeberry/iv"
 ```
 
-Extras are `data` for Polars/Parquet, `cli` for the `iv` command, `cloud` for GCS-backed
-trees and parallel transfers, `viz` for graph images, `lint` for preflight source checks,
-and `dev` for development dependencies. A typical cloud installation is:
-
-```bash
-uv add "iv[data,cli,cloud] @ git+https://github.com/georgeberry/iv"
-```
+A standard install includes everything: the CLI, Polars/Parquet support, GCS-backed trees
+with parallel transfers, preflight linting, graph visualization, and the test toolchain.
+There are no install extras or feature-specific installation options.
 
 ## Quick start
 
@@ -160,7 +156,7 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv verify [DATASET]` | Re-fingerprint shards and verify their filenames |
 | `iv gc [DATASET]` | Remove superseded shards |
 | `iv gc DATASET --partition-key season` | Drop shards outside an explicitly named layout |
-| `iv viz --out dag.png` | Render the DAG; requires the `viz` extra |
+| `iv viz --out dag.png` | Render the DAG |
 
 When the pipeline tree is a GCS URI, `iv run` lists it once and uses GCS Transfer Manager
 to download its files in parallel into a printed temporary directory before planning.
@@ -197,7 +193,7 @@ partition selectors, missing required shards, schema mismatches, and nested stag
 ## Development
 
 ```bash
-uv sync --extra dev
+uv sync
 uv run pytest
 uv run python example.py
 ```

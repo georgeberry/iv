@@ -4,18 +4,15 @@ version = "2.0.0"
 description = "Re-run a step only when something upstream actually changed"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = []
-
-[project.optional-dependencies]
-lint = [
+dependencies = [
+    "cloudpathlib[gs]>=0.18",
+    "matplotlib>=3.8",
+    "networkx>=3.0",
+    "polars>=1.0",
     "pyflakes>=3",
+    "pytest>=8.0",
+    "typer>=0.12",
 ]
-data = ["polars>=1.0"]
-cli = ["typer>=0.12"]
-cloud = ["cloudpathlib[gs]>=0.18"]
-viz = ["networkx>=3.0", "matplotlib>=3.8"]
-dev = ["polars>=1.0", "typer>=0.12", "networkx>=3.0", "matplotlib>=3.8",
-       "pytest>=8.0", "cloudpathlib>=0.18", "pyflakes>=3"]
 
 [project.scripts]
 iv = "iv.cli:app"
