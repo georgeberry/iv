@@ -77,7 +77,7 @@ def _check_declared(target, probe: str | None = None) -> None:
     if s is None:
         return
     for iv in _ACTIVE:
-        if s in iv._handed_out or iv._depth:
+        if s in iv._handed_out or iv._depth or iv._publishing:
             return
     for iv in _ACTIVE:
         for base in (iv.out_tree, iv.tree):
@@ -188,6 +188,7 @@ class Pipeline:
         self._declared_externals: tuple = ()
         self._handed_out: set[str] = set()
         self._staged: set[str] = set()
+        self._publishing = 0
 
 
         self._part: dict | None = None
@@ -238,6 +239,14 @@ class Pipeline:
             yield
         finally:
             self._local.depth -= 1
+
+    @contextmanager
+    def publication(self):
+        self._publishing += 1
+        try:
+            yield
+        finally:
+            self._publishing -= 1
 
     def record(self, kind: str, **fields) -> None:
         _record.emit(self, kind, **fields)

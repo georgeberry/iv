@@ -247,12 +247,14 @@ def local_tree_snapshot(iv, report=None):
             if remote_out is not None and checkpoint is not None and checkpoint != before_out:
                 result.partial = True
                 _say(report, "remote publish · preserving completed stages after failure")
-                _publish(remote_out, checkpoint_dir, before_out, result, report,
-                         after=checkpoint)
+                with iv.publication():
+                    _publish(remote_out, checkpoint_dir, before_out, result, report,
+                             after=checkpoint)
             raise
         else:
             if remote_out is not None:
-                _publish(remote_out, local_out, before_out, result, report)
+                with iv.publication():
+                    _publish(remote_out, local_out, before_out, result, report)
         finally:
             if previous_checkpoint is None:
                 del iv._remote_checkpoint

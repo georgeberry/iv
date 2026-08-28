@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from contextlib import contextmanager, nullcontext
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from typer.testing import CliRunner
 
 from iv.cli import app
+from iv.core import Pipeline
 from iv.errors import StateError
 from iv.paths import local_tree_snapshot
 
@@ -70,8 +73,39 @@ class BatchRemote(Remote):
         raise AssertionError("the provider's batch listing should be used")
 
 
+class WorkerRemote(Remote):
+    def __truediv__(self, rel):
+        joined = "/".join(x for x in (self.rel, str(rel)) if x)
+        return WorkerRemote(self.files, joined, self.events, self.fail_upload,
+                            self.fail_remove)
+
+    def upload_from(self, source):
+        self.events.append(("upload", self.rel))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            self.files[self.rel] = pool.submit(Path(source).read_bytes).result()
+
+
 def pipeline(remote):
-    return SimpleNamespace(tree=remote, out_tree=remote)
+    state = SimpleNamespace(depth=0, publishing=0)
+
+    @contextmanager
+    def bookkeeping():
+        state.depth += 1
+        try:
+            yield
+        finally:
+            state.depth -= 1
+
+    @contextmanager
+    def publication():
+        state.publishing += 1
+        try:
+            yield
+        finally:
+            state.publishing -= 1
+
+    return SimpleNamespace(tree=remote, out_tree=remote, bookkeeping=bookkeeping,
+                           publication=publication, bookkeeping_state=state)
 
 
 def test_one_download_then_local_execution_and_successful_publication():
@@ -180,6 +214,45 @@ def test_a_failed_run_publishes_only_its_last_completed_stage():
     assert result.partial
     assert remote.files == {"derived/completed.parquet": b"completed"}
     assert "derived/partial.parquet" not in remote.files
+
+
+@pytest.mark.parametrize("fail_after_checkpoint", [False, True])
+def test_remote_publication_runs_inside_cross_thread_scope(monkeypatch,
+                                                           fail_after_checkpoint):
+    remote = Remote({"raw/old.parquet": b"old"})
+    iv = pipeline(remote)
+    depths = []
+    import iv.paths as paths
+    real = paths._publish
+
+    def checked(*args, **kwargs):
+        depths.append(iv.bookkeeping_state.publishing)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(paths, "_publish", checked)
+    error = pytest.raises(RuntimeError) if fail_after_checkpoint else nullcontext()
+    with error:
+        with local_tree_snapshot(iv):
+            target = iv.out_tree / "derived/completed.parquet"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"completed")
+            iv._remote_checkpoint()
+            if fail_after_checkpoint:
+                raise RuntimeError("later stage failed")
+
+    assert depths == [1]
+
+
+def test_publication_allows_transfer_workers_to_read_the_local_mirror(tmp_path):
+    remote = WorkerRemote({"raw/old.parquet": b"old"})
+    iv = Pipeline(tree=remote, project=tmp_path, stage_dir=tmp_path / "stage")
+
+    with local_tree_snapshot(iv):
+        target = iv.out_tree / "derived/new.parquet"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"new")
+
+    assert remote.files["derived/new.parquet"] == b"new"
 
 
 def test_an_interrupted_upload_rolls_back_additions_before_any_removal():
