@@ -102,6 +102,23 @@ such as `part={"source": "ncaa"}` for a literal shard. `universe=` tells `iv run
 dynamic partitions to enumerate. `split=True` means one call returns all partitions as a
 mapping.
 
+Optionally declare the pipeline's complete partition vocabulary and value contracts:
+
+```python
+from iv import Partition
+
+iv = Pipeline(..., partitions={
+    "season": Partition(type=int),
+    "league": Partition(type=str, choices={"nba", "wnba"}),
+})
+```
+
+Values remain strings inside stages and shard names, with the existing natural string
+ordering. The declared type validates and canonicalizes them (`"02026"` becomes `"2026"`),
+and undeclared keys are refused. Give an external dataset a layout with
+`iv.source("raw/feed/", why="...", part="season")`; reads then reject old incompatible
+shards and `iv gc raw/feed/` can remove them automatically.
+
 Every dynamic stage run through `iv run` needs its own `universe=`. Direct calls and an
 explicit `for_each([...])` already name the shards to build and do not need one.
 
@@ -138,6 +155,13 @@ strings (`.html` or `.txt`). A stage may accept `out` and write its staged file 
 | `iv verify [DATASET]` | Re-fingerprint shards and verify their filenames |
 | `iv gc [DATASET]` | Remove superseded shards |
 | `iv viz --out dag.png` | Render the DAG; requires the `viz` extra |
+
+When the pipeline tree is a cloud URI, `iv run` lists it once and downloads its files in
+parallel into a temporary local tree before planning, with progress printed throughout.
+Every stage then reads and writes locally. IV publishes new shards only
+after the complete run succeeds, uploads all additions before removing superseded shards,
+and cleans up the local snapshot afterward. A failed stage never mutates the remote tree.
+Downloads use 64 workers by default; set `IV_DOWNLOAD_WORKERS` to tune that concurrency.
 
 `maybe` means an upstream may change: downstream work runs only if the rebuilt content
 gets a new fingerprint. Set `IV_TRACE=path` during a pipeline run to record a trace.

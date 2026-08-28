@@ -12,6 +12,7 @@ from pathlib import Path
 import typer
 
 from . import graph as _graph
+from . import paths as _paths
 from . import record as _rec
 from . import render as _render
 from . import shards as _sh
@@ -502,7 +503,9 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
 def _declared_part_keys(iv, g, name: str) -> set[tuple[str, ...]]:
 
 
-    out = set()
+    source = iv._sources.get(name)
+    out = ({tuple(sorted(source.part_keys))}
+           if source is not None and source.part_keys is not None else set())
     for node, stage in g.stages.items():
         if not any(site.dataset == name for site in stage.outputs):
             continue
@@ -831,10 +834,16 @@ def run(
         help="write all merged stage output and outcomes to this file"),
 ):
 
+    iv = _load()
+    with _paths.local_tree_snapshot(iv, report=typer.echo):
+        _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log)
+
+
+def _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log):
+
     choices = [x for x in (up_to, up_to_excluding, from_, only) if x]
     if len(choices) > 1:
         raise IvError("choose only one of --up-to, --up-to-excluding, --from, or --only.")
-    iv = _load()
     g = _graph.build(iv)
     parents = g.parent_map()
     filters = _part_flags(part)

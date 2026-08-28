@@ -204,11 +204,17 @@ def _dataset(v, ext, allow_missing, schema=None) -> Dataset:
 class Source:
 
 
-    def __init__(self, dataset: str, *, why: str, external=None, schema=None) -> None:
+    def __init__(self, dataset: str, *, why: str, external=None, schema=None,
+                 part=None) -> None:
         self.dataset = _decl._canon(dataset)
         self.why = _decl._why(why, self.dataset)
         self.schema = schema_contract(schema, _sh.EXT, self.dataset)
         self.externals = _externals(external, self.dataset)
+        self.part_keys, fixed = _part_spec(part, self.dataset)
+        if fixed is not None:
+            raise DeclError(
+                f"{self.dataset}: a source describes an external dataset's layout, so "
+                "part= names its key or keys, not one fixed shard.")
         self.__name__ = self.dataset.rstrip("/").rsplit("/", 1)[-1]
 
     def __repr__(self) -> str:
@@ -563,6 +569,7 @@ class Asset:
         o = next(iter(self.outputs.values()))
         with iv.bookkeeping():
             live = _sh.current_shards(iv.resolve_out(o.dataset))
+            iv._validate_shard_parts(o.dataset, live.values())
             got = live.get(_sh.encode_part(part if part is not None else self.fixed_part))
             if got is None:
                 if o.allow_missing:
@@ -630,7 +637,7 @@ class Asset:
         raise DeclError(f"{self.primary}: multi-partition for_each() takes dictionaries or {len(self.part_keys)}-tuples.")
 
     def _validate_part(self, part: dict) -> dict:
-        return part
+        return self.pipeline._normalize_part(part, self.primary)
 
 
 def _externals(spec, dataset) -> tuple:

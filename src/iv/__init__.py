@@ -5,12 +5,13 @@ from .core import Pipeline
 from .decl import (Read, after_part, all_of, before_part, between, own_last_copy, parts,
                    same_part)
 from .errors import ConfigError, DeclError, IvError, StateError
+from .partitions import Partition
 from .shards import Shard, fingerprint
 
 __version__ = "2.0.0"
 
 __all__ = [
-    "Pipeline", "Asset", "Dataset", "Read", "Shard", "fingerprint",
+    "Pipeline", "Partition", "Asset", "Dataset", "Read", "Shard", "fingerprint",
 
     "all_of", "same_part", "before_part", "after_part", "between", "parts",
     "own_last_copy",

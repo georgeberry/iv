@@ -16,6 +16,7 @@ from .decl import PART, _canon, _why
 from . import record as _record
 from . import shards as _sh
 from .errors import DeclError, StateError
+from .partitions import Partition
 
 from .paths import mkpath
 
@@ -168,13 +169,15 @@ class Pipeline:
                  project=None,
                  trace=None,
                  stage_dir=None,
-                 force: bool | None = None) -> None:
+                 force: bool | None = None,
+                 partitions: dict[str, Partition] | None = None) -> None:
         self.project = mkpath(str(project), None) if project else None
         self.tree = mkpath(tree, self.project)
         self.out_tree = mkpath(out_tree, self.project) if out_tree is not None else self.tree
         self.code = tuple(code)
         self.stage_dir = stage_dir
         self.force = _env_force() if force is None else force
+        self.partitions = self._partition_specs(partitions)
         self.trace_path = _abs_trace(trace)
         self._trace_fh = None
         self._local = threading.local()
@@ -242,15 +245,98 @@ class Pipeline:
     def _fresh_scope(self) -> None:
         self._reads, self._updating, self._plain, self._externals = {}, set(), set(), []
 
+    @staticmethod
+    def _partition_specs(specs) -> dict[str, Partition]:
+        if specs is None:
+            return {}
+        if not isinstance(specs, dict):
+            raise DeclError("Pipeline(partitions=...) is a mapping of key to Partition.")
+        out = {}
+        for key, spec in specs.items():
+            if not isinstance(key, str) or not key:
+                raise DeclError(f"partition keys are non-empty strings, got {key!r}.")
+            if not isinstance(spec, Partition):
+                raise DeclError(f"partition {key!r} must be declared with Partition(...).")
+            out[key] = spec
+        return out
+
+    def _normalize_part(self, part: dict | None, dataset: str,
+                        *, error=DeclError) -> dict | None:
+        if not part:
+            return part
+        if not self.partitions:
+            return {str(k): str(v) for k, v in part.items()}
+        unknown = sorted(set(part) - set(self.partitions))
+        if unknown:
+            raise error(
+                f"{dataset}: undeclared partition key(s) {unknown}; this pipeline allows "
+                f"{sorted(self.partitions)}.")
+        return {str(k): self.partitions[str(k)].normalize(v, key=str(k), error=error)
+                for k, v in part.items()}
+
+    def _normalize_where(self, where: dict | None, dataset: str) -> dict | None:
+        if not where or not self.partitions:
+            return where
+        self._validate_part_keys(where, dataset)
+        out = {}
+        for key, rule in where.items():
+            spec = self.partitions[key]
+            if isinstance(rule, dict):
+                out[key] = {op: spec.normalize(v, key=key) for op, v in rule.items()}
+            elif isinstance(rule, (list, tuple, set)):
+                out[key] = [spec.normalize(v, key=key) for v in rule]
+            else:
+                out[key] = spec.normalize(rule, key=key)
+        return out
+
+    def _validate_part_keys(self, keys, dataset: str) -> None:
+        if self.partitions:
+            unknown = sorted(set(keys) - set(self.partitions))
+            if unknown:
+                raise DeclError(
+                    f"{dataset}: undeclared partition key(s) {unknown}; this pipeline "
+                    f"allows {sorted(self.partitions)}.")
+
+    def _expected_part_keys(self, dataset: str) -> set[tuple[str, ...]]:
+        name = _canon(dataset)
+        source = self._sources.get(name)
+        if source is not None and source.part_keys is not None:
+            return {tuple(sorted(source.part_keys))}
+        out = set()
+        for asset in self.producers_of(name):
+            for output in asset.outputs.values():
+                if output.dataset != name:
+                    continue
+                keys = dict(output.part) if output.part else None
+                out.add(tuple(sorted(keys or asset.part_keys or asset.fixed_part or ())))
+        return out
+
+    def _validate_shard_parts(self, dataset: str, shards) -> None:
+        shapes = self._expected_part_keys(dataset)
+        for shard in shards:
+            got = tuple(sorted(shard.part))
+            if shapes and got not in shapes:
+                expected = " or ".join(str(x) for x in sorted(shapes))
+                raise StateError(
+                    f"{dataset}: shard {shard.name} uses partition keys {got}; expected "
+                    f"{expected}. Run `iv gc {dataset}` to drop shards from the old layout.")
+            normalized = self._normalize_part(shard.part, dataset, error=StateError)
+            if normalized != shard.part:
+                raise StateError(
+                    f"{dataset}: shard {shard.name} has a non-canonical partition value; "
+                    f"expected {_sh.encode_part(normalized)}.")
+
     def reads(self, dataset: str, *, why: str, where: dict | None = None,
               optional: bool = False, update_file_on_disk: bool = False) -> list:
         name = _canon(dataset)
         _why(why, name)
         where = _sub_part(where, self._part, name)
+        where = self._normalize_where(where, name)
         if update_file_on_disk and not self._depth:
             self._check_updates_own(name)
         with self.bookkeeping():
             present = _sh.current_shards(self.resolve(name))
+            self._validate_shard_parts(name, present.values())
         try:
             sel = _sh.select(present, where, dataset=name)
         except StateError:
@@ -579,6 +665,7 @@ class Pipeline:
         name = _canon(dataset)
         _why(why, name)
         part = self._part if part is None else part
+        part = self._normalize_part(part, name)
         with self.bookkeeping():
             staged = _sh.stage(f"{_sh.encode_part(part) or 'all'}-{time.time_ns()}",
                                self.stage_dir, ext)
@@ -646,10 +733,12 @@ class Pipeline:
 
 
         name = _canon(dataset)
+        part = self._normalize_part(part, name)
         inputs = self._declared.get(name, ()) if inputs is None else inputs
         d = self.resolve_out(name)
         with self.bookkeeping():
             live = _sh.current_shards(d)
+            self._validate_shard_parts(name, live.values())
             if part is None and "" not in live:
 
 
@@ -697,6 +786,7 @@ class Pipeline:
                             _assets._fixed(part, _canon(dataset)),
                             _why(why, _canon(dataset)),
                             _assets.schema_contract(schema, ext, _canon(dataset)), standalone=True)
+        self._validate_part_keys(dict(d.part), d.dataset)
         if d.dataset in self._sources:
             raise DeclError(
                 f"{d.dataset} was declared a source — something outside this pipeline puts "
@@ -740,10 +830,12 @@ class Pipeline:
                 universe=universe))
         return declared
 
-    def source(self, dataset: str, *, why: str, external=None, schema=None) -> _assets.Source:
+    def source(self, dataset: str, *, why: str, external=None, schema=None,
+               part=None) -> _assets.Source:
 
 
-        src = _assets.Source(dataset, why=why, external=external, schema=schema)
+        src = _assets.Source(dataset, why=why, external=external, schema=schema, part=part)
+        self._validate_part_keys(src.part_keys or (), src.dataset)
         if src.dataset in self._sources:
             raise DeclError(
                 f"{src.dataset} is already declared a source: "
@@ -762,6 +854,9 @@ class Pipeline:
         return src
 
     def _register(self, asset: _assets.Asset) -> _assets.Asset:
+        self._validate_part_keys(asset.part_keys or asset.fixed_part or (), asset.primary)
+        if asset.fixed_part:
+            asset.fixed_part = self._normalize_part(asset.fixed_part, asset.primary)
         for name, o in asset.outputs.items():
             if o.dataset in self._datasets and not o.standalone:
                 raise DeclError(

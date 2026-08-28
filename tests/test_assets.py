@@ -1565,6 +1565,22 @@ def test_gc_can_be_told_the_partition_shape_of_an_external_source(iv, monkeypatc
     assert sorted(_sh.list_shards(d)) == ["season=2025"]
 
 
+def test_gc_uses_an_external_sources_declared_partition_shape(iv, monkeypatch):
+    source = iv.source("raw/feed/", why="arrives from outside", part="season")
+    d = iv.resolve_out(source.dataset)
+    for part in (None, {"season": "2025"}):
+        tmp = _sh.stage(f"declared-source-{part}", iv.stage_dir)
+        frame().write_parquet(tmp)
+        _sh.commit(tmp, d, part=part)
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["gc", "raw/feed/"])
+    assert result.exit_code == 0, result.output
+    assert "orphaned partition (no part)" in result.output
+    assert sorted(_sh.list_shards(d)) == ["season=2025"]
+
+
 def test_a_broken_universe_is_reported_as_an_iv_error(iv, monkeypatch):
     def broken():
         raise ValueError("old.parquet carries no 'season' partition")

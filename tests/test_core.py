@@ -5,6 +5,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
+from iv import Partition
 from iv import shards as _sh
 from iv.core import Pipeline
 from iv.errors import DeclError, StateError
@@ -540,6 +541,38 @@ def test_a_declared_schema_refuses_a_wrong_output_before_commit(iv):
     with pytest.raises(DeclError, match="declared schema"):
         features()
     assert not iv.resolve_out("processed/features/").exists()
+
+
+def test_partition_contract_restricts_keys_and_value_types(tmp_path):
+    pipe = Pipeline(
+        tree=tmp_path / "data", project=tmp_path,
+        partitions={"season": Partition(type=int)},
+    )
+
+    with pytest.raises(DeclError, match="undeclared partition key.*league"):
+        @pipe.data(dataset="processed/wrong/", part="league", why="wrong key")
+        def wrong(league):
+            return pl.DataFrame({"league": [league]})
+
+    @pipe.data(dataset="processed/out/", part="season", why="integer seasons")
+    def out(season):
+        return pl.DataFrame({"season": [season]})
+
+    with pytest.raises(DeclError, match="not a valid int"):
+        out(season="spring")
+
+    out(season="02026")
+    assert sorted(_sh.current_shards(pipe.resolve_out("processed/out/"))) == ["season=2026"]
+
+
+def test_source_partition_contract_rejects_an_old_shard_layout(iv):
+    source = iv.source("raw/feed/", why="external seasonal feed", part="season")
+    staged = _sh.stage("old-layout", iv.stage_dir)
+    pl.DataFrame({"a": [1]}).write_parquet(staged)
+    _sh.commit(staged, iv.resolve_out(source.dataset), part=None)
+
+    with pytest.raises(StateError, match="uses partition keys.*expected.*season"):
+        iv.reads(source.dataset, why="consume the feed")
 
 
 def test_a_source_schema_is_validated_when_filled_through_iv_writes(iv):
