@@ -12,17 +12,11 @@
 
 ## Install
 
-The PyPI name belongs to another project, so install `iv` from GitHub:
-
 ```bash
 uv add "iv @ git+https://github.com/georgeberry/iv"
 # or
 pip install "iv @ git+https://github.com/georgeberry/iv"
 ```
-
-A standard install includes everything: the CLI, Polars/Parquet support, GCS-backed trees
-with parallel transfers, preflight linting, graph visualization, and the test toolchain.
-There are no install extras or feature-specific installation options.
 
 ## Quick start
 
@@ -68,10 +62,6 @@ iv preflight
 iv run
 iv status
 ```
-
-Roots have no declared inputs and run whenever called. Add `once=True` for a root that
-should only be built once. All commits are content-addressed, so unchanged root output
-does not move downstream.
 
 ## Declarations
 
