@@ -8,7 +8,7 @@
 
 `iv` is designed for local and bespoke data science work that values correctness and legibility. 
 
-You force your coding agents to generate data according to an `iv` graph, 
+`iv` loudly complains when code does not follow its rules, and its rules are designed to help agents focus on specific parts of the overall process without getting sidetracked or confused.
 
 ## Install
 
