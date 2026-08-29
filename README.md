@@ -130,6 +130,7 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 
 | Command | Purpose |
 | --- | --- |
+| `iv --instance module:attr COMMAND` | Use a pipeline other than the configured default |
 | `iv run` | Run the pipeline in dependency order |
 | `iv run --up-to STAGE` | Run a stage and its prerequisites |
 | `iv run --up-to-excluding STAGE` | Run only a stage's prerequisites |
@@ -146,8 +147,9 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv status` | Show current, maybe, and stale shards |
 | `iv plan` | Show rebuilds and conditional downstream work |
 | `iv why DATASET` | Show shard fingerprints, keys, inputs, and status |
-| `iv graph` | Print the DAG; supports `--focus` and `--full` |
+| `iv graph [--focus STAGE] [--full]` | Print the DAG, optionally limited to one stage's cone |
 | `iv stage NAME` | Show a stage's reads and writes |
+| `iv impact STAGE` | Show what may run if a stage changes |
 | `iv impact STAGE --tick` | Show possible impact if all output shards change |
 | `iv impact STAGE --tick --tick-part season=2025` | Tick one existing output partition |
 | `iv preflight` | Check undefined names, missing modules, and cycles |
@@ -156,33 +158,8 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv verify [DATASET]` | Re-fingerprint shards and verify their filenames |
 | `iv gc [DATASET]` | Remove superseded shards |
 | `iv gc DATASET --partition-key season` | Drop shards outside an explicitly named layout |
-| `iv viz --out dag.png` | Render the DAG |
-
-When the pipeline tree is a GCS URI, `iv run` lists it once and uses GCS Transfer Manager
-to download its files in parallel into a printed temporary directory before planning.
-Every stage then reads and writes locally. After a successful run, IV uploads all additions
-before removing superseded shards and cleans up the local snapshot. If a later stage fails,
-IV publishes the last completed-stage checkpoint but excludes every result from the failed
-stage. Downloads use 64 workers by default; set `IV_DOWNLOAD_WORKERS` to tune concurrency.
-
-Use `iv run --only model --dev local/evaluation --force` to evaluate a changed stage
-against production inputs without publishing its output. The development directory is a
-normal IV output tree, so its fingerprinted result can be inspected or compared directly.
-`--dev` currently requires `--only`; this prevents downstream work from accidentally
-mixing production and development versions of the same dataset.
-
-`maybe` means an upstream may change: downstream work runs only if the rebuilt content
-gets a new fingerprint. Set `IV_TRACE=path` during a pipeline run to record a trace.
-During `iv run`, each rebuild reports its cause. If an upstream's content changed earlier
-in that run, the exact dataset shard is named; older aggregate keys can only identify that
-declared inputs, the version, or the schema changed.
-
-`iv determinism --only STAGE` forces the named output-producing stage twice, each time
-into a fresh temporary output tree, and compares its output partition set and content
-fingerprints. It never writes production outputs. It rejects actions because they have no
-artifact to compare; use `--part key=value` to audit a particular dynamic shard.
-`iv determinism --sample` visits every output-producing stage and chooses the last
-partition in IV's normal partition order, so its representative selection is repeatable.
+| `iv viz --out dag.png [--full] [--plain]` | Render the DAG as an image |
+| `iv viz --out dag.html --html [--reduce]` | Render an interactive DAG |
 
 ## Safety
 
