@@ -139,20 +139,32 @@ def _download(remote, local: Path, report=None) -> set[str]:
     return {rel for rel, _ in files}
 
 
-def fetch_tree(remote, destination: Path, report=None) -> set[str]:
+def fetch_tree(remote, destination: Path, report=None, *, replace: bool = False) -> set[str]:
     if not is_remote(remote):
         raise ConfigError(f"iv fetch needs a remote pipeline tree, got {remote}.")
     target = destination.expanduser().resolve()
-    if target.exists():
+    if target.is_symlink() or (target.exists() and not target.is_dir()):
         raise ConfigError(
-            f"iv fetch destination already exists: {target}. Choose a new directory so "
-            "IV cannot overwrite local work.")
+            f"iv fetch destination must be a directory, not a file or symlink: {target}.")
+    if target.exists() and not replace:
+        raise ConfigError(
+            f"iv fetch destination already exists: {target}. Pass --replace to replace "
+            "the complete directory after a successful download.")
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{target.name}.iv-fetch-",
                                      dir=target.parent) as tmp:
         staged = Path(tmp) / "tree"
         files = _download(remote, staged, report)
-        staged.rename(target)
+        previous = Path(tmp) / "previous"
+        if target.exists():
+            _say(report, f"remote fetch · replacing existing directory {target}")
+            target.rename(previous)
+        try:
+            staged.rename(target)
+        except BaseException:
+            if previous.exists() and not target.exists():
+                previous.rename(target)
+            raise
     _say(report, f"remote fetch complete · {len(files)} file(s) · {target}")
     return files
 

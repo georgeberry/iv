@@ -4,7 +4,7 @@
 
 **Keep agents focused and do replicable data science work.**
 
-`iv` forces code to follow a set of strict guidelines that prevents agents from doing things like handling nulls wrong, constructing dependency cycles, sideloading data, and building on top of stale data.
+`iv` forces code to follow a set of strict guidelines that prevents agents from doing things like constructing dependency cycles, sideloading data, and building on top of stale data.
 
 `iv` is designed for local and bespoke data science work that values correctness and legibility. 
 
@@ -131,6 +131,7 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv run --part season=2025` | Filter partitioned work; repeat for composite keys |
 | `iv run --log run.log` | Save merged stdout, stderr, and outcomes incrementally |
 | `iv fetch PATH` | Download remote production state into a new local directory |
+| `iv fetch PATH --replace` | Atomically replace an existing local snapshot |
 | `iv determinism --only STAGE` | Run a stage twice in isolated temporary output trees and compare content |
 | `iv determinism --only STAGE --part season=2025` | Audit one partition of a stage |
 | `iv determinism --sample` | Audit every stage at its last declared partition |

@@ -923,9 +923,13 @@ def _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log):
 
 @app.command()
 @reports
-def fetch(destination: Path = typer.Argument(..., help="new local directory for remote state")):
+def fetch(
+    destination: Path = typer.Argument(..., help="local directory for remote state"),
+    replace: bool = typer.Option(
+        False, "--replace", help="replace an existing directory after download succeeds"),
+):
     iv = _load()
-    _paths.fetch_tree(iv.tree, destination, report=typer.echo)
+    _paths.fetch_tree(iv.tree, destination, report=typer.echo, replace=replace)
 
 
 @app.command()

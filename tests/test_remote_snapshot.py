@@ -328,7 +328,8 @@ def test_iv_fetch_downloads_remote_state_to_a_new_local_directory(tmp_path,
     assert not any(op in {"upload", "unlink"} for op, _ in remote.events)
 
 
-def test_iv_fetch_refuses_to_merge_over_an_existing_directory(tmp_path, monkeypatch):
+def test_iv_fetch_replaces_an_existing_directory_without_leaving_stale_files(tmp_path,
+                                                                             monkeypatch):
     remote = Remote({"raw/a.parquet": b"remote"})
     iv = pipeline(remote)
     destination = tmp_path / "state"
@@ -338,10 +339,16 @@ def test_iv_fetch_refuses_to_merge_over_an_existing_directory(tmp_path, monkeypa
     import iv.cli as cli
     monkeypatch.setattr(cli, "_load", lambda: iv)
 
-    result = CliRunner().invoke(app, ["fetch", str(destination)])
-    assert result.exit_code == 1
-    assert "destination already exists" in result.output
+    refused = CliRunner().invoke(app, ["fetch", str(destination)])
+    assert refused.exit_code == 1
+    assert "Pass --replace" in refused.output
     assert existing.read_text() == "mine"
+
+    result = CliRunner().invoke(app, ["fetch", str(destination), "--replace"])
+    assert result.exit_code == 0, result.output
+    assert "replacing existing directory" in result.output
+    assert not existing.exists()
+    assert (destination / "raw/a.parquet").read_bytes() == b"remote"
 
 
 def test_iv_fetch_cleans_up_an_interrupted_staging_directory(tmp_path, monkeypatch):
@@ -356,6 +363,27 @@ def test_iv_fetch_cleans_up_an_interrupted_staging_directory(tmp_path, monkeypat
 
     monkeypatch.setattr(paths, "_download", interrupted)
     with pytest.raises(StateError, match="download interrupted"):
-        paths.fetch_tree(remote, destination)
+        paths.fetch_tree(remote, destination, replace=True)
     assert not destination.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_an_interrupted_refetch_preserves_the_existing_directory(tmp_path, monkeypatch):
+    remote = Remote({"raw/a.parquet": b"new"})
+    destination = tmp_path / "state"
+    destination.mkdir()
+    existing = destination / "raw/a.parquet"
+    existing.parent.mkdir()
+    existing.write_bytes(b"old")
+    import iv.paths as paths
+
+    def interrupted(source, staged, report=None):
+        staged.mkdir(parents=True)
+        (staged / "partial").write_text("partial")
+        raise StateError("download interrupted")
+
+    monkeypatch.setattr(paths, "_download", interrupted)
+    with pytest.raises(StateError, match="download interrupted"):
+        paths.fetch_tree(remote, destination, replace=True)
+    assert existing.read_bytes() == b"old"
+    assert list(tmp_path.iterdir()) == [destination]
