@@ -152,30 +152,41 @@ def _part_label(part: dict | None) -> str:
     return " [" + ", ".join(f"{k}={v}" for k, v in sorted(part.items())) + "]"
 
 
-def _print_stage_output(text: str) -> None:
-    if not text:
-        return
-    typer.secho("  output", fg="bright_black")
-    for line in text.rstrip("\n").splitlines():
-        typer.echo(f"  │ {line}")
+class _LiveOutput(io.TextIOBase):
 
-
-class _LogCapture(io.StringIO):
-
-
-    def __init__(self, sink=None) -> None:
-        super().__init__()
+    def __init__(self, console, sink=None) -> None:
+        self.console = console
         self.sink = sink
+        self.pending = ""
+        self.started = False
 
     def write(self, text) -> int:
         if self.sink:
             self.sink.write(text)
-        return super().write(text)
+            self.sink.flush()
+        self.pending += text
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            self._line(line)
+        self.console.flush()
+        return len(text)
+
+    def _line(self, line: str) -> None:
+        if not self.started:
+            self.console.write("  output\n")
+            self.started = True
+        self.console.write(f"  │ {line}\n")
+
+    def finish(self) -> None:
+        if self.pending:
+            self._line(self.pending)
+            self.pending = ""
+        self.console.flush()
 
     def flush(self) -> None:
         if self.sink:
             self.sink.flush()
-        super().flush()
+        self.console.flush()
 
 
 def _open_run_log(path: Path | None, total: int):
@@ -237,7 +248,7 @@ def _execute_work(iv, work, log: Path | None) -> None:
         typer.secho(heading, bold=True)
         if run_log:
             run_log.write(f"\n{heading}\n"); run_log.flush()
-        output = _LogCapture(run_log)
+        output = _LiveOutput(sys.stdout, run_log)
         step_started = time.perf_counter()
         try:
             args = p or {}
@@ -256,12 +267,12 @@ def _execute_work(iv, work, log: Path | None) -> None:
             if checkpoint is not None:
                 checkpoint()
         except BaseException:
-            _print_stage_output(output.getvalue())
+            output.finish()
             if run_log:
                 run_log.write(f"\n[iv] failed ({time.perf_counter() - step_started:.2f}s)\n")
                 run_log.close()
             raise
-        _print_stage_output(output.getvalue())
+        output.finish()
         elapsed = time.perf_counter() - step_started
         if will_run:
             ran += 1; outcome = f"reran ({elapsed:.2f}s)"
@@ -321,12 +332,9 @@ def _last_part(parts: list[dict | None]) -> dict | None:
 
 
 @app.command()
-def graph(focus: str = typer.Option(None, "--focus", help="only this stage and its cone"),
-          full: bool = typer.Option(False, "--full", help="every edge, not the reduction")):
+def graph(focus: str = typer.Option(None, "--focus", help="only this stage and its cone")):
     g = _graph_of()
     order, parents = g.order(), g.parent_map()
-    if not full:
-        parents = _render.transitive_reduction(order, parents)
     if focus:
         order, parents = _render.focus(order, parents, focus)
     typer.echo(_render.render(order, parents))
@@ -474,13 +482,10 @@ def drift(trace: Path = typer.Option(None, "--trace")):
 
 @app.command()
 def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
-        full: bool = typer.Option(False, "--full", help="every edge, not the reduction"),
         plain: bool = typer.Option(False, "--plain",
                                    help="do not read the tree; leave every node grey"),
         html: bool = typer.Option(False, "--html",
-                                  help="an interactive page instead of a picture"),
-        reduce: bool = typer.Option(False, "--reduce",
-                                    help="--html: hide edges a longer path implies")):
+                                  help="an interactive page instead of a picture")):
 
 
     from . import viz as _viz
@@ -497,10 +502,10 @@ def viz(out: Path = typer.Option(Path("dag.png"), "--out"),
         if out.suffix == ".png":
             out = out.with_suffix(".html")
         got = _web.write(g, out, status=status, state=state, maybe=maybe,
-                         title=iv.tree.name, reduce=reduce)
+                         title=iv.tree.name)
         typer.echo(f"wrote {got} — open it")
         return
-    typer.echo(f"wrote {_viz.draw(g, out, full=full, status=status)}")
+    typer.echo(f"wrote {_viz.draw(g, out, status=status)}")
 
 
 def _declared_part_keys(iv, g, name: str) -> set[tuple[str, ...]]:

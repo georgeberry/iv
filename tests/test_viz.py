@@ -82,6 +82,8 @@ def test_a_shard_is_labelled_with_the_partition_it_is(iv):
 
 def test_every_kind_has_a_distinct_shape():
     assert len(set(_viz.SHAPE.values())) == len(_viz.SHAPE)
+    assert _viz.SHAPE["root"] == "D"
+    assert _viz.SHAPE["terminal"] == "s"
 
 
 def test_the_states_are_the_ones_status_reports():

@@ -8,16 +8,6 @@ from iv import render
 from iv.static import Node, Site
 
 
-def test_transitive_reduction_removes_redundant_edges():
-    parents = {"a": [], "b": ["a"], "c": ["a", "b"], "outside": ["a"]}
-    assert render.transitive_reduction(["a", "b", "c"], parents) == {
-        "a": [],
-        "b": ["a"],
-        "c": ["b"],
-        "outside": ["a"],
-    }
-
-
 def test_ancestor_descendant_and_focus_queries():
     parents = {"a": [], "b": ["a"], "c": ["b"], "side": ["a"]}
     assert render.ancestors_of("c", parents) == {"a", "b"}

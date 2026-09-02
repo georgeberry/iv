@@ -17,13 +17,13 @@ ROW, CHAR, GAP = 52.0, FONT * 0.56, 30.0
 
 
 def payload(g, status: dict | None = None, state: dict | None = None,
-            maybe: set | None = None, reduce: bool = False) -> dict:
+            maybe: set | None = None) -> dict:
 
 
     whole = _viz.to_networkx(g)
 
 
-    d = _reduced(whole) if reduce else whole
+    d = whole
     status = status or {}
     state = state or {}
     maybe = maybe or set()
@@ -78,7 +78,7 @@ def payload(g, status: dict | None = None, state: dict | None = None,
     for n in nodes:
         n["position"] = at[n["id"]]
     return {"nodes": nodes, "edges": edges, "stages": stages,
-            "counts": _counts(nodes), "reduced": reduce}
+            "counts": _counts(nodes)}
 
 
 def _positions(d) -> dict:
@@ -112,18 +112,6 @@ def _positions(d) -> dict:
     return pos
 
 
-def _reduced(d):
-
-    import networkx as nx
-    if _viz.find_cycle(d) is not None:
-        return d
-    r = nx.transitive_reduction(d)
-    r.add_nodes_from(d.nodes(data=True))
-    for u, v in r.edges:
-        r.edges[u, v].update(d.edges[u, v])
-    return r
-
-
 def _owns(part: tuple, shard_key: str) -> bool:
 
     if not part:
@@ -145,10 +133,10 @@ def _nid(node) -> str:
 
 
 def write(g, out: Path, status: dict | None = None, state: dict | None = None,
-          maybe: set | None = None, title: str = "iv", reduce: bool = False) -> Path:
+          maybe: set | None = None, title: str = "iv") -> Path:
     out = Path(out)
     out.write_text(_PAGE.replace("__DATA__", json.dumps(
-        payload(g, status, state, maybe, reduce), indent=None))
+        payload(g, status, state, maybe), indent=None))
         .replace("__TITLE__", title)
         .replace("__COLOURS__", json.dumps(_viz.STATUS))
         .replace("__SCRIPTS__", "\n".join(
@@ -251,7 +239,7 @@ const cy = cytoscape({
       'width':26,'height':26,'border-width':0,
       // SHAPE is kind, COLOUR is status — the same two channels the PNG uses, so a
       // reader of one is not learning a second vocabulary for the other.
-      'shape': n => ({root:'square', terminal:'diamond'})[n.data('kind')] || 'ellipse',
+      'shape': n => ({root:'diamond', terminal:'square'})[n.data('kind')] || 'ellipse',
     }},
     {selector:'edge', style:{
       'width':1.2,'line-color':'var(--edge)','target-arrow-color':'var(--edge)',
@@ -270,11 +258,19 @@ const cy = cytoscape({
       'width':34,'height':34,'font-weight':'bold','font-size':15,'z-index':99}},
     {selector:'node.up', style:{'border-width':3,'border-color':'var(--up)'}},
     {selector:'node.down', style:{'border-width':3,'border-color':'var(--down)'}},
+    {selector:'node.up-far', style:{'border-width':2,'border-color':'var(--up)',
+      'opacity':.32,'text-opacity':.42}},
+    {selector:'node.down-far', style:{'border-width':2,'border-color':'var(--down)',
+      'opacity':.32,'text-opacity':.42}},
     // A highlighted edge is the answer to the question, so it comes back to full strength.
     {selector:'edge.up', style:{'line-color':'var(--up)','target-arrow-color':'var(--up)',
       'width':2.2,'opacity':.9,'z-index':10}},
     {selector:'edge.down', style:{'line-color':'var(--down)','target-arrow-color':'var(--down)',
       'width':2.2,'opacity':.9,'z-index':10}},
+    {selector:'edge.up-far', style:{'line-color':'var(--up)',
+      'target-arrow-color':'var(--up)','width':1.5,'opacity':.28,'z-index':5}},
+    {selector:'edge.down-far', style:{'line-color':'var(--down)',
+      'target-arrow-color':'var(--down)','width':1.5,'opacity':.28,'z-index':5}},
   ],
   layout: LAYOUT,
   wheelSensitivity:.2,
@@ -284,12 +280,15 @@ cy.ready(land);
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML}
 
 function select(node, fit){
-  cy.elements().removeClass('faded up down sel');
+  cy.elements().removeClass('faded up down up-far down-far sel');
   // The two questions, and the graph library answers both outright: everything that can
   // reach this node, and everything this node can reach.
   const up = node.predecessors(), down = node.successors();
+  const upDirect = node.incomers(), downDirect = node.outgoers();
   cy.elements().difference(up.union(down).union(node)).addClass('faded');
-  up.addClass('up'); down.addClass('down'); node.addClass('sel');
+  up.difference(upDirect).addClass('up-far');
+  down.difference(downDirect).addClass('down-far');
+  upDirect.addClass('up'); downDirect.addClass('down'); node.addClass('sel');
   if (fit) cy.animate({fit:{eles:up.union(down).union(node), padding:60}, duration:250});
   panel(node, up.nodes(), down.nodes());
 }
@@ -334,13 +333,13 @@ function panel(node, up, down){
 window.pick = id => select(cy.$id(id), true);
 cy.on('tap','node', e => select(e.target, false));
 cy.on('tap', e => { if (e.target === cy) {
-  cy.elements().removeClass('faded up down sel');
+  cy.elements().removeClass('faded up down up-far down-far sel');
   document.getElementById('side-body').outerHTML =
     '<p class="hint" id="side-body">Click a node.</p>';
 }});
 
 document.getElementById('reset').onclick = () => {
-  cy.elements().removeClass('faded up down sel');
+  cy.elements().removeClass('faded up down up-far down-far sel');
   land();
 };
 

@@ -258,6 +258,20 @@ def test_runner_prints_plan_progress_and_stage_output(iv, monkeypatch):
     assert "0 reran, 1 current — skipped" in second.output
 
 
+def test_stage_output_is_streamed_before_the_stage_finishes():
+    import io
+    from iv.cli import _LiveOutput
+
+    console = io.StringIO()
+    output = _LiveOutput(console)
+    output.write("still working\n")
+    assert console.getvalue() == "  output\n  │ still working\n"
+    output.write("last partial line")
+    assert "last partial line" not in console.getvalue()
+    output.finish()
+    assert console.getvalue().endswith("  │ last partial line\n")
+
+
 def test_runner_reuses_its_freshness_check_when_invoking_a_stage(iv, monkeypatch):
     @iv.data(dataset="raw/feed/", why="one root", once=True)
     def feed():

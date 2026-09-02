@@ -121,7 +121,7 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | Command | Purpose |
 | --- | --- |
 | `iv --instance module:attr COMMAND` | Use a pipeline other than the configured default |
-| `iv run` | Run the pipeline in dependency order |
+| `iv run` | Run in dependency order and stream each stage's stdout and stderr |
 | `iv run --up-to STAGE` | Run a stage and its prerequisites |
 | `iv run --up-to-excluding STAGE` | Run only a stage's prerequisites |
 | `iv run --from STAGE` | Run a stage and descendants; require current upstreams |
@@ -138,7 +138,7 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv status` | Show current, maybe, and stale shards |
 | `iv plan` | Show rebuilds and conditional downstream work |
 | `iv why DATASET` | Show shard fingerprints, keys, inputs, and status |
-| `iv graph [--focus STAGE] [--full]` | Print the DAG, optionally limited to one stage's cone |
+| `iv graph [--focus STAGE]` | Print every declared edge, optionally limited to one stage's cone |
 | `iv stage NAME` | Show a stage's reads and writes |
 | `iv impact STAGE` | Show what may run if a stage changes |
 | `iv impact STAGE --tick` | Show possible impact if all output shards change |
@@ -149,8 +149,8 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv verify [DATASET]` | Re-fingerprint shards and verify their filenames |
 | `iv gc [DATASET]` | Remove superseded shards |
 | `iv gc DATASET --partition-key season` | Drop shards outside an explicitly named layout |
-| `iv viz --out dag.png [--full] [--plain]` | Render the DAG as an image |
-| `iv viz --out dag.html --html [--reduce]` | Render an interactive DAG |
+| `iv viz --out dag.png [--plain]` | Render every declared edge as an image |
+| `iv viz --out dag.html --html` | Render an interactive DAG with every declared edge |
 
 ## Safety
 

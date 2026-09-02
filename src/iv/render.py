@@ -17,25 +17,6 @@ def use_color(flag: bool | None = None) -> bool:
     return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 
-def transitive_reduction(order: list[str], parents: dict[str, list[str]]
-                         ) -> dict[str, list[str]]:
-    rank = {n: i for i, n in enumerate(order)}
-    ancestors: dict[str, set[str]] = {}
-    out: dict[str, list[str]] = {}
-    for n in sorted(parents, key=lambda x: rank.get(x, 10 ** 9)):
-        direct = [p for p in parents.get(n, ()) if p in rank]
-        keep = []
-        for p in direct:
-            if not any(p in ancestors.get(q, set()) for q in direct if q != p):
-                keep.append(p)
-        out[n] = sorted(keep)
-        reach = set(direct)
-        for p in direct:
-            reach |= ancestors.get(p, set())
-        ancestors[n] = reach
-    return out
-
-
 def ancestors_of(node: str, parents: dict[str, list[str]]) -> set[str]:
     seen, stack = set(), list(parents.get(node, ()))
     while stack:

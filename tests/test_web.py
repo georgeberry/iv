@@ -130,7 +130,7 @@ def test_upstream_and_downstream_are_reachable_from_the_edges(built):
     assert len(p["nodes"]) == _viz.to_networkx(g).number_of_nodes()
 
 
-def test_every_declared_edge_is_drawn_and_reduce_drops_the_implied_ones(iv):
+def test_every_declared_edge_is_drawn(iv):
 
 
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
@@ -146,19 +146,6 @@ def test_every_declared_edge_is_drawn_and_reduce_drops_the_implied_ones(iv):
     g = _graph.build(iv)
     assert _viz.to_networkx(g).number_of_edges() == 3
     assert len(_web.payload(g)["edges"]) == 3, "every declared read is drawn"
-    assert len(_web.payload(g, reduce=True)["edges"]) == 2, "feed -> end is implied"
-
-
-def test_a_cone_is_unchanged_by_the_reduction(built):
-
-
-    import networkx as nx
-    g, _, _, _ = load(built)
-    d = _viz.to_networkx(g)
-    r = _web._reduced(d)
-    for n in d:
-        assert nx.descendants(d, n) == nx.descendants(r, n)
-        assert nx.ancestors(d, n) == nx.ancestors(r, n)
 
 
 def test_the_counts_add_up_to_the_nodes(built):
@@ -234,9 +221,12 @@ def test_the_page_needs_only_a_renderer(built, tmp_path):
     text = _web.write(g, tmp_path / "dag.html").read_text()
     assert text.count("<script src=") == 1
     assert "dagre" not in text
+    assert "{root:'diamond', terminal:'square'}" in text
+    assert "up.difference(upDirect).addClass('up-far')" in text
+    assert "down.difference(downDirect).addClass('down-far')" in text
 
 
-def test_the_panel_lists_the_reads_the_code_declares_not_the_drawn_ones(iv):
+def test_the_panel_lists_the_reads_the_code_declares(iv):
 
 
     feed = iv.source("raw/feed/", why="a fetcher drops it here")
@@ -252,21 +242,8 @@ def test_the_panel_lists_the_reads_the_code_declares_not_the_drawn_ones(iv):
     p = _web.payload(_graph.build(iv))
     node, = [n for n in p["nodes"] if n["dataset"] == "processed/end/"]
     assert node["reads"] == ["processed/mid/", "raw/feed/"]
-    r = _web.payload(_graph.build(iv), reduce=True)
-    assert len(r["edges"]) == 2, "the drawn edge is dropped under --reduce"
-    assert [n for n in r["nodes"] if n["dataset"] == "processed/end/"][0]["reads"] == \
-        ["processed/mid/", "raw/feed/"], "but the panel still says what the code declares"
     src, = [n for n in p["nodes"] if n["dataset"] == "raw/feed/"]
     assert src["readBy"] == ["processed/end/", "processed/mid/"]
-
-
-def test_the_columns_are_the_same_with_and_without_the_reduction(built):
-
-
-    g, _, _, _ = load(built)
-    full = {n["id"]: n["position"]["x"] for n in _web.payload(g)["nodes"]}
-    cut = {n["id"]: n["position"]["x"] for n in _web.payload(g, reduce=True)["nodes"]}
-    assert full == cut
 
 
 def test_the_layout_constants_match_the_css_they_are_meant_to_describe():

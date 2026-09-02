@@ -81,8 +81,8 @@ STATUS = {
 
 
 SHAPE = {
-    "root": "s",
-    "terminal": "D",
+    "root": "D",
+    "terminal": "s",
     "derived": "o",
 }
 
@@ -101,16 +101,10 @@ def states(state: dict, maybe: set) -> dict:
     return out
 
 
-def draw(g, out: Path, full: bool = False, status: dict | None = None) -> Path:
+def draw(g, out: Path, status: dict | None = None) -> Path:
 
 
     d = to_networkx(g)
-    if not full:
-        if find_cycle(d) is None:
-            reduced = nx.transitive_reduction(d)
-            reduced.add_nodes_from(d.nodes(data=True))
-            d = reduced
-
 
     try:
         order = {n: i for i, n in enumerate(g.order())}
