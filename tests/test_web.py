@@ -89,7 +89,13 @@ def test_a_partitioned_dataset_is_one_node_holding_every_shard(built):
     _, _, _, p = load(built)
     box = [n for n in p["nodes"] if n["dataset"] == "processed/box/"]
     assert len(box) == 1
+    assert box[0]["partitionKeys"] == ["season"]
     assert sorted(s["part"] for s in box[0]["shards"]) == ["season=2023", "season=2024"]
+
+
+def test_the_page_lists_every_partition_key_in_use(built):
+    _, _, _, p = load(built)
+    assert p["partitionKeys"] == ["completed", "season"]
 
 
 def test_every_node_carries_what_the_panel_shows(built):
@@ -224,6 +230,11 @@ def test_the_page_needs_only_a_renderer(built, tmp_path):
     assert "{root:'diamond', terminal:'square'}" in text
     assert "up.difference(upDirect).addClass('up-far')" in text
     assert "down.difference(downDirect).addClass('down-far')" in text
+    assert "partitioned by&nbsp;" in text
+    assert "data-key=\"${esc(k)}\"" in text
+    assert "n.data('partitionKeys').includes(selectedPartition)" in text
+    assert "matches.addClass('partition-match')" in text
+    assert text.index("immediate upstream") < text.index("shards —")
 
 
 def test_the_panel_lists_the_reads_the_code_declares(iv):

@@ -49,6 +49,7 @@ def payload(g, status: dict | None = None, state: dict | None = None,
         writers = g.producers_of(ds)
         src = getattr(iv, "_sources", {}).get(ds)
         decl = getattr(iv, "_datasets", {}).get(ds)
+        partition_keys = sorted({key for shape in iv._expected_part_keys(ds) for key in shape})
         nodes.append({
             "id": _nid(n),
             "label": _viz.short(n),
@@ -61,6 +62,7 @@ def payload(g, status: dict | None = None, state: dict | None = None,
             "why": (getattr(src, "why", None) or getattr(decl, "why", None)
                     or (stages[writers[0]]["why"] if writers else "")),
             "declared": "source" if src else ("dataset" if decl else "inline"),
+            "partitionKeys": partition_keys,
             "writers": writers,
             "shards": [{"part": p or "(one shard)", "reason": why,
                         "maybe": (ds, p) in maybe}
@@ -77,8 +79,9 @@ def payload(g, status: dict | None = None, state: dict | None = None,
     at = _positions(d)
     for n in nodes:
         n["position"] = at[n["id"]]
+    partition_keys = sorted({key for node in nodes for key in node["partitionKeys"]})
     return {"nodes": nodes, "edges": edges, "stages": stages,
-            "counts": _counts(nodes)}
+            "counts": _counts(nodes), "partitionKeys": partition_keys}
 
 
 def _positions(d) -> dict:
@@ -186,12 +189,17 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);
   background:var(--panel);color:var(--ink);font-size:13px}
 .key{font-size:11px;color:var(--dim);display:flex;align-items:center;gap:5px;
   background:var(--panel);padding:4px 9px;border-radius:99px;border:1px solid var(--line)}
+.partition{border:0;border-bottom:2px solid transparent;padding:1px 2px;background:none;
+  color:var(--dim);font:inherit;cursor:pointer}
+.partition:hover{color:var(--ink)}
+.partition[aria-pressed="true"]{color:var(--ink);border-bottom-color:var(--sel);font-weight:700}
 .dot{width:9px;height:9px;border-radius:99px;display:inline-block}
 .hint{color:var(--dim);font-size:13px}
 </style></head><body>
 <div id="cy"></div>
 <div id="bar">
   <input id="q" placeholder="filter datasets…" autocomplete="off">
+  <span class="key" id="partition-keys"></span>
   <span class="key" id="legend"></span>
   <span class="key" id="reset" style="cursor:pointer">reset view</span>
 </div>
@@ -220,6 +228,12 @@ function land(){
   cy.pan({x: 36 - b.x1 * FLOOR, y: h / 2 - (b.y1 + b.h / 2) * FLOOR});
 }
 const byId = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
+
+document.getElementById('partition-keys').innerHTML = DATA.partitionKeys.length
+  ? `partitioned by&nbsp; ${DATA.partitionKeys.map(k =>
+      `<button class="partition" data-key="${esc(k)}" aria-pressed="false">${esc(k)}</button>`
+    ).join(' · ')}`
+  : 'no partitions';
 
 document.getElementById('legend').innerHTML = ['stale','maybe','current','source']
   .map(s => `<span class="dot" style="background:${C[s]}"></span>${s} ${DATA.counts[s]||0}`)
@@ -254,6 +268,8 @@ const cy = cytoscape({
       'control-point-weights':[.5],
     }},
     {selector:'.faded', style:{'opacity':.07,'text-opacity':0}},
+    {selector:'node.partition-match', style:{'border-width':3,
+      'border-color':'var(--sel)','font-weight':'bold','z-index':50}},
     {selector:'node.sel', style:{'border-width':4,'border-color':'var(--sel)',
       'width':34,'height':34,'font-weight':'bold','font-size':15,'z-index':99}},
     {selector:'node.up', style:{'border-width':3,'border-color':'var(--up)'}},
@@ -279,7 +295,42 @@ cy.ready(land);
 
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML}
 
+let selectedPartition = null;
+function syncPartitionButtons(){
+  document.querySelectorAll('.partition').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.key === selectedPartition ? 'true' : 'false'));
+}
+
+function clearFilters(){
+  selectedPartition = null;
+  document.getElementById('q').value = '';
+  syncPartitionButtons();
+}
+
+function applyFilters(fit){
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  cy.elements().removeClass('faded partition-match up down up-far down-far sel');
+  const matches = cy.nodes().filter(n =>
+    (!q || n.data('dataset').toLowerCase().includes(q)) &&
+    (!selectedPartition || n.data('partitionKeys').includes(selectedPartition)));
+  cy.nodes().difference(matches).addClass('faded');
+  if (selectedPartition) {
+    cy.edges().addClass('faded');
+    matches.addClass('partition-match');
+    if (fit && matches.length) cy.animate({fit:{eles:matches, padding:80}, duration:250});
+  }
+}
+
+document.getElementById('partition-keys').addEventListener('click', e => {
+  const button = e.target.closest('.partition');
+  if (!button) return;
+  selectedPartition = selectedPartition === button.dataset.key ? null : button.dataset.key;
+  syncPartitionButtons();
+  applyFilters(true);
+});
+
 function select(node, fit){
+  clearFilters();
   cy.elements().removeClass('faded up down up-far down-far sel');
   // The two questions, and the graph library answers both outright: everything that can
   // reach this node, and everything this node can reach.
@@ -308,12 +359,20 @@ function panel(node, up, down){
         : s.maybe ? '<span class="ok">may follow — an upstream is stale</span>'
         : '<span class="ok">current</span>'}</li>`).join('')}</ul>`
     : '<p class="ok">nothing on disk yet</p>';
+  const partitioned = d.partitionKeys.length
+    ? `partitioned by ${d.partitionKeys.map(esc).join(' · ')}`
+    : 'unpartitioned';
 
   document.getElementById('side-body').outerHTML = `<div id="side-body">
     <h2>${esc(d.dataset)}</h2>
     <p class="why">${esc(d.why)}</p>
     <span class="pill" style="background:${C[d.status]||C.source}">${esc(d.status)}</span>
     <span class="pill" style="background:var(--dim)">${esc(d.kind)}</span>
+    <div class="sec">${partitioned}</div>
+    <div class="sec">immediate upstream (${d.reads.length})</div>${list(d.reads)}
+    <div class="sec">immediate downstream (${d.readBy.length})</div>${list(d.readBy)}
+    <div class="sec">upstream in all (${up.length}) · downstream in all (${down.length})</div>
+    <p class="ok">a rebuild of this carries into ${down.length} node(s).</p>
     ${d.writers.length ? `<div class="sec">built by</div><ul>${d.writers.map(w =>
         `<li><code>${esc(w.split('::').pop())}</code>
          <div class="ok">${esc((DATA.stages[w]||{}).why||'')}</div></li>`).join('')}</ul>`
@@ -323,30 +382,24 @@ function panel(node, up, down){
         <div class="ok">${esc(e[1])}</div></li>`).join('')}</ul>` : ''}
     <div class="sec">shards — ${d.shards.filter(s=>s.reason).length} stale of ${d.shards.length}</div>
     ${shards}
-    <div class="sec">reads directly (${d.reads.length})</div>${list(d.reads)}
-    <div class="sec">read directly by (${d.readBy.length})</div>${list(d.readBy)}
-    <div class="sec">upstream in all (${up.length}) · downstream in all (${down.length})</div>
-    <p class="ok">a rebuild of this carries into ${down.length} node(s).</p>
   </div>`;
 }
 
 window.pick = id => select(cy.$id(id), true);
 cy.on('tap','node', e => select(e.target, false));
 cy.on('tap', e => { if (e.target === cy) {
-  cy.elements().removeClass('faded up down up-far down-far sel');
+  clearFilters();
+  cy.elements().removeClass('faded partition-match up down up-far down-far sel');
   document.getElementById('side-body').outerHTML =
     '<p class="hint" id="side-body">Click a node.</p>';
 }});
 
 document.getElementById('reset').onclick = () => {
-  cy.elements().removeClass('faded up down up-far down-far sel');
+  clearFilters();
+  cy.elements().removeClass('faded partition-match up down up-far down-far sel');
   land();
 };
 
-document.getElementById('q').addEventListener('input', e => {
-  const q = e.target.value.trim().toLowerCase();
-  cy.nodes().forEach(n => n.toggleClass('faded',
-    !!q && !n.data('dataset').toLowerCase().includes(q)));
-});
+document.getElementById('q').addEventListener('input', () => applyFilters(false));
 </script></body></html>
 """
