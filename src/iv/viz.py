@@ -40,11 +40,13 @@ def to_networkx(g) -> nx.DiGraph:
                     continue
                 producers = writes.get(inp.dataset)
                 if not producers:
-                    d.add_edge((inp.dataset, ()), ident(out), stage=node)
+                    d.add_edge((inp.dataset, ()), ident(out), stage=node,
+                               rule=inp.rule or "all_of", optional=inp.optional)
                     continue
                 for src in producers:
                     if _overlaps(inp, src):
-                        d.add_edge(ident(src), ident(out), stage=node)
+                        d.add_edge(ident(src), ident(out), stage=node,
+                                    rule=inp.rule or "all_of", optional=inp.optional)
     return d
 
 
@@ -77,6 +79,17 @@ STATUS = {
     "maybe": "#3aa8c1",
     "stale": "#e0a458",
     "source": "#9aa0a6",
+}
+
+EDGE_STYLE = {
+    "all_of": "solid",
+    "same_part": "dashed",
+    "before_part": "dotted",
+    "before_part_inclusive": "dotted",
+    "after_part": "dashed",
+    "after_part_inclusive": "dashed",
+    "parts": (0, (3, 3)),
+    "between": (0, (3, 3)),
 }
 
 
@@ -140,8 +153,13 @@ def draw(g, out: Path, status: dict | None = None) -> Path:
 
     tallest = max(len(v) for v in by_layer.values())
     fig, ax = plt.subplots(figsize=(total + 0.8, max(4.0, 0.34 * tallest + 1.6)))
-    nx.draw_networkx_edges(d, pos, ax=ax, edge_color="#c9c9c9", arrows=True,
-                           arrowsize=10, node_size=260, width=1.1)
+    by_rule: dict[str, list[tuple]] = {}
+    for u, v, data in d.edges(data=True):
+        by_rule.setdefault(data.get("rule", "all_of"), []).append((u, v))
+    for rule, edges in by_rule.items():
+        nx.draw_networkx_edges(d, pos, ax=ax, edgelist=edges, edge_color="#c9c9c9",
+                               style=EDGE_STYLE.get(rule, "solid"), arrows=True,
+                               arrowsize=10, node_size=260, width=1.1)
     for kind, marker in SHAPE.items():
         group = [n for n in d if d.nodes[n].get("kind", "derived") == kind]
         if not group:

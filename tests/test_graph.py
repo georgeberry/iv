@@ -8,6 +8,7 @@ import pytest
 from iv import Pipeline
 from iv import graph as _graph
 from iv import static as _static
+from iv import viz as _viz
 from iv.errors import DeclError
 
 from tests.conftest import write_stage
@@ -172,6 +173,22 @@ def test_different_partitions_of_one_dataset_are_allowed(iv):
         return p
 
     assert check(iv) == ([], [])
+
+
+def test_graph_edges_retain_the_read_rule(iv):
+    feed = iv.source("raw/feed/", why="the feed")
+
+    @iv.data(dataset="processed/mid/", part="season", why="the middle")
+    def mid(season, f=iv.same_part(feed, why="the matching season")):
+        return f
+
+    @iv.data(dataset="processed/end/", part="season", why="the end")
+    def end(m=iv.before_part(mid, why="prior seasons only")):
+        return m
+
+    g = _graph.build(iv)
+    edges = [(u, v, d["rule"]) for u, v, d in _viz.to_networkx(g).edges(data=True)]
+    assert {rule for _, _, rule in edges} == {"same_part", "before_part"}
 
 
 def test_an_undeclared_read_is_an_error_and_an_unseen_one_is_a_warning(iv):

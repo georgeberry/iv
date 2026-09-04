@@ -24,6 +24,7 @@ class Site:
     where: tuple = ()
     sel: tuple | None = ()
     owner: str = ""
+    rule: str = ""
 
     @property
     def location(self) -> str:

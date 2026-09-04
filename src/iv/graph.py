@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import static as _static
+from .decl import PART
 from .errors import IvError
 
 
@@ -76,7 +77,8 @@ def declared_nodes(iv) -> list[_static.Node]:
             _static.Site(kind="read", dataset=r.dataset, why=r.why, file=rel,
                          line=_line_of(asset.fn), optional=r.optional,
                          update_file_on_disk=r.is_own,
-                         where=r.where(), sel=r.sel(), owner=fn_name)
+                         where=r.where(), sel=r.sel(), owner=fn_name,
+                         rule=_read_rule(r))
             for r in asset.reads
         ]
 
@@ -97,6 +99,29 @@ def declared_nodes(iv) -> list[_static.Node]:
                                 sites=tuple(sites),
                                 guarded=asset.may_skip))
     return out
+
+
+def _read_rule(read) -> str:
+    if read.kind == "all":
+        return "all_of"
+    if read.kind == "own":
+        return "own_last_copy"
+    if read.kind == "multi":
+        return "parts"
+    if read.kind == "in":
+        return "same_part" if read.body == (PART,) else "parts"
+    if read.kind == "range":
+        ops = {op for op, _ in read.body}
+        if ops == {"lt"}:
+            return "before_part"
+        if ops == {"le"}:
+            return "before_part_inclusive"
+        if ops == {"gt"}:
+            return "after_part"
+        if ops == {"ge"}:
+            return "after_part_inclusive"
+        return "between"
+    return read.kind
 
 
 def _line_of(fn) -> int:

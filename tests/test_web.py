@@ -134,6 +134,7 @@ def test_upstream_and_downstream_are_reachable_from_the_edges(built):
     for e in p["edges"]:
         assert e["source"] in ids and e["target"] in ids
     assert len(p["nodes"]) == _viz.to_networkx(g).number_of_nodes()
+    assert {e["rule"] for e in p["edges"]} == {"all_of"}
 
 
 def test_every_declared_edge_is_drawn(iv):
@@ -232,9 +233,17 @@ def test_the_page_needs_only_a_renderer(built, tmp_path):
     assert "down.difference(downDirect).addClass('down-far')" in text
     assert 'aria-label="Select a partition key"' in text
     assert "partition key: all" in text
+    assert "partition key: none" in text
+    assert "n.data('partitionKeys').length === 0" in text
     assert "n.data('partitionKeys').includes(selectedPartition)" in text
     assert "matches.addClass('partition-match')" in text
+    assert 'data-rule="${rule}"' in text
+    assert "selectedRule === button.dataset.rule" in text
+    assert "rule-match" in text
     assert "fit && matches.length" not in text
+    assert "cy.on('tap','edge'" in text
+    assert "function edgePanel(edge)" in text
+    assert "missing input is allowed" in text
     assert text.index("immediate upstream") < text.index("shards —")
 
 

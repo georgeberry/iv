@@ -74,7 +74,9 @@ def payload(g, status: dict | None = None, state: dict | None = None,
             "readBy": sorted({_nid(m) for m in whole.successors(n)}),
         })
 
-    edges = [{"source": _nid(u), "target": _nid(v), "stage": d.edges[u, v].get("stage", "")}
+    edges = [{"source": _nid(u), "target": _nid(v), "stage": d.edges[u, v].get("stage", ""),
+              "rule": d.edges[u, v].get("rule", "all_of"),
+              "optional": d.edges[u, v].get("optional", False)}
              for u, v in d.edges]
     at = _positions(d)
     for n in nodes:
@@ -192,12 +194,21 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);
 #partition-key{font-size:11px;color:var(--dim);background:var(--panel);padding:5px 9px;
   border-radius:7px;border:1px solid var(--line);cursor:pointer}
 .dot{width:9px;height:9px;border-radius:99px;display:inline-block}
+.edge-sample{display:inline-block;width:22px;border-top:2px solid var(--edge);vertical-align:middle}
+.edge-sample.same_part{border-top-style:dashed}
+.edge-sample.before_part,.edge-sample.before_part_inclusive{border-top-style:dotted}
+.edge-sample.after_part,.edge-sample.after_part_inclusive{border-top-style:dashed;border-top-width:3px}
+.edge-sample.parts,.edge-sample.between{border-top-style:dashed;border-top-width:1px}
+.edge-rule{border:0;background:none;color:var(--dim);font:inherit;font-size:11px;padding:0;cursor:pointer}
+.edge-rule:hover{color:var(--ink)}
+.edge-rule[aria-pressed="true"]{color:var(--ink);font-weight:700}
 .hint{color:var(--dim);font-size:13px}
 </style></head><body>
 <div id="cy"></div>
 <div id="bar">
   <input id="q" placeholder="filter datasets…" autocomplete="off">
   <select id="partition-key" aria-label="Select a partition key"></select>
+  <span class="key" id="edge-legend"></span>
   <span class="key" id="legend"></span>
   <span class="key" id="reset" style="cursor:pointer">reset view</span>
 </div>
@@ -229,14 +240,23 @@ const byId = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
 
 const partitionSelect = document.getElementById('partition-key');
 partitionSelect.innerHTML = DATA.partitionKeys.length
-  ? `<option value="">partition key: all</option>${DATA.partitionKeys.map(k =>
+  ? `<option value="">partition key: all</option><option value="__none__">partition key: none</option>${DATA.partitionKeys.map(k =>
       `<option value="${esc(k)}">partition key: ${esc(k)}</option>`).join('')}`
-  : '<option value="">no partition keys</option>';
-partitionSelect.disabled = !DATA.partitionKeys.length;
+  : '<option value="">partition key: all</option><option value="__none__">partition key: none</option>';
 
 document.getElementById('legend').innerHTML = ['stale','maybe','current','source']
   .map(s => `<span class="dot" style="background:${C[s]}"></span>${s} ${DATA.counts[s]||0}`)
   .join('&nbsp;&nbsp;');
+
+const RULES = [
+  ['all_of', 'all of'], ['same_part', 'same part'],
+  ['before_part', 'before'], ['before_part_inclusive', 'through'],
+  ['after_part', 'after'], ['after_part_inclusive', 'from'],
+  ['parts', 'selected'], ['between', 'range'],
+];
+document.getElementById('edge-legend').innerHTML = RULES.map(([rule, label]) =>
+  `<button class="edge-rule" data-rule="${rule}" aria-pressed="false">
+     <span class="edge-sample ${rule}"></span> ${label}</button>`).join('&nbsp;&nbsp;');
 
 const cy = cytoscape({
   container: document.getElementById('cy'),
@@ -260,6 +280,11 @@ const cy = cytoscape({
       // Opacity rather than a paler colour: it stays right in both themes, and a bundle of
       // edges over the same path darkens, which is information.
       'opacity':.35,
+      'line-style': e => ({before_part:'dotted', before_part_inclusive:'dotted',
+        same_part:'dashed', after_part:'dashed', after_part_inclusive:'dashed',
+        parts:'dashed', between:'dashed'}[e.data('rule')] || 'solid'),
+      'line-dash-pattern': e => ({same_part:[8,4], after_part:[12,4],
+        after_part_inclusive:[12,4], parts:[3,3], between:[3,3]}[e.data('rule')] || [1,0]),
       'target-arrow-shape':'triangle','arrow-scale':.9,
       // A long edge spanning several columns is drawn as an arc rather than a chord, so it
       // reads as going AROUND the columns it passes rather than through them.
@@ -286,6 +311,9 @@ const cy = cytoscape({
       'target-arrow-color':'var(--up)','width':1.5,'opacity':.28,'z-index':5}},
     {selector:'edge.down-far', style:{'line-color':'var(--down)',
       'target-arrow-color':'var(--down)','width':1.5,'opacity':.28,'z-index':5}},
+    {selector:'edge.sel', style:{'line-color':'var(--sel)','target-arrow-color':'var(--sel)',
+      'width':3,'opacity':1,'z-index':20}},
+    {selector:'edge.rule-match', style:{'width':2.8,'opacity':.95,'z-index':15}},
   ],
   layout: LAYOUT,
   wheelSensitivity:.2,
@@ -295,29 +323,45 @@ cy.ready(land);
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML}
 
 function clearFilters(){
+  selectedRule = null;
   partitionSelect.value = '';
   document.getElementById('q').value = '';
+  document.querySelectorAll('.edge-rule').forEach(b => b.setAttribute('aria-pressed', 'false'));
 }
 
 function applyFilters(){
   const q = document.getElementById('q').value.trim().toLowerCase();
   const selectedPartition = partitionSelect.value;
-  cy.elements().removeClass('faded partition-match up down up-far down-far sel');
+  cy.elements().removeClass('faded partition-match rule-match up down up-far down-far sel');
   const matches = cy.nodes().filter(n =>
     (!q || n.data('dataset').toLowerCase().includes(q)) &&
-    (!selectedPartition || n.data('partitionKeys').includes(selectedPartition)));
+    (!selectedPartition || (selectedPartition === '__none__'
+      ? n.data('partitionKeys').length === 0
+      : n.data('partitionKeys').includes(selectedPartition))));
   cy.nodes().difference(matches).addClass('faded');
-  if (selectedPartition) {
+  if (selectedRule) {
+    cy.edges().forEach(e => e.toggleClass('rule-match', e.data('rule') === selectedRule));
+    cy.edges().difference(cy.edges('.rule-match')).addClass('faded');
+  } else if (selectedPartition) {
     cy.edges().addClass('faded');
     matches.addClass('partition-match');
   }
 }
 
 partitionSelect.addEventListener('change', applyFilters);
+let selectedRule = null;
+document.getElementById('edge-legend').addEventListener('click', e => {
+  const button = e.target.closest('.edge-rule');
+  if (!button) return;
+  selectedRule = selectedRule === button.dataset.rule ? null : button.dataset.rule;
+  document.querySelectorAll('.edge-rule').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.rule === selectedRule ? 'true' : 'false'));
+  applyFilters();
+});
 
 function select(node, fit){
   clearFilters();
-  cy.elements().removeClass('faded up down up-far down-far sel');
+  cy.elements().removeClass('faded partition-match rule-match up down up-far down-far sel');
   // The two questions, and the graph library answers both outright: everything that can
   // reach this node, and everything this node can reach.
   const up = node.predecessors(), down = node.successors();
@@ -328,6 +372,28 @@ function select(node, fit){
   upDirect.addClass('up'); downDirect.addClass('down'); node.addClass('sel');
   if (fit) cy.animate({fit:{eles:up.union(down).union(node), padding:60}, duration:250});
   panel(node, up.nodes(), down.nodes());
+}
+
+function edgePanel(edge){
+  clearFilters();
+  cy.elements().removeClass('faded partition-match rule-match up down up-far down-far sel');
+  edge.addClass('sel');
+  edge.connectedNodes().addClass('sel');
+  const d = edge.data(), source = byId[d.source], target = byId[d.target];
+  const stage = DATA.stages[d.stage] || {};
+  document.getElementById('side-body').outerHTML = `<div id="side-body">
+    <h2>dependency</h2>
+    <p class="why">${esc(source ? source.dataset : d.source)} → ${esc(target ? target.dataset : d.target)}</p>
+    <span class="pill" style="background:var(--dim)">${esc(d.rule)}</span>
+    ${d.optional ? '<span class="pill" style="background:var(--dim)">optional</span>' : ''}
+    <div class="sec">declared by</div>
+    <p><code>${esc(d.stage)}</code></p>
+    <p class="ok">${esc(stage.why || 'no stage rationale recorded')}</p>
+    <div class="sec">reads</div>
+    <p>${esc(source ? source.dataset : d.source)} into ${esc(target ? target.dataset : d.target)}</p>
+    <div class="sec">rule</div>
+    <p class="ok">${esc(d.rule)}${d.optional ? ' — missing input is allowed' : ''}</p>
+  </div>`;
 }
 
 function panel(node, up, down){
@@ -373,6 +439,7 @@ function panel(node, up, down){
 
 window.pick = id => select(cy.$id(id), true);
 cy.on('tap','node', e => select(e.target, false));
+cy.on('tap','edge', e => edgePanel(e.target));
 cy.on('tap', e => { if (e.target === cy) {
   clearFilters();
   cy.elements().removeClass('faded partition-match up down up-far down-far sel');
