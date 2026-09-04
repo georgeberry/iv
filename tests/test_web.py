@@ -230,10 +230,11 @@ def test_the_page_needs_only_a_renderer(built, tmp_path):
     assert "{root:'diamond', terminal:'square'}" in text
     assert "up.difference(upDirect).addClass('up-far')" in text
     assert "down.difference(downDirect).addClass('down-far')" in text
-    assert "partitioned by&nbsp;" in text
-    assert "data-key=\"${esc(k)}\"" in text
+    assert 'aria-label="Select a partition key"' in text
+    assert "partition key: all" in text
     assert "n.data('partitionKeys').includes(selectedPartition)" in text
     assert "matches.addClass('partition-match')" in text
+    assert "fit && matches.length" not in text
     assert text.index("immediate upstream") < text.index("shards —")
 
 

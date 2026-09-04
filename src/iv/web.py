@@ -189,17 +189,15 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);
   background:var(--panel);color:var(--ink);font-size:13px}
 .key{font-size:11px;color:var(--dim);display:flex;align-items:center;gap:5px;
   background:var(--panel);padding:4px 9px;border-radius:99px;border:1px solid var(--line)}
-.partition{border:0;border-bottom:2px solid transparent;padding:1px 2px;background:none;
-  color:var(--dim);font:inherit;cursor:pointer}
-.partition:hover{color:var(--ink)}
-.partition[aria-pressed="true"]{color:var(--ink);border-bottom-color:var(--sel);font-weight:700}
+#partition-key{font-size:11px;color:var(--dim);background:var(--panel);padding:5px 9px;
+  border-radius:7px;border:1px solid var(--line);cursor:pointer}
 .dot{width:9px;height:9px;border-radius:99px;display:inline-block}
 .hint{color:var(--dim);font-size:13px}
 </style></head><body>
 <div id="cy"></div>
 <div id="bar">
   <input id="q" placeholder="filter datasets…" autocomplete="off">
-  <span class="key" id="partition-keys"></span>
+  <select id="partition-key" aria-label="Select a partition key"></select>
   <span class="key" id="legend"></span>
   <span class="key" id="reset" style="cursor:pointer">reset view</span>
 </div>
@@ -229,11 +227,12 @@ function land(){
 }
 const byId = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
 
-document.getElementById('partition-keys').innerHTML = DATA.partitionKeys.length
-  ? `partitioned by&nbsp; ${DATA.partitionKeys.map(k =>
-      `<button class="partition" data-key="${esc(k)}" aria-pressed="false">${esc(k)}</button>`
-    ).join(' · ')}`
-  : 'no partitions';
+const partitionSelect = document.getElementById('partition-key');
+partitionSelect.innerHTML = DATA.partitionKeys.length
+  ? `<option value="">partition key: all</option>${DATA.partitionKeys.map(k =>
+      `<option value="${esc(k)}">partition key: ${esc(k)}</option>`).join('')}`
+  : '<option value="">no partition keys</option>';
+partitionSelect.disabled = !DATA.partitionKeys.length;
 
 document.getElementById('legend').innerHTML = ['stale','maybe','current','source']
   .map(s => `<span class="dot" style="background:${C[s]}"></span>${s} ${DATA.counts[s]||0}`)
@@ -295,20 +294,14 @@ cy.ready(land);
 
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML}
 
-let selectedPartition = null;
-function syncPartitionButtons(){
-  document.querySelectorAll('.partition').forEach(b =>
-    b.setAttribute('aria-pressed', b.dataset.key === selectedPartition ? 'true' : 'false'));
-}
-
 function clearFilters(){
-  selectedPartition = null;
+  partitionSelect.value = '';
   document.getElementById('q').value = '';
-  syncPartitionButtons();
 }
 
-function applyFilters(fit){
+function applyFilters(){
   const q = document.getElementById('q').value.trim().toLowerCase();
+  const selectedPartition = partitionSelect.value;
   cy.elements().removeClass('faded partition-match up down up-far down-far sel');
   const matches = cy.nodes().filter(n =>
     (!q || n.data('dataset').toLowerCase().includes(q)) &&
@@ -317,17 +310,10 @@ function applyFilters(fit){
   if (selectedPartition) {
     cy.edges().addClass('faded');
     matches.addClass('partition-match');
-    if (fit && matches.length) cy.animate({fit:{eles:matches, padding:80}, duration:250});
   }
 }
 
-document.getElementById('partition-keys').addEventListener('click', e => {
-  const button = e.target.closest('.partition');
-  if (!button) return;
-  selectedPartition = selectedPartition === button.dataset.key ? null : button.dataset.key;
-  syncPartitionButtons();
-  applyFilters(true);
-});
+partitionSelect.addEventListener('change', applyFilters);
 
 function select(node, fit){
   clearFilters();
@@ -400,6 +386,6 @@ document.getElementById('reset').onclick = () => {
   land();
 };
 
-document.getElementById('q').addEventListener('input', () => applyFilters(false));
+document.getElementById('q').addEventListener('input', applyFilters);
 </script></body></html>
 """
