@@ -845,9 +845,6 @@ def run(
         help="write --only output to this local tree instead of production"),
 ):
 
-    if dev is not None and only is None:
-        raise IvError("--dev currently requires --only so no downstream stage reads a "
-                      "mixture of production and development outputs.")
     iv = _load()
     with _dev_output(iv, dev):
         with _paths.local_tree_snapshot(iv, report=typer.echo):
@@ -860,17 +857,26 @@ def _dev_output(iv, dev: Path | None):
         yield
         return
     target = dev.expanduser().resolve()
-    if not _paths.is_remote(iv.out_tree):
+    remote_tree = _paths.is_remote(iv.tree)
+    remote_out = _paths.is_remote(iv.out_tree)
+    if remote_tree and remote_out and str(iv.tree) != str(iv.out_tree):
+        raise IvError("--dev cannot clone separate remote input and output trees into one "
+                      "directory; use a pipeline with one remote tree.")
+    if not remote_out:
         production = Path(iv.out_tree).expanduser().resolve()
         if target == production:
             raise IvError("--dev must differ from the production output tree.")
-    original = iv.out_tree
+    original_tree, original_out = iv.tree, iv.out_tree
+    if remote_tree or remote_out:
+        source = iv.tree if remote_tree else iv.out_tree
+        _paths.fetch_tree(source, target, report=typer.echo, replace=True)
+        iv.tree = target
     iv.out_tree = target
     typer.echo(f"development output · {target}")
     try:
         yield
     finally:
-        iv.out_tree = original
+        iv.tree, iv.out_tree = original_tree, original_out
 
 
 def _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log):

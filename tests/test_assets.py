@@ -165,14 +165,13 @@ def test_dev_run_reads_production_and_writes_only_to_the_local_tree(iv, tmp_path
     assert iv.out_tree == production
 
 
-def test_dev_requires_one_explicit_stage(iv, tmp_path, monkeypatch):
+def test_dev_does_not_require_an_explicit_stage(iv, tmp_path, monkeypatch):
     import iv.cli as cli
     monkeypatch.setattr(cli, "_load", lambda: iv)
     dev = tmp_path / "dev"
     result = CliRunner().invoke(app, ["run", "--dev", str(dev)])
-    assert result.exit_code == 1
-    assert "--dev currently requires --only" in result.output
-    assert not dev.exists()
+    assert result.exit_code == 0, result.output
+    assert f"development output · {dev}" in result.output
 
 
 def test_the_runner_builds_a_split_stage_once_not_once_per_partition(tmp_path, monkeypatch):

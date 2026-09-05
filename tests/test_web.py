@@ -244,6 +244,7 @@ def test_the_page_needs_only_a_renderer(built, tmp_path):
     assert "cy.on('tap','edge'" in text
     assert "function edgePanel(edge)" in text
     assert "missing input is allowed" in text
+    assert "['all_of', 'all of']" in text
     assert text.index("immediate upstream") < text.index("shards —")
 
 

@@ -127,7 +127,7 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv run --from STAGE` | Run a stage and descendants; require current upstreams |
 | `iv run --only STAGE` | Run one stage; require current upstreams |
 | `iv run --only STAGE --force` | Run despite stale upstreams; does not rebuild them |
-| `iv run --only STAGE --dev PATH --force` | Evaluate one stage against production inputs and write locally |
+| `iv run [selection] --dev PATH --force` | Clone remote state into PATH, then run the selected work locally without publishing |
 | `iv run --part season=2025` | Filter partitioned work; repeat for composite keys |
 | `iv run --log run.log` | Save merged stdout, stderr, and outcomes incrementally |
 | `iv fetch PATH` | Download remote production state into a new local directory |
