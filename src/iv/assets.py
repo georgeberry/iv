@@ -227,7 +227,8 @@ class Asset:
     def __init__(self, pipeline, output, fn, *, why: str,
                  part=None, ext: str = _sh.EXT, allow_missing: bool = False,
                  once: bool = False, split: bool = False, single: bool = True,
-                 external=None, schema=None, version=None, universe=None) -> None:
+                 external=None, schema=None, version=None, universe=None,
+                 on_demand: bool = False) -> None:
         self.pipeline = pipeline
         self.outputs = _outputs(output, ext, allow_missing, schema)
         self.single = single
@@ -235,6 +236,7 @@ class Asset:
         self.acts_only = not self.outputs
         self.why = _decl._why(why, self.primary)
         self.once = once
+        self.on_demand = on_demand
         self.split = split
         self.part_keys, self.fixed_part = _part_spec(part, self.primary)
         self.part_key = self.part_keys[0] if self.part_keys and len(self.part_keys) == 1 else None

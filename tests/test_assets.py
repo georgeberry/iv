@@ -174,6 +174,26 @@ def test_dev_does_not_require_an_explicit_stage(iv, tmp_path, monkeypatch):
     assert f"development output · {dev}" in result.output
 
 
+def test_on_demand_stage_is_skipped_by_default_but_runs_when_selected(iv, monkeypatch):
+    ran = []
+
+    @iv.step(why="intermittent QC", on_demand=True)
+    def qc():
+        ran.append(True)
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    runner = CliRunner()
+    ordinary = runner.invoke(app, ["run"])
+    assert ordinary.exit_code == 0, ordinary.output
+    assert ran == []
+    assert "nothing selected" in ordinary.output
+
+    selected = runner.invoke(app, ["run", "--only", "qc"])
+    assert selected.exit_code == 0, selected.output
+    assert ran == [True]
+
+
 def test_the_runner_builds_a_split_stage_once_not_once_per_partition(tmp_path, monkeypatch):
     iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage", project=tmp_path)
     ran = []
@@ -1595,6 +1615,27 @@ def test_gc_drops_a_partition_the_stage_no_longer_keys_on(iv, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "orphaned partition" in result.output
     assert sorted(_sh.list_shards(d)) == ["season=2025"]
+    assert thing.is_current(season="2025")
+
+
+def test_gc_drops_a_partition_outside_the_stage_universe(iv, monkeypatch):
+    universe = ["2024", "2025"]
+
+    @iv.data(dataset="processed/thing/", why="only seasons still in scope",
+             part="season", universe=lambda: universe)
+    def thing(season):
+        return frame(extra=int(season))
+
+    thing(season="2024")
+    thing(season="2025")
+    universe.remove("2024")
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["gc", "processed/thing/"])
+    assert result.exit_code == 0, result.output
+    assert "outside the writers' declared universe=" in result.output
+    assert sorted(_sh.list_shards(iv.resolve_out("processed/thing/"))) == ["season=2025"]
     assert thing.is_current(season="2025")
 
 

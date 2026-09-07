@@ -36,6 +36,7 @@ def payload(g, status: dict | None = None, state: dict | None = None,
             "why": getattr(a, "why", "") if a else "",
             "part": getattr(a, "part_key", None) if a else None,
             "once": bool(getattr(a, "once", False)) if a else False,
+            "onDemand": bool(getattr(a, "on_demand", False)) if a else False,
             "split": bool(getattr(a, "split", False)) if a else False,
             "externals": [list(e) for e in getattr(a, "externals", ())] if a else [],
         }

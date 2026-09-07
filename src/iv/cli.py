@@ -525,6 +525,27 @@ def _declared_part_keys(iv, g, name: str) -> set[tuple[str, ...]]:
     return out
 
 
+def _declared_universe_parts(iv, g, name: str) -> set[str] | None:
+    """Return the complete live partition names when every writer enumerates them."""
+    producers = [iv._assets[node] for node in g.producers_of(name)
+                 if node in iv._assets]
+    if not producers or name in iv._sources:
+        return None
+    live = set()
+    for asset in producers:
+        fixed = asset.part_for(name)
+        if fixed:
+            live.add(_sh.encode_part(dict(fixed)))
+            continue
+        if not asset.part_keys:
+            live.add("")
+            continue
+        if asset.split or asset.universe is None:
+            return None
+        live.update(_sh.encode_part(part) for part in asset.universe_parts())
+    return live
+
+
 def _staleness(iv, g):
 
 
@@ -904,6 +925,10 @@ def _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log):
     if force:
         iv.force = True
         safe = False
+    if not choices:
+        on_demand = {node for node in selected if iv._assets[node].on_demand}
+        for node in on_demand:
+            selected -= _cone(parents, node, reverse=True)
 
     with _sh.snapshot():
         if safe:
@@ -1008,13 +1033,20 @@ def gc(
                 else _declared_part_keys(iv, g, name))
         live = {p: v for p, v in found.items()
                 if not want or tuple(sorted(_sh.decode_part(p))) in want}
+        universe = _declared_universe_parts(iv, g, name)
+        if universe is not None:
+            live = {p: v for p, v in live.items() if p in universe}
         orphaned = sorted(set(found) - set(live))
         if not orphaned and not any(len(v) > 1 for v in live.values()):
             continue
         for p in orphaned:
-            typer.secho(f"  {name}: orphaned partition {p or '(no part)'} — the "
-                        f"stage does not key on {tuple(sorted(_sh.decode_part(p)))} "
-                        f"any more", fg="yellow")
+            reason = (
+                "it is outside the writers' declared universe="
+                if universe is not None and p not in universe else
+                f"the stage does not key on {tuple(sorted(_sh.decode_part(p)))} any more"
+            )
+            typer.secho(f"  {name}: orphaned partition {p or '(no part)'} — {reason}",
+                        fg="yellow")
         keep = {sorted(v, key=lambda s: s.name)[0].name for v in live.values()}
         for gone in _sh.gc(d, keep=keep):
             typer.echo(f"  dropped {name}{gone}")

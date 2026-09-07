@@ -125,7 +125,7 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv run --up-to STAGE` | Run a stage and its prerequisites |
 | `iv run --up-to-excluding STAGE` | Run only a stage's prerequisites |
 | `iv run --from STAGE` | Run a stage and descendants; require current upstreams |
-| `iv run --only STAGE` | Run one stage; require current upstreams |
+| `iv run --only STAGE` | Run one stage; require current upstreams (including `on_demand=True` stages) |
 | `iv run --only STAGE --force` | Run despite stale upstreams; does not rebuild them |
 | `iv run [selection] --dev PATH --force` | Clone remote state into PATH, then run the selected work locally without publishing |
 | `iv run --part season=2025` | Filter partitioned work; repeat for composite keys |
@@ -147,7 +147,7 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 | `iv check [--trace FILE]` | Validate declarations and optionally compare a trace |
 | `iv drift [--trace FILE]` | Compare code with a recorded run |
 | `iv verify [DATASET]` | Re-fingerprint shards and verify their filenames |
-| `iv gc [DATASET]` | Remove superseded shards |
+| `iv gc [DATASET]` | Remove superseded shards and partitions outside declared universes |
 | `iv gc DATASET --partition-key season` | Drop shards outside an explicitly named layout |
 | `iv viz --out dag.png [--plain]` | Render every declared edge as an image |
 | `iv viz --out dag.html --html` | Render an interactive DAG with every declared edge |

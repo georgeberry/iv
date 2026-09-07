@@ -821,7 +821,7 @@ class Pipeline:
     def data(self, dataset, *, why: str, part=None, ext: str = _sh.EXT,
              allow_missing: bool = False, once: bool = False,
              split: bool = False, external=None, schema=None, version=None,
-             universe=None) -> Callable:
+             universe=None, on_demand: bool = False) -> Callable:
 
 
         _why(why, _canon(dataset) if isinstance(dataset, str) else str(dataset))
@@ -836,7 +836,7 @@ class Pipeline:
                 self, dataset, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, once=once,
                 split=split, single=True, external=external, schema=schema, version=version,
-                universe=universe))
+                universe=universe, on_demand=on_demand))
         return declared
 
     def source(self, dataset: str, *, why: str, external=None, schema=None,
@@ -914,7 +914,8 @@ class Pipeline:
     def step(self, output=None, *, why: str, part=None,
              ext: str = _sh.EXT, allow_missing: bool = False,
              once: bool = False, split: bool = False,
-             external=None, version=None, universe=None) -> Callable:
+             external=None, version=None, universe=None,
+             on_demand: bool = False) -> Callable:
 
 
         _why(why, "step")
@@ -929,7 +930,7 @@ class Pipeline:
                 self, output, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, once=once,
                 split=split, single=False, external=external, version=version,
-                universe=universe))
+                universe=universe, on_demand=on_demand))
         return declared
 
     def _node_name(self, fn: Callable) -> str:
