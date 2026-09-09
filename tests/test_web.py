@@ -231,6 +231,10 @@ def test_the_page_needs_only_a_renderer(built, tmp_path):
     assert "{root:'diamond', terminal:'square'}" in text
     assert "up.difference(upDirect).addClass('up-far')" in text
     assert "down.difference(downDirect).addClass('down-far')" in text
+    assert "strictly before partition" in text
+    assert "through current partition" in text
+    assert "dependencyList(incoming, true)" in text
+    assert "dependencyList(outgoing, false)" in text
     assert 'aria-label="Select a partition key"' in text
     assert "partition key: all" in text
     assert "partition key: none" in text

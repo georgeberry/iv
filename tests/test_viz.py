@@ -76,8 +76,8 @@ def test_two_stages_writing_one_dataset_are_two_nodes(iv):
 
 def test_a_shard_is_labelled_with_the_partition_it_is(iv):
     assert _viz.short(("processed/preds/", (("completed", "true"),))) == \
-        "preds [completed=true]"
-    assert _viz.short(("processed/mid/", ())) == "mid"
+        "processed/preds [completed=true]"
+    assert _viz.short(("processed/mid/", ())) == "processed/mid"
 
 
 def test_every_kind_has_a_distinct_shape():

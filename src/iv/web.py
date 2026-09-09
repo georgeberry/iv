@@ -397,14 +397,36 @@ function edgePanel(edge){
   </div>`;
 }
 
+function ruleLabel(rule){
+  return ({
+    all_of: 'all shards',
+    same_part: 'same partition',
+    before_part: 'strictly before partition',
+    before_part_inclusive: 'through current partition',
+    after_part: 'strictly after partition',
+    after_part_inclusive: 'current partition onward',
+    parts: 'selected partitions',
+    between: 'bounded partition range'
+  })[rule] || rule;
+}
+
 function panel(node, up, down){
   const d = node.data();
-  const list = ids => ids.length
-    ? `<ul>${[...new Set(ids)].sort().map(i =>
-        `<li><a onclick="pick('${esc(i)}')">${esc(byId[i].label)}</a>
+  const dependencyList = (edges, upstream) => edges.length
+    ? `<ul>${edges.sort((a,b) => {
+        const ai = upstream ? a.source : a.target, bi = upstream ? b.source : b.target;
+        return byId[ai].label.localeCompare(byId[bi].label);
+      }).map(e => {
+        const i = upstream ? e.source : e.target;
+        return `<li><a onclick="pick('${esc(i)}')">${esc(byId[i].label)}</a>
          <span class="dot" style="background:${C[byId[i].status]||C.source};
-         margin-left:6px"></span></li>`).join('')}</ul>`
+         margin-left:6px"></span><br>
+         <span class="ok" title="${esc(e.rule)}">${esc(ruleLabel(e.rule))}${
+           e.optional ? ' · optional' : ''}</span></li>`;
+      }).join('')}</ul>`
     : '<p class="ok">none</p>';
+  const incoming = DATA.edges.filter(e => e.target === d.id);
+  const outgoing = DATA.edges.filter(e => e.source === d.id);
 
   const shards = d.shards.length ? `<ul>${d.shards.map(s =>
       `<li><code>${esc(s.part)}</code><br>${
@@ -422,8 +444,8 @@ function panel(node, up, down){
     <span class="pill" style="background:${C[d.status]||C.source}">${esc(d.status)}</span>
     <span class="pill" style="background:var(--dim)">${esc(d.kind)}</span>
     <div class="sec">${partitioned}</div>
-    <div class="sec">immediate upstream (${d.reads.length})</div>${list(d.reads)}
-    <div class="sec">immediate downstream (${d.readBy.length})</div>${list(d.readBy)}
+    <div class="sec">immediate upstream (${incoming.length})</div>${dependencyList(incoming, true)}
+    <div class="sec">immediate downstream (${outgoing.length})</div>${dependencyList(outgoing, false)}
     <div class="sec">upstream in all (${up.length}) · downstream in all (${down.length})</div>
     <p class="ok">a rebuild of this carries into ${down.length} node(s).</p>
     ${d.writers.length ? `<div class="sec">built by</div><ul>${d.writers.map(w =>

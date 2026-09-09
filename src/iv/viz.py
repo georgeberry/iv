@@ -70,7 +70,10 @@ def short(node) -> str:
 
 
     ds, part = node if isinstance(node, tuple) else (node, ())
-    name = ds.rstrip("/").rsplit("/", 1)[-1]
+    # The namespace is part of the dataset's meaning: app/games is a serving
+    # payload while quality/game is QC. Dropping it makes materially different
+    # datasets look like generic, interchangeable tables in the DAG.
+    name = ds.rstrip("/")
     return f"{name} [{','.join(f'{k}={v}' for k, v in part)}]" if part else name
 
 

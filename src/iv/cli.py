@@ -558,7 +558,10 @@ def _staleness(iv, g):
     out: dict[str, dict] = {}
     for name, owners in writers.items():
         shards = {}
-        for p in (sorted(_sh.current_shards(iv.resolve_out(name))) or [""]):
+        stored = set(_sh.current_shards(iv.resolve_out(name)))
+        universe = _declared_universe_parts(iv, g, name)
+        parts = sorted(stored | universe) if universe is not None else (sorted(stored) or [""])
+        for p in parts:
             part = _sh.decode_part(p) or None
             shards[p] = iv.why_stale(name, part, inputs=_owner(owners, part))
         out[name] = shards

@@ -311,6 +311,20 @@ def test_a_dataset_downstream_of_a_rebuild_is_a_maybe_not_a_red(tmp_path, monkey
         "the maybe was right to be a maybe"
 
 
+def test_an_empty_declared_universe_is_not_a_missing_output(tmp_path):
+    iv = Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
+                  project=tmp_path)
+
+    @iv.data(dataset="processed/current/", why="only while a season is live",
+             part="season", universe=[])
+    def current(season):
+        return pl.DataFrame({"season": [int(season)]})
+
+    state = _staleness(iv, _graph.build(iv))
+    assert state["processed/current/"] == {}
+    assert _stale_shards(state) == set()
+
+
 def test_only_the_shards_a_selector_reaches_may_follow(tmp_path, monkeypatch):
 
 

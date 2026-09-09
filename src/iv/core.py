@@ -4,6 +4,7 @@ import builtins
 import io
 import os
 import shutil
+import sys
 import threading
 import time
 from contextlib import ExitStack, contextmanager
@@ -98,6 +99,38 @@ def _check_declared(target, probe: str | None = None) -> None:
                 f"the failure declaring is meant to stop. Read it through the stage: "
                 f"iv.reads('<dataset>/', why='...'), or pass optional=True and branch "
                 f"on what came back.")
+    if any(x._in_step for x in _ACTIVE) and "://" not in s:
+        resolved = os.path.realpath(os.path.abspath(s))
+        running = [iv for iv in _ACTIVE if iv._in_step]
+        # Staged outputs may be reread for validation. Runtime resources (Python,
+        # installed libraries, certificates, timezone data) are not model inputs.
+        runtime_roots = (sys.prefix, sys.base_prefix, "/etc/ssl", "/usr/share/zoneinfo")
+        allowed = resolved in ("/dev/null", "/dev/urandom", "/dev/random")
+        allowed = allowed or any(_in_tree(resolved, os.path.realpath(root)) for root in runtime_roots)
+        allowed = allowed or any(resolved == os.path.realpath(str(path))
+                                 for iv in running for path in iv._staged)
+        # Explicit code files are fingerprinted by IV. A code directory permits
+        # Python modules, not arbitrary data hidden alongside those modules.
+        for iv in running:
+            for entry in iv.code:
+                code = os.path.realpath(os.path.join(str(iv.project or os.getcwd()), entry))
+                if resolved == code or (_in_tree(resolved, code)
+                                        and Path(resolved).suffix in (".py", ".pyc", ".so", ".pyd")):
+                    allowed = True
+        # Python imports may inspect module directories and load implementation
+        # files outside the project (e.g. editable dependencies).
+        if Path(resolved).suffix in (".py", ".pyc", ".so", ".pyd"):
+            allowed = True
+        if probe is not None and resolved in {
+                os.path.realpath(os.path.abspath(path)) for path in sys.path if path}:
+            allowed = True
+        if not allowed:
+            what = f"{s}.{probe}()" if probe else s
+            raise DeclError(
+                f"{what} is an undeclared local read outside the IV tree. Local files "
+                f"are data dependencies too: import the data into the IV tree, declare "
+                f"iv.source('<dataset>/', why='...'), and pass it through the stage. "
+                f"Moving data outside the tree must not bypass dependency tracking.")
     if any(x._in_step for x in _ACTIVE) and "://" in s and not _declared_external(s):
         what = f"{s}.{probe}()" if probe else s
         raise DeclError(
@@ -544,6 +577,12 @@ class Pipeline:
                 if fn is None or getattr(fn, "_iv_read_checked", False):
                     continue
                 setattr(owner, name, self._checked_probe(name, fn))
+        for owner, names in ((os, ("listdir", "scandir")),
+                             (os.path, ("exists", "isfile", "isdir"))):
+            for name in names:
+                fn = getattr(owner, name)
+                if not getattr(fn, "_iv_read_checked", False):
+                    setattr(owner, name, self._checked_probe(name, fn))
         try:
             import polars as pl
         except ImportError:
