@@ -5,7 +5,9 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from . import decl as _decl
 from . import shards as _sh
@@ -228,18 +230,26 @@ class Asset:
                  part=None, ext: str = _sh.EXT, allow_missing: bool = False,
                  once: bool = False, split: bool = False, single: bool = True,
                  external=None, schema=None, version=None, universe=None,
-                 on_demand: bool = False) -> None:
+                 on_demand: bool = False, append: bool = False) -> None:
         self.pipeline = pipeline
         self.outputs = _outputs(output, ext, allow_missing, schema)
         self.single = single
         self.fn = fn
         self.acts_only = not self.outputs
+        self.append = append
         self.why = _decl._why(why, self.primary)
         self.once = once
         self.on_demand = on_demand
         self.split = split
         self.part_keys, self.fixed_part = _part_spec(part, self.primary)
         self.part_key = self.part_keys[0] if self.part_keys and len(self.part_keys) == 1 else None
+        if append and (not self.outputs or self.part_key is None or self.fixed_part
+                       or split or once or universe is not None
+                       or any(o.part for o in self.outputs.values())):
+            raise DeclError(
+                f"{self.primary}: append=True requires an output and one part= key "
+                "for generated UTC timestamps; it cannot use fixed partitions, "
+                "split=True, once=True, universe=, or output .shard(...).")
         self.version = _version(version, self.primary)
         if self.acts_only and self.version is not None:
             raise DeclError(
@@ -360,7 +370,7 @@ class Asset:
     def may_skip(self) -> bool:
 
 
-        return bool(self.outputs) and (bool(self.triggers) or self.once)
+        return not self.append and bool(self.outputs) and (bool(self.triggers) or self.once)
 
 
     def _part(self, args, kwargs) -> dict | None:
@@ -370,7 +380,7 @@ class Asset:
                     f"{self.primary} writes the fixed partition {self.fixed_part}, so a "
                     f"call names no other.")
             return dict(self.fixed_part)
-        if self.part_keys is None or self.split:
+        if self.part_keys is None or self.split or self.append:
             if args or kwargs:
                 raise DeclError(
                     f"{self.primary} is not built one partition at a time, so it takes no "
@@ -393,6 +403,8 @@ class Asset:
     def why_stale(self, *args, **kwargs) -> str | None:
 
         part = self._part(args, kwargs)
+        if self.append:
+            return "append-only output creates a new timestamped partition on every run"
         if self.acts_only:
 
             return "writes nothing, so nothing can say it is done"
@@ -424,13 +436,20 @@ class Asset:
             part = self._part((), {})
         if self.may_skip and not iv.force and stale is None:
             return self.load(part) if self.single and not self.split else False
-        self.build(part)
+        built_part = self.build(part)
+        if self.append:
+            return self.load(built_part) if self.single else True
         if self.acts_only:
             return True
         return self.load(part) if self.single and not self.split else True
 
-    def build(self, part: dict | None) -> None:
+    def build(self, part: dict | None) -> dict | None:
 
+        if self.append:
+            if part is not None:
+                raise DeclError(f"{self.primary}: append-only partitions are generated, never rebuilt by name.")
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            part = {self.part_key: f"{stamp}-{uuid4().hex}"}
         if not self.split and (self.fixed_part or self.part_keys) and not part:
             raise DeclError(
                 f"{self.primary} is keyed on "
@@ -453,7 +472,7 @@ class Asset:
                                allow_missing=o.allow_missing) as staged:
                     kw[OUT_PARAM] = staged
                     self.fn(**kw)
-                return
+                return part if self.append else None
             if self.acts_only:
                 self.fn(**kw)
                 return
@@ -462,7 +481,7 @@ class Asset:
                 if all(o.allow_missing for o in self.outputs.values()):
                     for o in self.outputs.values():
                         self._commit(o, None, part)
-                    return
+                    return part if self.append else None
                 raise DeclError(
                     f"{self.primary}: {self.__name__} returned None and takes no "
                     f"{OUT_PARAM!r} parameter, so nothing was produced. Return the value "
@@ -478,6 +497,7 @@ class Asset:
             (iv._part, iv._in_step, iv._node, iv._inputs, iv._outputs,
              iv._declared_externals) = prev
             iv._fresh_scope()
+        return part if self.append else None
 
     def _commit(self, o: Dataset, value, part) -> None:
         part = dict(o.part) if o.part else part

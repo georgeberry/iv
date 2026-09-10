@@ -51,6 +51,33 @@ def _in_tree(target, base) -> bool:
     return s == root or s.startswith(root + "/")
 
 
+def _guard_path(path):
+    value = str(path)
+    return value if "://" in value else os.path.realpath(os.path.abspath(value))
+
+
+def _local_permissions(paths, project, name):
+    if isinstance(paths, (str, bytes, os.PathLike)):
+        raise DeclError(f"Pipeline({name}=...) requires a sequence of local paths.")
+    permissions = []
+    for entry in paths:
+        value = os.fspath(entry)
+        if not isinstance(value, str) or not value or "://" in value:
+            raise DeclError(f"Pipeline({name}=...) requires nonempty local paths, got {entry!r}.")
+        path = os.path.expanduser(value)
+        if not os.path.isabs(path):
+            path = os.path.join(str(project or os.getcwd()), path)
+        recursive = value.endswith(os.sep) or os.path.isdir(path)
+        permissions.append((os.path.realpath(path), recursive))
+    return tuple(permissions)
+
+
+def _approved_local(target, permissions):
+    resolved = os.path.realpath(os.path.abspath(target))
+    return any(resolved == path or (recursive and _in_tree(resolved, path))
+               for path, recursive in permissions)
+
+
 def _path_owners():
     from pathlib import Path as _P
     owners = [_P]
@@ -80,9 +107,10 @@ def _check_declared(target, probe: str | None = None) -> None:
     for iv in _ACTIVE:
         if s in iv._handed_out or iv._depth or iv._publishing:
             return
+    checked = _guard_path(s)
     for iv in _ACTIVE:
-        for base in (iv.out_tree, iv.tree):
-            if not _in_tree(s, base):
+        for base in iv._guard_trees:
+            if not _in_tree(checked, base):
                 continue
             if probe is not None and not any(x._in_step for x in _ACTIVE):
                 return
@@ -102,11 +130,9 @@ def _check_declared(target, probe: str | None = None) -> None:
     if any(x._in_step for x in _ACTIVE) and "://" not in s:
         resolved = os.path.realpath(os.path.abspath(s))
         running = [iv for iv in _ACTIVE if iv._in_step]
-        # Staged outputs may be reread for validation. Runtime resources (Python,
-        # installed libraries, certificates, timezone data) are not model inputs.
-        runtime_roots = (sys.prefix, sys.base_prefix, "/etc/ssl", "/usr/share/zoneinfo")
-        allowed = resolved in ("/dev/null", "/dev/urandom", "/dev/random")
-        allowed = allowed or any(_in_tree(resolved, os.path.realpath(root)) for root in runtime_roots)
+        runtime_roots = (sys.prefix, sys.base_prefix)
+        allowed = any(_in_tree(resolved, os.path.realpath(root)) for root in runtime_roots)
+        allowed = allowed or any(_approved_local(s, iv.allow_reads) for iv in running)
         allowed = allowed or any(resolved == os.path.realpath(str(path))
                                  for iv in running for path in iv._staged)
         # Explicit code files are fingerprinted by IV. A code directory permits
@@ -130,7 +156,8 @@ def _check_declared(target, probe: str | None = None) -> None:
                 f"{what} is an undeclared local read outside the IV tree. Local files "
                 f"are data dependencies too: import the data into the IV tree, declare "
                 f"iv.source('<dataset>/', why='...'), and pass it through the stage. "
-                f"Moving data outside the tree must not bypass dependency tracking.")
+                f"Moving data outside the tree must not bypass dependency tracking. "
+                f"For runtime resources, configure Pipeline(allow_reads=[...]).")
     if any(x._in_step for x in _ACTIVE) and "://" in s and not _declared_external(s):
         what = f"{s}.{probe}()" if probe else s
         raise DeclError(
@@ -159,6 +186,7 @@ def _check_write(target, removing: bool = False) -> None:
     for iv in _ACTIVE:
         if iv._depth or s in iv._staged:
             return
+    checked = _guard_path(s)
     for iv in _ACTIVE:
         if s in iv._handed_out and not removing:
             raise DeclError(
@@ -166,17 +194,25 @@ def _check_write(target, removing: bool = False) -> None:
                 f"name is a fingerprint of its contents, so overwriting one in place makes "
                 f"the name a lie that nothing can detect. Write through iv.writes().")
         if iv._in_step and "://" in s and not _declared_external(s) and not any(
-                _in_tree(s, base) for base in (iv.out_tree, iv.tree)):
+                _in_tree(checked, base) for base in iv._guard_trees):
             raise DeclError(
                 f"{s} is remote storage outside every declared tree and is being written "
                 f"from inside a stage. A write that lands outside the graph has no "
                 f"declared output and nothing downstream can key on it. Declare it as an "
                 f"output, or as external= if it leaves the pipeline for good.")
-        if iv._in_step and any(_in_tree(s, base) for base in (iv.out_tree, iv.tree)):
+        if iv._in_step and any(_in_tree(checked, base) for base in iv._guard_trees):
             raise DeclError(
                 f"{s} is inside the data tree and is being written outside iv.writes(). "
                 f"A direct write has no declared output, staged commit, or fingerprinted "
-                f"name. Write it through iv.writes(...), or write outside the data tree.")
+                f"name. Write it through iv.writes(...).")
+
+    running = [iv for iv in _ACTIVE if iv._in_step]
+    if running and "://" not in s and not any(
+            _approved_local(s, iv.allow_writes) for iv in running):
+        raise DeclError(
+            f"{s} is an undeclared local write outside the IV tree. Write pipeline "
+            f"outputs through iv.writes(), or approve runtime files explicitly with "
+            f"Pipeline(allow_writes=[...]).")
 
 
 @contextmanager
@@ -202,13 +238,18 @@ class Pipeline:
                  project=None,
                  trace=None,
                  stage_dir=None,
+                 allow_reads: Sequence[str | os.PathLike] = (),
+                 allow_writes: Sequence[str | os.PathLike] = (),
                  force: bool | None = None,
                  partitions: dict[str, Partition] | None = None) -> None:
         self.project = mkpath(str(project), None) if project else None
         self.tree = mkpath(tree, self.project)
         self.out_tree = mkpath(out_tree, self.project) if out_tree is not None else self.tree
+        self._guard_trees = tuple(_guard_path(path) for path in (self.tree, self.out_tree))
         self.code = tuple(code)
         self.stage_dir = stage_dir
+        self.allow_reads = _local_permissions(allow_reads, self.project, "allow_reads")
+        self.allow_writes = _local_permissions(allow_writes, self.project, "allow_writes")
         self.force = _env_force() if force is None else force
         self.partitions = self._partition_specs(partitions)
         self.trace_path = _abs_trace(trace)
@@ -496,6 +537,7 @@ class Pipeline:
             if name != "open" or any(flag in mode for flag in ("w", "a", "x", "+")):
                 _check_write(target, removing=name in ("unlink", "rmdir"))
             return fn(target, *a, **kw)
+        patched._iv_read_checked = getattr(fn, "_iv_read_checked", False)
         patched._iv_checked = True
         return patched
 
@@ -513,7 +555,7 @@ class Pipeline:
             mode = a[0] if a else kw.get("mode", "r")
             if any(flag in mode for flag in ("w", "a", "x", "+")):
                 _check_write(file)
-            else:
+            if not any(flag in mode for flag in ("w", "a", "x")) or "+" in mode:
                 _check_declared(file)
             return fn(file, *a, **kw)
         patched._iv_checked = True
@@ -523,7 +565,10 @@ class Pipeline:
     def _checked_os_open(fn):
         def patched(path, flags, *a, **kw):
             writing = flags & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC)
-            (_check_write if writing else _check_declared)(path)
+            if writing:
+                _check_write(path)
+            if flags & os.O_ACCMODE != os.O_WRONLY:
+                _check_declared(path)
             return fn(path, flags, *a, **kw)
         patched._iv_checked = True
         return patched
@@ -622,6 +667,7 @@ class Pipeline:
                 for one in (target if isinstance(target, (list, tuple)) else [target]):
                     _check_declared(one)
             return fn(target, *a, **kw)
+        patched._iv_checked = getattr(fn, "_iv_checked", False)
         patched._iv_read_checked = True
         return patched
 
@@ -860,7 +906,7 @@ class Pipeline:
     def data(self, dataset, *, why: str, part=None, ext: str = _sh.EXT,
              allow_missing: bool = False, once: bool = False,
              split: bool = False, external=None, schema=None, version=None,
-             universe=None, on_demand: bool = False) -> Callable:
+             universe=None, on_demand: bool = False, append: bool = False) -> Callable:
 
 
         _why(why, _canon(dataset) if isinstance(dataset, str) else str(dataset))
@@ -875,7 +921,7 @@ class Pipeline:
                 self, dataset, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, once=once,
                 split=split, single=True, external=external, schema=schema, version=version,
-                universe=universe, on_demand=on_demand))
+                universe=universe, on_demand=on_demand, append=append))
         return declared
 
     def source(self, dataset: str, *, why: str, external=None, schema=None,
@@ -954,7 +1000,7 @@ class Pipeline:
              ext: str = _sh.EXT, allow_missing: bool = False,
              once: bool = False, split: bool = False,
              external=None, version=None, universe=None,
-             on_demand: bool = False) -> Callable:
+             on_demand: bool = False, append: bool = False) -> Callable:
 
 
         _why(why, "step")
@@ -969,7 +1015,7 @@ class Pipeline:
                 self, output, fn, why=why, part=part, ext=ext,
                 allow_missing=allow_missing, once=once,
                 split=split, single=False, external=external, version=version,
-                universe=universe, on_demand=on_demand))
+                universe=universe, on_demand=on_demand, append=append))
         return declared
 
     def _node_name(self, fn: Callable) -> str:

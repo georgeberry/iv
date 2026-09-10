@@ -90,7 +90,10 @@ def _graph_of():
 
 
 def _stage_name(g, query: str) -> str:
-    hits = [n for n in g.stages if query == n or query in n]
+    if query in g.stages:
+        return query
+    exact = [n for n in g.stages if query == n.rsplit("::", 1)[-1]]
+    hits = exact or [n for n in g.stages if query in n]
     if not hits:
         raise IvError(f"no stage matching {query!r}. Try `iv graph`.")
     if len(hits) > 1:
@@ -128,7 +131,7 @@ def _part_flags(raw: list[str], option: str = "--part") -> dict[str, str]:
 
 
 def _asset_parts(iv, asset, filters: dict[str, str]) -> list[dict | None]:
-    if not asset.part_keys or asset.split:
+    if not asset.part_keys or asset.split or asset.append:
         return [None]
     parts = asset.universe_parts()
     if parts is None:
@@ -222,6 +225,8 @@ def _rebuild_reason(iv, asset, part: dict | None, stale: str | None,
         return "forced by IV_FORCE"
     if asset.acts_only:
         return "action has no output to mark current"
+    if asset.append:
+        return "append-only output creates a new timestamped partition"
     causes = _run_causes(asset, part, changed)
     if causes:
         shown = ", ".join(causes[:3])
@@ -812,6 +817,8 @@ def determinism(
     if only:
         node = _stage_name(g, only)
         asset = iv._assets[node]
+        if asset.append:
+            raise IvError(f"{node} appends a new timestamped output each run, so determinism cannot be measured.")
         if asset.acts_only:
             raise IvError(f"{node} is an action with no output, so determinism cannot be measured.")
         parts = _asset_parts(iv, asset, _part_flags(part))
@@ -828,9 +835,10 @@ def determinism(
     typer.secho("determinism sample", bold=True)
     for node in g.order():
         asset = iv._assets[node]
-        if asset.acts_only:
+        if asset.acts_only or asset.append:
             skipped += 1
-            typer.secho(f"  skipped  {node} — action", fg="bright_black")
+            reason = "append-only output" if asset.append else "action"
+            typer.secho(f"  skipped  {node} — {reason}", fg="bright_black")
             continue
         chosen = _last_part(_asset_parts(iv, asset, {}))
         differences = _audit_determinism(iv, node, asset, [chosen])

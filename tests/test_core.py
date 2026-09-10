@@ -847,6 +847,9 @@ def test_a_direct_write_inside_a_stage_is_refused(iv):
 def test_shutil_copy_into_the_data_tree_is_refused_inside_a_stage(iv, tmp_path):
     import shutil
 
+    iv = Pipeline(tree=iv.tree, stage_dir=iv.stage_dir, project=tmp_path,
+                  allow_reads=[tmp_path / "outside.txt"])
+
     source = tmp_path / "outside.txt"
     source.write_text("outside")
     target = iv.tree / "raw/copied.txt"

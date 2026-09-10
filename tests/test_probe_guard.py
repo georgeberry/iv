@@ -12,7 +12,8 @@ def iv(tmp_path, monkeypatch):
     for var in ("IV_TRACE", "IV_FORCE", "IV_STAGE"):
         monkeypatch.delenv(var, raising=False)
     return Pipeline(tree=tmp_path / "data", stage_dir=tmp_path / "stage",
-                    project=tmp_path)
+                    project=tmp_path, allow_reads=[str(tmp_path/"runtime") + "/"],
+                    allow_writes=[str(tmp_path/"runtime") + "/"])
 
 
 def frame() -> pl.DataFrame:
@@ -155,10 +156,12 @@ def test_remote_storage_outside_every_tree_is_refused_inside_a_stage(iv):
         out()
 
 
-def test_remote_storage_a_stage_declares_as_external_is_allowed(iv):
-    from cloudpathlib.local import LocalS3Path
+def test_remote_storage_a_stage_declares_as_external_is_allowed(iv, tmp_path):
+    from cloudpathlib.local import LocalS3Client, LocalS3Path
 
-    dest = LocalS3Path("s3://declared-bucket/out.json")
+    client = LocalS3Client(local_storage_dir=tmp_path/"runtime/storage",
+                           local_cache_dir=tmp_path/"runtime/cache")
+    dest = LocalS3Path("s3://declared-bucket/out.json", client=client)
 
     @iv.data(dataset="processed/out/", why="ships a file out of the pipeline",
              external={"s3://declared-bucket": "where the app reads it at runtime"})
@@ -171,10 +174,12 @@ def test_remote_storage_a_stage_declares_as_external_is_allowed(iv):
     assert dest.read_text() == "{}"
 
 
-def test_an_external_declared_by_another_stage_does_not_carry_over(iv):
-    from cloudpathlib.local import LocalS3Path
+def test_an_external_declared_by_another_stage_does_not_carry_over(iv, tmp_path):
+    from cloudpathlib.local import LocalS3Client, LocalS3Path
 
-    dest = LocalS3Path("s3://declared-bucket/out.json")
+    client = LocalS3Client(local_storage_dir=tmp_path/"runtime/storage",
+                           local_cache_dir=tmp_path/"runtime/cache")
+    dest = LocalS3Path("s3://declared-bucket/out.json", client=client)
 
     @iv.data(dataset="processed/first/", why="declares the bucket",
              external={"s3://declared-bucket": "where the app reads it"})

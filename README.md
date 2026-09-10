@@ -91,6 +91,24 @@ such as `part={"source": "ncaa"}` for a literal shard. `universe=` tells `iv run
 dynamic partitions to enumerate. `split=True` means one call returns all partitions as a
 mapping.
 
+For permanent audit history, use `append=True` with one timestamp partition key:
+
+```python
+@iv.data(dataset="dq/", ext=".json", part="audit", append=True,
+         why="retain a quality report for every run")
+def dq(audit, rows=iv.all_of(comparisons, why="source comparisons")):
+    return {"audit_id": audit, "rows": rows.to_dicts()}
+```
+
+Every call or selected `iv run` generates a fresh UTC timestamp plus a UUID and
+commits a new partition through the normal staged writer. The generated value is
+available as the parameter named by `part=`; an `out` parameter works as usual.
+The graph records the output, unchanged inputs do not skip it, and `iv gc` retains
+all historical partitions. Explicitly rebuilding an old partition is rejected.
+This also works with `@iv.step(output={...})`, sharing one timestamp across outputs.
+Do not combine it with `universe=`, `once=True`, fixed partitions, or `split=True`.
+Determinism checks skip append-only stages because each run intentionally differs.
+
 Optionally declare the pipeline's complete partition vocabulary and value contracts:
 
 ```python
@@ -157,6 +175,30 @@ strings (`.html`). A stage may accept `out` and write its staged file directly.
 Within an active stage, reads and writes under the data tree must go through declared
 `iv` inputs and outputs. `iv` rejects undeclared I/O, conflicting writers, invalid
 partition selectors, missing required shards, schema mismatches, and nested stage calls.
+
+Runtime files outside the data tree can be approved on the pipeline:
+
+```python
+iv = Pipeline(
+    tree="data",
+    allow_reads=["/etc/ssl/", "~/.netrc", "/dev/nvidia0", "/sys/"],
+    allow_writes=["tmp/runtime/"],
+)
+```
+
+`allow_reads` covers reads and directory/existence probes; `allow_writes` covers
+writes and removals. Both default to empty. Read/write handles require both.
+Existing directories allow descendants; files allow only that exact path. End a
+string with `/` to declare a directory that does not exist yet. Paths expand `~`
+and resolve relative to `project` (or the construction working directory).
+Permissions are normalized at construction; symlinks cannot escape an approved
+directory. Cloud URLs are not accepted here; use declared sources or `external=`.
+
+These lists replace built-in hardware, credential, certificate, and timezone
+exceptions. Python implementation resources and IV's declared inputs and staged
+outputs remain supported automatically. Local side writes now require explicit
+approval too. Runtime permissions never override data-tree declarations, and are
+not fingerprinted inputs: data that should trigger rebuilds belongs in the graph.
 
 ## Development
 

@@ -216,7 +216,8 @@ def commit_empty(dataset_dir, *, part: dict[str, object] | None,
     if not final.exists():
         final.write_bytes(b"")
     for s in superseded:
-        s.path.unlink()
+        # The replacement is installed; an already-removed old shard needs no cleanup.
+        s.path.unlink(missing_ok=True)
     _cache_put(dataset_dir, part_str, parse_name(final))
     return final
 
@@ -331,7 +332,8 @@ def commit(staged, dataset_dir, *, part: dict[str, object] | None,
     else:
         _move(staged, final)
     for s in superseded:
-        s.path.unlink()
+        # The replacement is installed; an already-removed old shard needs no cleanup.
+        s.path.unlink(missing_ok=True)
     _cache_put(dataset_dir, part_str, parse_name(final))
     if on_commit:
         on_commit(final, not any(s.fp == fp for s in superseded))

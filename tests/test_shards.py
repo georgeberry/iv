@@ -295,3 +295,41 @@ def test_every_comparison_is_answered_from_FILENAMES_alone(tmp_path):
     again = sh.select(sh.current_shards(d))
     assert ([x.name for x in again], sh.dataset_id(again),
             sh.dataset_id(sh.select(sh.current_shards(d), upto))) == before
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_commit_tolerates_already_removed_superseded_shard(tmp_path, empty):
+    dataset = tmp_path / "data"
+    staged = tmp_path / "first.parquet"
+    frame().write_parquet(staged)
+    old = sh.commit(staged, dataset, part={"season": 1998})
+    with sh.snapshot():
+        assert sh.current_shards(dataset)["season=1998"].path == old
+        old.unlink()  # The active snapshot still refers to this superseded file.
+        if empty:
+            final = sh.commit_empty(dataset, part={"season": 1998})
+        else:
+            staged = tmp_path / "second.parquet"
+            frame(extra=1).write_parquet(staged)
+            final = sh.commit(staged, dataset, part={"season": 1998})
+        assert final.exists()
+        assert sh.current_shards(dataset)["season=1998"].path == final
+    assert len(list(dataset.iterdir())) == 1
+
+
+def test_commit_does_not_ignore_superseded_shard_permission_errors(tmp_path, monkeypatch):
+    from pathlib import Path
+    dataset = tmp_path / "data"
+    staged = tmp_path / "first.parquet"
+    frame().write_parquet(staged)
+    old = sh.commit(staged, dataset, part={"season": 1998})
+    original = Path.unlink
+    def unlink(path, *args, **kwargs):
+        if path == old:
+            raise PermissionError("cleanup denied")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    staged = tmp_path / "second.parquet"
+    frame(extra=1).write_parquet(staged)
+    with pytest.raises(PermissionError, match="cleanup denied"):
+        sh.commit(staged, dataset, part={"season": 1998})
