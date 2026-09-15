@@ -65,7 +65,7 @@ class Read:
 
     as_paths: bool = False
 
-    preserve: tuple[str, ...] = ()
+    preserve: tuple[str, ...] | None = None
 
     @property
     def is_own(self) -> bool:
@@ -93,8 +93,13 @@ class Read:
             if key not in part_keys:
                 raise DeclError(f"{self.dataset}: range key {key!r} is not one of "
                                 f"this stage's partitions {part_keys}.")
+            if self.preserve is not None:
+                invalid = set(self.preserve) - (set(part_keys) - {key})
+                if invalid:
+                    raise DeclError(f"{self.dataset}: invalid preserved partition keys {sorted(invalid)}.")
             return Read(self.dataset, self.kind, self.body, self.optional, key, self.why,
-                        self.as_paths, tuple(k for k in part_keys if k != key))
+                        self.as_paths, (tuple(k for k in part_keys if k != key)
+                                        if self.preserve is None else self.preserve))
         if self.key is not None:
             return self
         return Read(self.dataset, self.kind, self.body, self.optional, part_keys, self.why,
@@ -125,7 +130,7 @@ class Read:
         if isinstance(self.key, tuple):
             return tuple((k, (self.kind, self.body)) for k in self.key)
         return ((self.key, (self.kind, self.body)),) + tuple(
-            (k, ("in", (PART,))) for k in self.preserve)
+            (k, ("in", (PART,))) for k in (self.preserve or ()))
 
     def where(self) -> tuple:
 
@@ -160,12 +165,13 @@ def same_part(dataset, *, why: str, optional: bool = False,
 
 
 def before_part(dataset, *, why: str, key: str | None = None, inclusive: bool = False,
-                optional: bool = False, as_paths: bool = False) -> Read:
+                optional: bool = False, as_paths: bool = False,
+                preserve: tuple[str, ...] | None = None) -> Read:
 
 
     d = _target(dataset)
     return Read(d, "range", (("le" if inclusive else "lt", PART),), optional, key,
-                _why(why, d), as_paths)
+                _why(why, d), as_paths, preserve)
 
 
 def after_part(dataset, *, why: str, key: str | None = None, inclusive: bool = False,

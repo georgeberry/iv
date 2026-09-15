@@ -83,6 +83,11 @@ Stage parameters declare reads:
 | `iv.parts(data, why=..., season=[...])` | Explicit partition values |
 | `iv.own_last_copy(why=...)` | The stage's previous output for append/update workflows |
 
+For a `(season, cutoff)` stage reading season-only history, use
+`iv.before_part(data, key="season", preserve=(), inclusive=True, why=...)`.
+By default range selectors preserve the other dimensions of the consumer;
+`preserve=()` explicitly selects only the range dimension.
+
 Use `optional=True` when no matching shard is valid and `as_paths=True` when the function
 needs paths instead of loaded values. `iv.PART` is available inside range bounds.
 

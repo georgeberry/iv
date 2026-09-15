@@ -1703,3 +1703,18 @@ def test_invoke_resolves_a_fixed_partition_the_way_a_call_does(iv):
         "iv run passes no part for a fixed-partition stage, so _invoke must resolve it "
         "or the shard lands unpartitioned and load() cannot find it")
     assert snap.load() is not None
+
+
+def test_cutoff_partition_reads_season_only_history(iv):
+    @iv.data(dataset="source/", part="season", why="season inputs")
+    def source(season):
+        return pl.DataFrame({"season": [season], "value": [1]})
+    source("2024"); source("2025"); source("2026")
+
+    @iv.data(dataset="design/", part=("season", "cutoff"), why="dated design")
+    def design(season, cutoff, history=iv.before_part(
+            source, key="season", preserve=(), inclusive=True, why="only season matters upstream")):
+        return history
+    result = design(season="2025", cutoff="2025-11-21")
+    assert result["season"].to_list() == ["2024", "2025"]
+    assert design.is_current(season="2025", cutoff="2025-11-21")
