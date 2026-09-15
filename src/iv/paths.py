@@ -63,6 +63,20 @@ def _remote_files(remote) -> list[tuple[str, object]]:
     )
 
 
+def _unread_append_outputs(iv) -> tuple[str, ...]:
+    """Skip only append histories whose files no declared stage needs to read."""
+    assets = list(getattr(iv, '_assets', {}).values())
+    readers = {read.dataset for asset in assets for read in asset.reads}
+    other_outputs = {out.dataset for asset in assets if not asset.append
+                     for out in asset.outputs.values()}
+    def overlaps(left, right):
+        return left.startswith(right) or right.startswith(left)
+    return tuple(sorted({out.dataset for asset in assets if asset.append
+                         for out in asset.outputs.values()
+                         if not any(overlaps(out.dataset, dataset)
+                                    for dataset in readers | other_outputs)}))
+
+
 def _download_workers(count: int) -> int:
     raw = os.environ.get("IV_DOWNLOAD_WORKERS", "64")
     try:
@@ -87,7 +101,7 @@ def _gcs_transfer(remote):
     return transfer_manager, bucket, (prefix + "/" if prefix else "")
 
 
-def _download(remote, local: Path, report=None) -> set[str]:
+def _download(remote, local: Path, report=None, *, exclude=()) -> set[str]:
     local.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     _say(report, f"remote snapshot · listing {remote}")
@@ -101,6 +115,11 @@ def _download(remote, local: Path, report=None) -> set[str]:
         if not missing:
             raise StateError(f"could not snapshot remote data tree {remote}: {e}") from e
         files = []
+    if exclude:
+        kept = [(rel, source) for rel, source in files if not rel.startswith(exclude)]
+        _say(report, f"remote snapshot · skipped {len(files) - len(kept)} file(s) "
+                     "in unread append-only outputs")
+        files = kept
     workers = _download_workers(len(files))
     gcs = _gcs_transfer(remote)
     engine = "GCS transfer manager" if gcs is not None else "parallel downloader"
@@ -219,7 +238,11 @@ def _publish(remote, local: Path, before: set[str], result: RemoteSnapshot,
 
 @contextmanager
 def local_tree_snapshot(iv, report=None):
-    """Run against local copies of remote roots and publish output on success."""
+    """Run against local copies of remote roots and publish output on success.
+
+    Omitted append history is absent from the publication baseline as well as
+    the local tree, so its absence cannot be interpreted as a remote deletion.
+    """
     remote_tree = iv.tree if is_remote(iv.tree) else None
     remote_out = iv.out_tree if is_remote(iv.out_tree) else None
     result = RemoteSnapshot()
@@ -228,12 +251,13 @@ def local_tree_snapshot(iv, report=None):
         return
 
     original_tree, original_out = iv.tree, iv.out_tree
+    excluded = _unread_append_outputs(iv)
     with tempfile.TemporaryDirectory(prefix="iv-remote-") as tmp:
         root = Path(tmp)
         _say(report, f"remote snapshot · local directory {root}")
         local_tree = root / "tree"
         same_root = remote_tree is not None and str(original_tree) == str(original_out)
-        before_tree = (_download(remote_tree, local_tree, report)
+        before_tree = (_download(remote_tree, local_tree, report, exclude=excluded)
                        if remote_tree is not None else set())
         if remote_tree is not None:
             result.downloaded += 1
@@ -244,7 +268,7 @@ def local_tree_snapshot(iv, report=None):
             local_out, before_out = local_tree, before_tree
         elif remote_out is not None:
             local_out = root / "out"
-            before_out = _download(remote_out, local_out, report)
+            before_out = _download(remote_out, local_out, report, exclude=excluded)
             result.downloaded += 1
             result.files_downloaded += len(before_out)
             result.bytes_downloaded += sum((local_out / rel).stat().st_size

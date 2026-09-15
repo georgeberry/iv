@@ -387,3 +387,94 @@ def test_an_interrupted_refetch_preserves_the_existing_directory(tmp_path, monke
         paths.fetch_tree(remote, destination, replace=True)
     assert existing.read_bytes() == b"old"
     assert list(tmp_path.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("checkpoint_failure", [False, True])
+def test_unread_append_history_is_not_downloaded_or_removed(tmp_path, checkpoint_failure):
+    remote = Remote({"dq/old.json": b"history", "raw/input.parquet": b"input",
+                     "dq_other/keep.json": b"unrelated"})
+    iv = Pipeline(tree=remote, project=tmp_path, stage_dir=tmp_path / "stage")
+
+    @iv.data(dataset="dq/", part="audit", append=True, ext=".json", why="audit history")
+    def audit(audit, out):
+        out.write_text('new')
+
+    messages = []
+    error = pytest.raises(RuntimeError, match="later failure") if checkpoint_failure else nullcontext()
+    with error:
+        with local_tree_snapshot(iv, report=messages.append) as result:
+            assert not (iv.tree / "dq/old.json").exists()
+            target = iv.out_tree / "dq/new.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"new")
+            iv._remote_checkpoint()
+            if checkpoint_failure:
+                (iv.out_tree / "dq/partial.json").write_bytes(b"partial")
+                raise RuntimeError("later failure")
+    assert remote.files == {"dq/old.json": b"history", "dq/new.json": b"new",
+                            "raw/input.parquet": b"input", "dq_other/keep.json": b"unrelated"}
+    assert result.files_downloaded == 2 and result.removed == 0
+    assert ("download", "dq/old.json") not in remote.events
+    assert any("skipped 1 file(s)" in line for line in messages)
+
+
+@pytest.mark.parametrize("reader_dataset", ["quality/audits/", "quality/", "quality/audits/detail/"])
+def test_append_history_with_declared_reader_is_downloaded(tmp_path, reader_dataset):
+    remote = Remote({"quality/audits/old.json": b"history"})
+    iv = Pipeline(tree=remote, project=tmp_path, stage_dir=tmp_path / "stage")
+
+    @iv.data(dataset="quality/audits/", part="audit", append=True, ext=".json", why="audit history")
+    def audit(audit, out):
+        out.write_text('new')
+
+    target = audit if reader_dataset == "quality/audits/" else iv.source(reader_dataset, why="declared history")
+    @iv.data(dataset="report/", on_demand=True, why="read audit history")
+    def report(history=iv.all_of(target, as_paths=True, optional=True, why="history")):
+        pass
+
+    with local_tree_snapshot(iv) as result:
+        assert (iv.tree / "quality/audits/old.json").read_bytes() == b"history"
+    assert result.files_downloaded == 1
+
+
+def test_fetch_retains_unread_append_history(tmp_path):
+    from iv.paths import fetch_tree
+    remote = Remote({"dq/old.json": b"history"})
+    target = tmp_path / "download"
+    assert fetch_tree(remote, target) == {"dq/old.json"}
+    assert (target / "dq/old.json").read_bytes() == b"history"
+
+
+def test_cli_appends_new_audit_without_downloading_old_history(tmp_path, monkeypatch):
+    remote = Remote({"dq/old.json": b"history"})
+    iv = Pipeline(tree=remote, project=tmp_path, stage_dir=tmp_path / "stage")
+
+    @iv.data(dataset="dq/", part="audit", append=True, ext=".json", why="audit history")
+    def audit(audit, out):
+        out.write_text('{"ok":true}')
+
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["run"])
+    assert result.exit_code == 0, result.output
+    assert remote.files["dq/old.json"] == b"history"
+    assert len(remote.files) == 2
+    assert not any(event[0] in {"download", "unlink"} for event in remote.events)
+    assert len([event for event in remote.events if event[0] == "upload"]) == 1
+
+
+def test_remote_output_only_preserves_unread_append_history(tmp_path):
+    remote = Remote({"dq/old.json": b"history"})
+    iv = Pipeline(tree=tmp_path / "inputs", out_tree=remote, project=tmp_path,
+                  stage_dir=tmp_path / "stage")
+
+    @iv.data(dataset="dq/", part="audit", append=True, ext=".json", why="audit history")
+    def audit(audit, out):
+        out.write_text('new')
+
+    with local_tree_snapshot(iv) as result:
+        target = iv.out_tree / "dq/new.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"new")
+    assert remote.files == {"dq/old.json": b"history", "dq/new.json": b"new"}
+    assert result.files_downloaded == 0 and result.removed == 0

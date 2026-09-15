@@ -209,3 +209,11 @@ uv run python example.py
 ```
 
 MIT licensed.
+
+
+Remote `iv run` snapshots omit historical files for append-only output datasets
+with no declared readers. New audit outputs are still published; omitted remote
+history is preserved, including when completed stages are published after a later
+failure. Append-only datasets read by any declared stage (including on-demand
+stages) are retained. `iv fetch` continues to download the complete tree. Snapshot
+logs report the number of skipped files; the remote listing still covers the tree.
