@@ -101,7 +101,7 @@ def _gcs_transfer(remote):
     return transfer_manager, bucket, (prefix + "/" if prefix else "")
 
 
-def _download(remote, local: Path, report=None, *, exclude=()) -> set[str]:
+def _download(remote, local: Path, report=None, *, exclude=(), include=None) -> set[str]:
     local.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     _say(report, f"remote snapshot · listing {remote}")
@@ -115,10 +115,14 @@ def _download(remote, local: Path, report=None, *, exclude=()) -> set[str]:
         if not missing:
             raise StateError(f"could not snapshot remote data tree {remote}: {e}") from e
         files = []
+    if include is not None:
+        kept = [(rel, source) for rel, source in files if rel.startswith(tuple(include))]
+        _say(report, f"remote snapshot · selected {len(kept)}/{len(files)} file(s) from run dependencies")
+        files = kept
     if exclude:
         kept = [(rel, source) for rel, source in files if not rel.startswith(exclude)]
         _say(report, f"remote snapshot · skipped {len(files) - len(kept)} file(s) "
-                     "in unread append-only outputs")
+                     "in excluded or unread append-only outputs")
         files = kept
     workers = _download_workers(len(files))
     gcs = _gcs_transfer(remote)
@@ -136,10 +140,15 @@ def _download(remote, local: Path, report=None, *, exclude=()) -> set[str]:
     try:
         if gcs is not None and files:
             transfer_manager, bucket, prefix = gcs
+            from google.cloud.storage.retry import DEFAULT_RETRY
+            # Match uploads: large state shards can exceed the default
+            # 120-second retry budget during a cloud snapshot download.
             transfer_manager.download_many_to_path(
                 bucket, [rel for rel, _ in files], destination_directory=str(local),
                 blob_name_prefix=prefix, worker_type=transfer_manager.THREAD,
-                max_workers=workers, raise_exception=True)
+                max_workers=workers,
+                download_kwargs={"timeout": 600, "retry": DEFAULT_RETRY.with_timeout(600)},
+                raise_exception=True)
             done = len(files)
             total_bytes = sum((local / rel).stat().st_size for rel, _ in files)
             _say(report, f"remote snapshot · downloaded {done}/{len(files)} file(s)")
@@ -158,7 +167,7 @@ def _download(remote, local: Path, report=None, *, exclude=()) -> set[str]:
     return {rel for rel, _ in files}
 
 
-def fetch_tree(remote, destination: Path, report=None, *, replace: bool = False) -> set[str]:
+def fetch_tree(remote, destination: Path, report=None, *, replace: bool = False, exclude=(), include=None) -> set[str]:
     if not is_remote(remote):
         raise ConfigError(f"iv fetch needs a remote pipeline tree, got {remote}.")
     target = destination.expanduser().resolve()
@@ -173,7 +182,7 @@ def fetch_tree(remote, destination: Path, report=None, *, replace: bool = False)
     with tempfile.TemporaryDirectory(prefix=f".{target.name}.iv-fetch-",
                                      dir=target.parent) as tmp:
         staged = Path(tmp) / "tree"
-        files = _download(remote, staged, report)
+        files = _download(remote, staged, report, exclude=exclude, include=include)
         previous = Path(tmp) / "previous"
         if target.exists():
             _say(report, f"remote fetch · replacing existing directory {target}")
@@ -189,8 +198,10 @@ def fetch_tree(remote, destination: Path, report=None, *, replace: bool = False)
 
 
 def _publish(remote, local: Path, before: set[str], result: RemoteSnapshot,
-             report=None, after: set[str] | None = None) -> None:
+             report=None, after: set[str] | None = None, *, exclude=()) -> None:
     after = _manifest(local) if after is None else after
+    before = {rel for rel in before if not rel.startswith(exclude)}
+    after = {rel for rel in after if not rel.startswith(exclude)}
     additions = sorted(after - before)
     removals = sorted(before - after)
     _say(report, f"remote publish · {len(additions)} upload(s), {len(removals)} removal(s)")
@@ -200,9 +211,13 @@ def _publish(remote, local: Path, before: set[str], result: RemoteSnapshot,
         if gcs is not None and additions:
             transfer_manager, bucket, prefix = gcs
             workers = _download_workers(len(additions))
+            from google.cloud.storage.retry import DEFAULT_RETRY
+            # Large state shards can exceed the SDK's 120-second retry budget
+            # on a home connection. Allow ten minutes per request and retries.
             transfer_manager.upload_many_from_filenames(
                 bucket, additions, source_directory=str(local), blob_name_prefix=prefix,
                 worker_type=transfer_manager.THREAD, max_workers=workers,
+                upload_kwargs={"timeout": 600, "retry": DEFAULT_RETRY.with_timeout(600)},
                 raise_exception=True)
             uploaded = [remote / rel for rel in additions]
             result.uploaded = len(uploaded)
@@ -237,7 +252,7 @@ def _publish(remote, local: Path, before: set[str], result: RemoteSnapshot,
 
 
 @contextmanager
-def local_tree_snapshot(iv, report=None):
+def local_tree_snapshot(iv, report=None, *, include=None):
     """Run against local copies of remote roots and publish output on success.
 
     Omitted append history is absent from the publication baseline as well as
@@ -251,13 +266,14 @@ def local_tree_snapshot(iv, report=None):
         return
 
     original_tree, original_out = iv.tree, iv.out_tree
-    excluded = _unread_append_outputs(iv)
+    transfer_excluded = getattr(iv, "remote_exclude", ())
+    excluded = _unread_append_outputs(iv) + transfer_excluded
     with tempfile.TemporaryDirectory(prefix="iv-remote-") as tmp:
         root = Path(tmp)
         _say(report, f"remote snapshot · local directory {root}")
         local_tree = root / "tree"
         same_root = remote_tree is not None and str(original_tree) == str(original_out)
-        before_tree = (_download(remote_tree, local_tree, report, exclude=excluded)
+        before_tree = (_download(remote_tree, local_tree, report, exclude=excluded, include=include)
                        if remote_tree is not None else set())
         if remote_tree is not None:
             result.downloaded += 1
@@ -268,7 +284,7 @@ def local_tree_snapshot(iv, report=None):
             local_out, before_out = local_tree, before_tree
         elif remote_out is not None:
             local_out = root / "out"
-            before_out = _download(remote_out, local_out, report, exclude=excluded)
+            before_out = _download(remote_out, local_out, report, exclude=excluded, include=include)
             result.downloaded += 1
             result.files_downloaded += len(before_out)
             result.bytes_downloaded += sum((local_out / rel).stat().st_size
@@ -294,6 +310,8 @@ def local_tree_snapshot(iv, report=None):
                 except OSError:
                     shutil.copy2(source, target)
 
+        previous_excluded = getattr(iv, "_remote_excluded", ())
+        iv._remote_excluded = transfer_excluded
         iv._remote_checkpoint = save_checkpoint
         try:
             yield result
@@ -303,13 +321,14 @@ def local_tree_snapshot(iv, report=None):
                 _say(report, "remote publish · preserving completed stages after failure")
                 with iv.publication():
                     _publish(remote_out, checkpoint_dir, before_out, result, report,
-                             after=checkpoint)
+                             after=checkpoint, exclude=transfer_excluded)
             raise
         else:
             if remote_out is not None:
                 with iv.publication():
-                    _publish(remote_out, local_out, before_out, result, report)
+                    _publish(remote_out, local_out, before_out, result, report, exclude=transfer_excluded)
         finally:
+            iv._remote_excluded = previous_excluded
             if previous_checkpoint is None:
                 del iv._remote_checkpoint
             else:

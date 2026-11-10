@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor
 
+import polars as pl
 import pytest
 from typer.testing import CliRunner
 
@@ -173,10 +174,14 @@ def test_gcs_uses_the_supported_transfer_manager_for_small_file_batch(monkeypatc
         pass
 
     assert result.files_downloaded == 2
+    download_kwargs = calls[0][2]["download_kwargs"]
+    assert download_kwargs["timeout"] == 600
+    assert download_kwargs["retry"].timeout == 600
     assert calls == [("bucket", ["raw/a.parquet", "raw/b.parquet"], {
         "destination_directory": str(calls[0][2]["destination_directory"]),
         "blob_name_prefix": "archive/", "worker_type": "thread",
         "max_workers": 2, "raise_exception": True,
+        "download_kwargs": download_kwargs,
     })]
 
 
@@ -312,6 +317,42 @@ def test_iv_run_enters_the_local_snapshot_before_planning(monkeypatch):
     assert "remote snapshot · local cleanup complete" in result.output
 
 
+def test_determinism_snapshots_remote_inputs_without_publishing(tmp_path, monkeypatch):
+    seed = Pipeline(
+        tree=tmp_path / "seed", project=tmp_path, stage_dir=tmp_path / "seed-stage"
+    )
+    source = seed.source("raw/feed/", why="seed the remote fixture")
+    with seed.writes(source.dataset, why="seed the remote fixture") as out:
+        pl.DataFrame({"value": [42]}).write_parquet(out)
+    shard = seed.reads(source.dataset, why="copy the declared fixture")[0]
+    remote = Remote({f"raw/feed/{shard.name}": shard.read_bytes()})
+    iv = Pipeline(
+        tree=remote,
+        project=tmp_path,
+        stage_dir=tmp_path / "stage",
+    )
+    feed = iv.source("raw/feed/", why="remote input")
+
+    @iv.data(dataset="processed/out/", why="stable remote-input transform")
+    def model(data=iv.all_of(feed, why="declared remote input")):
+        return data
+
+    import iv.cli as cli
+
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    result = CliRunner().invoke(app, ["determinism", "--only", "model"])
+
+    assert result.exit_code == 0, result.output
+    assert "deterministic" in result.output
+    assert [event for event in remote.events if event[0] == "download"] == [
+        ("download", f"raw/feed/{shard.name}")
+    ]
+    assert not any(
+        event[0] in {"upload", "unlink"} for event in remote.events
+    ), "a determinism audit must never publish its trial outputs"
+    assert set(remote.files) == {f"raw/feed/{shard.name}"}
+
+
 def test_iv_fetch_downloads_remote_state_to_a_new_local_directory(tmp_path,
                                                                   monkeypatch):
     remote = Remote({"raw/a.parquet": b"a", "derived/b.json": b"b"})
@@ -356,7 +397,7 @@ def test_iv_fetch_cleans_up_an_interrupted_staging_directory(tmp_path, monkeypat
     destination = tmp_path / "state"
     import iv.paths as paths
 
-    def interrupted(source, staged, report=None):
+    def interrupted(source, staged, report=None, *, exclude=(), include=None):
         staged.mkdir(parents=True)
         (staged / "partial").write_text("partial")
         raise StateError("download interrupted")
@@ -377,7 +418,7 @@ def test_an_interrupted_refetch_preserves_the_existing_directory(tmp_path, monke
     existing.write_bytes(b"old")
     import iv.paths as paths
 
-    def interrupted(source, staged, report=None):
+    def interrupted(source, staged, report=None, *, exclude=(), include=None):
         staged.mkdir(parents=True)
         (staged / "partial").write_text("partial")
         raise StateError("download interrupted")
@@ -478,3 +519,78 @@ def test_remote_output_only_preserves_unread_append_history(tmp_path):
         target.write_bytes(b"new")
     assert remote.files == {"dq/old.json": b"history", "dq/new.json": b"new"}
     assert result.files_downloaded == 0 and result.removed == 0
+
+
+def test_gcs_upload_allows_ten_minutes_for_requests_and_retries(tmp_path, monkeypatch):
+    import iv.paths as paths
+    remote = Remote({"old.parquet": b"old"})
+    (tmp_path / "new.parquet").write_bytes(b"new")
+    calls = []
+
+    class TransferManager:
+        THREAD = "thread"
+
+        @staticmethod
+        def upload_many_from_filenames(bucket, names, **kw):
+            calls.append((bucket, names, kw))
+            assert "old.parquet" in remote.files
+
+    monkeypatch.setattr(paths, "_gcs_transfer",
+                        lambda root: (TransferManager, "bucket", "archive/"))
+    result = paths.RemoteSnapshot()
+    paths._publish(remote, tmp_path, {"old.parquet"}, result)
+    assert calls[0][1] == ["new.parquet"]
+    kwargs = calls[0][2]
+    assert kwargs["upload_kwargs"]["timeout"] == 600
+    assert kwargs["upload_kwargs"]["retry"].timeout == 600
+    assert kwargs["raise_exception"] is True
+    assert result.uploaded == 1 and result.removed == 1
+
+
+def test_remote_excluded_prefix_stays_local_and_is_not_deleted():
+    remote = Remote({'model/keep.parquet': b'prod', 'experiments/old.parquet': b'old',
+                     'experiments_other/keep.parquet': b'unrelated'})
+    iv = pipeline(remote)
+    iv.remote_exclude = ('experiments/',)
+    with local_tree_snapshot(iv):
+        assert not (iv.tree / 'experiments').exists()
+        (iv.out_tree / 'experiments').mkdir()
+        (iv.out_tree / 'experiments/new.parquet').write_bytes(b'local')
+        (iv.out_tree / 'model/new.parquet').write_bytes(b'new')
+    assert remote.files == {'model/keep.parquet': b'prod', 'model/new.parquet': b'new',
+                            'experiments/old.parquet': b'old',
+                            'experiments_other/keep.parquet': b'unrelated'}
+
+
+def test_excluded_outputs_cannot_run_in_remote_snapshot(tmp_path):
+    from iv.errors import DeclError
+    remote = Remote({})
+    iv = Pipeline(tree=tmp_path, project=tmp_path, remote_exclude=('experiments/',))
+    @iv.data(dataset='experiments/candidate/', why='local experiment')
+    def candidate():
+        raise AssertionError('must reject before doing work')
+    iv.tree = iv.out_tree = remote
+    with local_tree_snapshot(iv):
+        with pytest.raises(DeclError, match='excluded from remote transfer'):
+            candidate.build(None)
+
+
+def test_fetch_excludes_local_only_prefix(tmp_path):
+    from iv.paths import fetch_tree
+    remote = Remote({'model/keep.parquet': b'prod', 'experiments/old.parquet': b'old'})
+    destination = tmp_path/'download'
+    assert fetch_tree(remote, destination, exclude=('experiments/',)) == {'model/keep.parquet'}
+    assert not (destination/'experiments').exists()
+
+
+def test_failed_run_checkpoint_excludes_local_only_files():
+    remote = Remote({'model/keep.parquet': b'prod'})
+    iv = pipeline(remote)
+    iv.remote_exclude = ('experiments/',)
+    with pytest.raises(RuntimeError):
+        with local_tree_snapshot(iv):
+            (iv.out_tree/'experiments').mkdir()
+            (iv.out_tree/'experiments/candidate.parquet').write_bytes(b'local')
+            iv._remote_checkpoint()
+            raise RuntimeError('later stage failed')
+    assert remote.files == {'model/keep.parquet': b'prod'}

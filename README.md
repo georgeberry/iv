@@ -220,5 +220,25 @@ Remote `iv run` snapshots omit historical files for append-only output datasets
 with no declared readers. New audit outputs are still published; omitted remote
 history is preserved, including when completed stages are published after a later
 failure. Append-only datasets read by any declared stage (including on-demand
-stages) are retained. `iv fetch` continues to download the complete tree. Snapshot
+stages) are retained. `iv fetch` downloads the complete tree except explicitly excluded prefixes. Snapshot
 logs report the number of skipped files; the remote listing still covers the tree.
+
+
+### Local-only dataset prefixes
+
+Set `Pipeline(..., remote_exclude=("experiments/",))` to omit these relative dataset prefixes from remote snapshots, `iv fetch`, and uploads (including failure checkpoints). Matching is directory-boundary aware; `experiments_other/` is unaffected. Excluded remote objects are not automatically deleted. Local pipeline runs can read and write excluded datasets normally. Attempting to build an excluded dataset during a remote run raises an error; use a local tree or `--dev PATH`. This setting does not change `on_demand` scheduling semantics.
+
+### Scoped remote runs
+
+`iv run --from STAGE` selects the stage and its descendants before transferring
+remote data. IV downloads their declared input datasets (including boundary
+parents) and existing output datasets needed for cache checks and safe publication.
+It does not download the payloads of more distant ancestors or unrelated branches.
+Upstream freshness is checked against remote shard metadata before creating the
+partial local snapshot; stale ancestors still cause an error unless `--force` is
+explicitly passed. Omitted remote files are never treated as deletions.
+
+The same dataset scoping applies to `--only`, `--up-to`, and `--up-to-excluding`,
+including development runs. This scopes whole datasets, not individual partitions;
+`--part` still filters execution. Plain `iv run` and `iv fetch` retain full-tree
+behavior (subject to configured exclusions).

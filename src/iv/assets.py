@@ -444,6 +444,9 @@ class Asset:
         return self.load(part) if self.single and not self.split else True
 
     def build(self, part: dict | None) -> dict | None:
+        excluded = getattr(self.pipeline, "_remote_excluded", ())
+        if any(dataset.startswith(excluded) for dataset in self.datasets):
+            raise DeclError(f"{self.primary}: excluded from remote transfer; run against a local tree or use --dev.")
 
         if self.append:
             if part is not None:

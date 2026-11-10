@@ -1718,3 +1718,30 @@ def test_cutoff_partition_reads_season_only_history(iv):
     result = design(season="2025", cutoff="2025-11-21")
     assert result["season"].to_list() == ["2024", "2025"]
     assert design.is_current(season="2025", cutoff="2025-11-21")
+
+
+@pytest.mark.parametrize("remaining", [["2008"], []])
+def test_status_ignores_retired_partitions_without_deleting_them(iv, monkeypatch, remaining):
+    universe = ["2006", "2007", "2008"]
+
+    @iv.data(dataset="processed/burnin/", why="only post-burn-in fits remain",
+             part="season", universe=lambda: universe, once=True)
+    def fits(season):
+        return frame(extra=int(season))
+
+    for season in universe:
+        fits(season=season)
+    universe[:] = remaining
+    import iv.cli as cli
+    monkeypatch.setattr(cli, "_load", lambda: iv)
+    g = _graph.build(iv)
+    state = cli._staleness(iv, g)
+    assert set(state["processed/burnin/"]) == {f"season={s}" for s in remaining}
+    result = CliRunner().invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "2006" not in result.output and "2007" not in result.output
+    explanation = CliRunner().invoke(app, ["why", "processed/burnin/"])
+    assert explanation.exit_code == 0, explanation.output
+    assert explanation.output.count("retired —") == 3 - len(remaining)
+    assert sorted(_sh.current_shards(iv.resolve_out("processed/burnin/"))) == [
+        "season=2006", "season=2007", "season=2008"]

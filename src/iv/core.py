@@ -234,6 +234,7 @@ class Pipeline:
     def __init__(self, *,
                  tree,
                  out_tree=None,
+                 remote_exclude: Sequence[str] = (),
                  code: Sequence[str] = ("src", "scripts"),
                  project=None,
                  trace=None,
@@ -246,6 +247,7 @@ class Pipeline:
         self.tree = mkpath(tree, self.project)
         self.out_tree = mkpath(out_tree, self.project) if out_tree is not None else self.tree
         self._guard_trees = tuple(_guard_path(path) for path in (self.tree, self.out_tree))
+        self.remote_exclude = tuple(_canon(prefix) for prefix in remote_exclude)
         self.code = tuple(code)
         self.stage_dir = stage_dir
         self.allow_reads = _local_permissions(allow_reads, self.project, "allow_reads")

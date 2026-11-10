@@ -565,7 +565,9 @@ def _staleness(iv, g):
         shards = {}
         stored = set(_sh.current_shards(iv.resolve_out(name)))
         universe = _declared_universe_parts(iv, g, name)
-        parts = sorted(stored | universe) if universe is not None else (sorted(stored) or [""])
+        # Match run's authoritative universe. Retired outputs remain readable
+        # until explicit gc, but cannot be rebuilt and are not stale work.
+        parts = sorted(universe) if universe is not None else (sorted(stored) or [""])
         for p in parts:
             part = _sh.decode_part(p) or None
             shards[p] = iv.why_stale(name, part, inputs=_owner(owners, part))
@@ -752,8 +754,13 @@ def why(dataset: str):
                    for s in g.stages[node].triggers) if node else ()
 
 
+    universe = _declared_universe_parts(iv, g, _canon(dataset))
     with _sh.snapshot():
         for part in sorted(present, key=_sh.sort_key):
+            if universe is not None and part not in universe:
+                typer.echo(f"\n{_canon(dataset)}{part or '(one shard)'}")
+                typer.echo("  retired — outside the writers' declared universe=; not scheduled by run")
+                continue
             sh = present[part]
             reason = iv.why_stale(dataset, _sh.decode_part(part) or None, inputs=inputs)
             typer.echo(f"\n{_canon(dataset)}{part or '(one shard)'}")
@@ -813,6 +820,11 @@ def determinism(
     if sample and part:
         raise IvError("--part is only meaningful with `iv determinism --only STAGE`.")
     iv = _load()
+    with _paths.local_tree_snapshot(iv, report=typer.echo):
+        _determinism_local(iv, only, sample, part)
+
+
+def _determinism_local(iv, only: str | None, sample: bool, part: list[str]) -> None:
     g = _graph.build(iv)
     if only:
         node = _stage_name(g, only)
@@ -878,13 +890,31 @@ def run(
 ):
 
     iv = _load()
-    with _dev_output(iv, dev):
-        with _paths.local_tree_snapshot(iv, report=typer.echo):
-            _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log)
+    g, selected, safe, filters = _run_selection(iv, up_to, up_to_excluding, from_, only, part, force)
+    remote = _paths.is_remote(iv.tree) or _paths.is_remote(iv.out_tree)
+    checked = remote and safe
+    if checked:
+        # Validate against the complete remote namespace before making a partial
+        # local snapshot. Freshness uses shard metadata, not ancestor payloads.
+        with _sh.snapshot():
+            _check_upstream(iv, g, selected, filters, from_ or only)
+    include = tuple(sorted({dataset for node in selected
+                            for dataset in iv._assets[node].datasets}
+                           | {read.dataset for node in selected
+                              for read in iv._assets[node].reads}))
+    if not any((up_to, up_to_excluding, from_, only)):
+        include = None
+    with _dev_output(iv, dev, include=include):
+        with _paths.local_tree_snapshot(iv, report=typer.echo, include=include):
+            if checked:
+                _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log,
+                           upstream_checked=True)
+            else:
+                _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log)
 
 
 @contextmanager
-def _dev_output(iv, dev: Path | None):
+def _dev_output(iv, dev: Path | None, *, include=None):
     if dev is None:
         yield
         return
@@ -901,7 +931,8 @@ def _dev_output(iv, dev: Path | None):
     original_tree, original_out = iv.tree, iv.out_tree
     if remote_tree or remote_out:
         source = iv.tree if remote_tree else iv.out_tree
-        _paths.fetch_tree(source, target, report=typer.echo, replace=True)
+        _paths.fetch_tree(source, target, report=typer.echo, replace=True,
+                          exclude=getattr(iv, "remote_exclude", ()), include=include)
         iv.tree = target
     iv.out_tree = target
     typer.echo(f"development output · {target}")
@@ -911,7 +942,7 @@ def _dev_output(iv, dev: Path | None):
         iv.tree, iv.out_tree = original_tree, original_out
 
 
-def _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log):
+def _run_selection(iv, up_to, up_to_excluding, from_, only, part, force):
 
     choices = [x for x in (up_to, up_to_excluding, from_, only) if x]
     if len(choices) > 1:
@@ -941,22 +972,32 @@ def _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log):
         for node in on_demand:
             selected -= _cone(parents, node, reverse=True)
 
+    return g, selected, safe, filters
+
+
+def _check_upstream(iv, g, selected, filters, target):
+    required = set()
+    parents = g.parent_map()
+    for node in selected:
+        required.update(_cone(parents, node) - selected)
+    stale = []
+    for node in g.order():
+        if node not in required:
+            continue
+        for p in _stale_asset_parts(iv, iv._assets[node], filters):
+            stale.append(f"{node} {p or '(one shard)'}")
+    if stale:
+        raise IvError("refusing to run with stale upstream shard(s): "
+                      + "; ".join(stale) + ". Run `iv run --up-to "
+                      + target + "` first.")
+
+
+def _run_local(iv, up_to, up_to_excluding, from_, only, part, force, log,
+               *, upstream_checked=False):
+    g, selected, safe, filters = _run_selection(iv, up_to, up_to_excluding, from_, only, part, force)
     with _sh.snapshot():
-        if safe:
-            required = set()
-            for node in selected:
-                required.update(_cone(parents, node) - selected)
-            stale = []
-            for node in g.order():
-                if node not in required:
-                    continue
-                asset = iv._assets[node]
-                for p in _stale_asset_parts(iv, asset, filters):
-                    stale.append(f"{node} {p or '(one shard)'}")
-            if stale:
-                raise IvError("refusing to run with stale upstream shard(s): "
-                              + "; ".join(stale) + ". Run `iv run --up-to "
-                              + choices[0] + "` first.")
+        if safe and not upstream_checked:
+            _check_upstream(iv, g, selected, filters, from_ or only)
 
         work = [(node, iv._assets[node], p)
                 for node in g.order() if node in selected
@@ -976,7 +1017,8 @@ def fetch(
         False, "--replace", help="replace an existing directory after download succeeds"),
 ):
     iv = _load()
-    _paths.fetch_tree(iv.tree, destination, report=typer.echo, replace=replace)
+    _paths.fetch_tree(iv.tree, destination, report=typer.echo, replace=replace,
+                      exclude=getattr(iv, "remote_exclude", ()))
 
 
 @app.command()
